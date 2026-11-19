@@ -256,7 +256,7 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
     }
     for (const en of intentEntries) {
       intentLeaves.push({
-        title: `${en.entry_date.slice(5)} ${L('의도·결정', '意図・決定', 'Intent')}`,
+        title: `${en.entry_date ? `${en.entry_date.slice(5)} ` : ''}${L('의도·결정', '意図・決定', 'Intent')}`,
         subtitle: en.content,
       });
     }
@@ -269,7 +269,7 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
     // 2. DIALOGUE / PROGRESS branch
     const dialogueEntries = entries.filter((e) => e.entry_type !== 'INTENT').slice(-5);
     const dialogueLeaves: Array<{ title: string; subtitle?: string; edgeColor: string }> = dialogueEntries.map((en) => ({
-      title: `${en.entry_date.slice(5)} · ${getEntryLabel(en.entry_type, en.speaker_name)}`,
+      title: `${en.entry_date ? `${en.entry_date.slice(5)} · ` : ''}${getEntryLabel(en.entry_type, en.speaker_name)}`,
       subtitle: en.content,
       edgeColor:
         en.entry_type === 'DIALOGUE_ME'

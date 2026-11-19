@@ -109,8 +109,10 @@ export function initDatabase() {
       entry_type TEXT NOT NULL DEFAULT 'INTENT', -- 'DIALOGUE_ME' | 'DIALOGUE_THEM' | 'INTENT' | 'PROGRESS'
       speaker_name TEXT,
       content TEXT NOT NULL,
-      entry_date TEXT NOT NULL,
+      entry_date TEXT NOT NULL DEFAULT '',
       entry_time TEXT,
+      due_date TEXT,
+      due_time TEXT,
       completed_target_type TEXT, -- 'ENTRY' | 'IDEA' | NULL
       completed_target_id INTEGER,
       author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -163,6 +165,11 @@ export function initDatabase() {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS journal_push_sent_log (
+      dedup_key TEXT PRIMARY KEY,
+      sent_at TEXT NOT NULL
+    );
   `);
 
   const userCols = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
@@ -191,6 +198,15 @@ export function initDatabase() {
   }
   if (!projColNames.has('intent_modified')) {
     db.exec('ALTER TABLE journal_projects ADD COLUMN intent_modified INTEGER NOT NULL DEFAULT 0;');
+  }
+
+  const entryCols = db.prepare("PRAGMA table_info(journal_entries)").all() as { name: string }[];
+  const entryColNames = new Set(entryCols.map((c) => c.name));
+  if (!entryColNames.has('due_date')) {
+    db.exec('ALTER TABLE journal_entries ADD COLUMN due_date TEXT;');
+  }
+  if (!entryColNames.has('due_time')) {
+    db.exec('ALTER TABLE journal_entries ADD COLUMN due_time TEXT;');
   }
 }
 

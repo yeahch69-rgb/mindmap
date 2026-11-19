@@ -248,13 +248,22 @@ function resolveViewerTurnPerspective(
   p: any,
   viewerId: number,
   members: Array<{ user_id: number; name: string }>
-): { turn_state: string; resolved_partner_name: string } {
+): { turn_state: string; resolved_partner_name: string; active_turn_user_name: string } {
   const hasAppMembers = p.mode === 'COLLAB' && members.length > 0;
   let effectiveTurn = p.turn_state;
+  let activeTurnUserName = '';
 
   if (hasAppMembers && (p.turn_state === 'MY_TURN' || p.turn_state === 'THEIR_TURN')) {
     const activeTurnId = p.active_turn_user_id ? Number(p.active_turn_user_id) : Number(p.created_by);
     effectiveTurn = activeTurnId === Number(viewerId) ? 'MY_TURN' : 'THEIR_TURN';
+    if (activeTurnId === Number(p.created_by)) {
+      activeTurnUserName = p.creator_name || '';
+    } else {
+      activeTurnUserName =
+        members.find((m) => Number(m.user_id) === activeTurnId)?.name ||
+        p.active_turn_user_name ||
+        '';
+    }
   }
 
   let resolvedPartner = '';
@@ -273,7 +282,30 @@ function resolveViewerTurnPerspective(
   return {
     turn_state: effectiveTurn,
     resolved_partner_name: resolvedPartner,
+    active_turn_user_name: activeTurnUserName,
   };
+}
+
+function resolveTargetTurnUserId(
+  existing: any,
+  members: Array<{ user_id: number; name: string }>,
+  actorUserId: number,
+  nextTurnState: string,
+  rawTargetTurnUserId: unknown
+): number | null {
+  if (nextTurnState === 'MY_TURN') return actorUserId;
+  if (nextTurnState === 'THEIR_TURN') {
+    const allowedOtherIds = Array.from(
+      new Set([Number(existing.created_by), ...members.map((m) => Number(m.user_id))])
+    ).filter((id) => id > 0 && id !== actorUserId);
+
+    const requested = Number(rawTargetTurnUserId);
+    if (Number.isInteger(requested) && requested > 0 && allowedOtherIds.includes(requested)) {
+      return requested;
+    }
+    return allowedOtherIds[0] ?? null;
+  }
+  return existing.active_turn_user_id ? Number(existing.active_turn_user_id) : null;
 }
 
 function mapEntryForViewer(en: any, viewerId: number) {
@@ -370,7 +402,7 @@ router.get('/overview', authenticateToken, (req: Request, res: Response) => {
     }
 
     const allEntryRows = db.prepare(`
-      SELECT e.id, e.project_id, e.entry_type, e.speaker_name, e.content, e.entry_date, e.entry_time, e.completed_target_type, e.completed_target_id, e.author_id, u.name as author_name
+      SELECT e.id, e.project_id, e.entry_type, e.speaker_name, e.content, e.entry_date, e.entry_time, e.due_date, e.due_time, e.completed_target_type, e.completed_target_id, e.author_id, u.name as author_name
       FROM journal_entries e
       INNER JOIN journal_projects p ON p.id = e.project_id
       LEFT JOIN users u ON e.author_id = u.id
@@ -435,7 +467,11 @@ router.get('/overview', authenticateToken, (req: Request, res: Response) => {
 
     const projects = rawProjects.map((p) => {
       const members = membersByProject.get(Number(p.id)) || [];
-      const { turn_state, resolved_partner_name } = resolveViewerTurnPerspective(p, userId, members);
+      const { turn_state, resolved_partner_name, active_turn_user_name } = resolveViewerTurnPerspective(
+        p,
+        userId,
+        members
+      );
       const lastYmd = String(p.last_activity_at || todayJst).slice(0, 10);
       const daysSinceUpdate = diffJstDays(lastYmd, todayJst);
       const threshold = Math.max(1, Number(p.stale_threshold_days) || 7);
@@ -455,6 +491,7 @@ router.get('/overview', authenticateToken, (req: Request, res: Response) => {
         is_missing_next_action: isActive && !hasNextAction,
         is_overdue_next_action: isOverdueNextAction,
         resolved_partner_name,
+        active_turn_user_name,
         members,
         participants: parseParticipants(p.participants_json),
         recent_activity: recentMap.get(p.id) || {},
@@ -595,7 +632,11 @@ router.get('/projects/:id', authenticateToken, (req: Request, res: Response) => 
     }
 
     const members = getProjectMembers(projectId);
-    const { turn_state, resolved_partner_name } = resolveViewerTurnPerspective(project, userId, members);
+    const { turn_state, resolved_partner_name, active_turn_user_name } = resolveViewerTurnPerspective(
+      project,
+      userId,
+      members
+    );
 
     const rawEntries = db.prepare(`
       SELECT e.*, u.name as author_name
@@ -657,6 +698,7 @@ router.get('/projects/:id', authenticateToken, (req: Request, res: Response) => 
         turn_state,
         is_private: Number(project.is_private),
         resolved_partner_name,
+        active_turn_user_name,
         members,
         participants: parseParticipants(project.participants_json),
         mindmap_layout: formatMindMapLayoutRow(layoutRow),
@@ -724,20 +766,14 @@ router.patch('/projects/:id', authenticateToken, (req: Request, res: Response) =
     const nextTurnState = body.turn_state !== undefined && VALID_TURN_STATES.has(body.turn_state) ? body.turn_state : existing.turn_state;
 
     let nextActiveTurnUserId = existing.active_turn_user_id ? Number(existing.active_turn_user_id) : null;
-    if (body.turn_state !== undefined) {
-      if (nextTurnState === 'MY_TURN') {
-        nextActiveTurnUserId = userId;
-      } else if (nextTurnState === 'THEIR_TURN') {
-        if (members.length > 0) {
-          const otherId =
-            Number(existing.created_by) !== userId
-              ? Number(existing.created_by)
-              : Number(members[0].user_id);
-          nextActiveTurnUserId = otherId;
-        } else {
-          nextActiveTurnUserId = null;
-        }
-      }
+    if (body.turn_state !== undefined || body.target_turn_user_id !== undefined) {
+      nextActiveTurnUserId = resolveTargetTurnUserId(
+        existing,
+        members,
+        userId,
+        nextTurnState,
+        body.target_turn_user_id
+      );
     }
 
     const nextAction = body.next_action !== undefined ? (body.next_action ? String(body.next_action).trim() : null) : existing.next_action;
@@ -794,20 +830,56 @@ router.patch('/projects/:id', authenticateToken, (req: Request, res: Response) =
 
     const updated = db.prepare('SELECT * FROM journal_projects WHERE id = ?').get(projectId) as any;
 
-    if (body.turn_state !== undefined && updated) {
+    if (updated) {
       const actorName = req.user!.name;
-      const bodyText =
-        nextTurnState === 'THEIR_TURN'
-          ? `${actorName}님이 턴을 넘겼습니다.`
-          : nextTurnState === 'DONE'
-          ? `${actorName}님이 프로젝트를 완료 상태로 변경했습니다.`
-          : `${actorName}님이 턴 상태를 업데이트했습니다.`;
-      notifyProjectPeers(
-        { id: projectId, title: nextTitle, mode: nextMode, created_by: Number(existing.created_by) },
-        userId,
-        bodyText,
-        'turn'
-      );
+      const changedLabels: string[] = [];
+      let turnMsg: string | null = null;
+      const prevActiveTurnId = existing.active_turn_user_id ? Number(existing.active_turn_user_id) : null;
+      const turnChanged =
+        nextTurnState !== existing.turn_state ||
+        (nextTurnState === 'THEIR_TURN' && nextActiveTurnUserId !== prevActiveTurnId);
+
+      if (turnChanged) {
+        if (nextTurnState === 'THEIR_TURN') {
+          let targetName = '';
+          if (nextActiveTurnUserId) {
+            const targetRow = db
+              .prepare('SELECT name FROM users WHERE id = ?')
+              .get(nextActiveTurnUserId) as { name?: string } | undefined;
+            targetName = targetRow?.name || '';
+          }
+          turnMsg = targetName
+            ? `${actorName}님이 ${targetName}님에게 턴을 넘겼습니다.`
+            : `${actorName}님이 턴을 넘겼습니다.`;
+        } else if (nextTurnState === 'DONE') {
+          turnMsg = `${actorName}님이 프로젝트를 완료 상태로 변경했습니다.`;
+        } else if (nextTurnState === 'HOLD') {
+          turnMsg = `${actorName}님이 프로젝트를 보류 상태로 변경했습니다.`;
+        } else {
+          turnMsg = `${actorName}님이 턴 상태를 업데이트했습니다.`;
+        }
+      }
+      if (nextTitle !== existing.title) changedLabels.push('제목');
+      if (nextIntent !== existing.intent_summary) changedLabels.push('핵심 의도·메모');
+      if (nextAction !== existing.next_action || nextActionDate !== existing.next_action_date) {
+        changedLabels.push('다음 할 일');
+      }
+      if (JSON.stringify(nextParticipants) !== String(existing.participants_json || '[]')) {
+        changedLabels.push('관계자 목록');
+      }
+
+      if (turnMsg || changedLabels.length > 0) {
+        const bodyText =
+          turnMsg && changedLabels.length > 0
+            ? `${turnMsg} (${changedLabels.join(', ')} 수정)`
+            : turnMsg || `${actorName}님이 ${changedLabels.join(', ')}을(를) 수정했습니다.`;
+        notifyProjectPeers(
+          { id: projectId, title: nextTitle, mode: nextMode, created_by: Number(existing.created_by) },
+          userId,
+          bodyText,
+          'project-update'
+        );
+      }
     }
 
     res.json({
@@ -836,7 +908,23 @@ router.delete('/projects/:id', authenticateToken, (req: Request, res: Response) 
       return;
     }
 
+    const peerIds =
+      existing.mode === 'COLLAB'
+        ? [
+            Number(existing.created_by),
+            ...getProjectMembers(projectId).map((m) => Number(m.user_id)),
+          ].filter((id) => id > 0 && id !== userId)
+        : [];
+
     db.prepare('DELETE FROM journal_projects WHERE id = ?').run(projectId);
+    if (peerIds.length > 0) {
+      void sendPushToUsers(peerIds, {
+        title: `📌 ${existing.title}`,
+        body: `🗑️ ${req.user!.name}님이 프로젝트를 삭제했습니다.`,
+        projectId,
+        tag: `mindmap-${projectId}-deleted`,
+      });
+    }
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: '프로젝트 삭제 실패: ' + err.message });
@@ -922,6 +1010,13 @@ router.post('/projects/:id/members', authenticateToken, (req: Request, res: Resp
       `).run(generateInviteToken(), projectId);
     })();
 
+    notifyProjectPeers(
+      { id: projectId, title: existing.title, mode: 'COLLAB', created_by: Number(existing.created_by) },
+      userId,
+      `👋 ${req.user!.name}님이 ${targetUser.name}님을 프로젝트 멤버로 초대했습니다.`,
+      `member-add-${targetUser.id}`
+    );
+
     res.status(201).json({ members: getProjectMembers(projectId) });
   } catch (err: any) {
     res.status(500).json({ error: '멤버 추가 실패: ' + err.message });
@@ -944,7 +1039,43 @@ router.delete('/projects/:id/members/:memberUserId', authenticateToken, (req: Re
       return;
     }
 
-    db.prepare('DELETE FROM journal_project_members WHERE project_id = ? AND user_id = ?').run(projectId, memberUserId);
+    const targetUser = db
+      .prepare('SELECT id, name FROM users WHERE id = ?')
+      .get(memberUserId) as { id: number; name: string } | undefined;
+
+    const info = db
+      .prepare('DELETE FROM journal_project_members WHERE project_id = ? AND user_id = ?')
+      .run(projectId, memberUserId);
+
+    if (info.changes > 0 && Number(existing.active_turn_user_id) === memberUserId) {
+      db.prepare('UPDATE journal_projects SET active_turn_user_id = ? WHERE id = ?').run(
+        Number(existing.created_by),
+        projectId
+      );
+    }
+
+    if (info.changes > 0 && existing.mode === 'COLLAB') {
+      const targetName = targetUser?.name || '멤버';
+      const bodyText =
+        memberUserId === userId
+          ? `👋 ${req.user!.name}님이 프로젝트에서 나갔습니다.`
+          : `👋 ${req.user!.name}님이 ${targetName}님을 멤버에서 제외했습니다.`;
+      notifyProjectPeers(
+        { id: projectId, title: existing.title, mode: existing.mode, created_by: Number(existing.created_by) },
+        userId,
+        bodyText,
+        `member-rm-${memberUserId}`
+      );
+      if (memberUserId !== userId) {
+        void sendPushToUsers([memberUserId], {
+          title: `📌 ${existing.title}`,
+          body: `👋 ${req.user!.name}님이 프로젝트 멤버에서 제외했습니다.`,
+          projectId,
+          tag: `mindmap-${projectId}-removed`,
+        });
+      }
+    }
+
     res.json({ members: getProjectMembers(projectId) });
   } catch (err: any) {
     res.status(500).json({ error: '멤버 제거 실패: ' + err.message });
@@ -980,11 +1111,13 @@ router.post('/invites/accept', authenticateToken, (req: Request, res: Response) 
       return;
     }
 
+    let joinedNewly = false;
     db.transaction(() => {
-      db.prepare(`
+      const insertInfo = db.prepare(`
         INSERT OR IGNORE INTO journal_project_members (project_id, user_id, role)
         VALUES (?, ?, 'MEMBER')
       `).run(project.id, userId);
+      joinedNewly = insertInfo.changes > 0;
 
       db.prepare(`
         UPDATE journal_projects
@@ -992,6 +1125,15 @@ router.post('/invites/accept', authenticateToken, (req: Request, res: Response) 
         WHERE id = ?
       `).run(project.id);
     })();
+
+    if (joinedNewly) {
+      notifyProjectPeers(
+        { id: Number(project.id), title: project.title, mode: 'COLLAB', created_by: Number(project.created_by) },
+        userId,
+        `👋 ${req.user!.name}님이 초대코드로 참여했습니다.`,
+        `invite-${userId}`
+      );
+    }
 
     res.json({ project_id: project.id, title: project.title, joined: true });
   } catch (err: any) {
@@ -1009,7 +1151,10 @@ router.post('/projects/:id/entries', authenticateToken, (req: Request, res: Resp
     content,
     entry_date,
     entry_time,
+    due_date,
+    due_time,
     next_turn_state,
+    target_turn_user_id,
     next_action,
     completed_target_type,
     completed_target_id,
@@ -1021,8 +1166,15 @@ router.post('/projects/:id/entries', authenticateToken, (req: Request, res: Resp
   }
 
   const finalType = VALID_ENTRY_TYPES.has(entry_type) ? entry_type : 'INTENT';
-  const finalDate = entry_date && /^\d{4}-\d{2}-\d{2}$/.test(String(entry_date)) ? String(entry_date) : getJstDateStr();
-  const finalTime = entry_time && /^\d{2}:\d{2}$/.test(String(entry_time)) ? String(entry_time) : getJstTimeStr();
+  const finalDate =
+    entry_date === undefined
+      ? getJstDateStr()
+      : entry_date && /^\d{4}-\d{2}-\d{2}$/.test(String(entry_date))
+      ? String(entry_date)
+      : '';
+  const finalTime = entry_time && /^\d{2}:\d{2}$/.test(String(entry_time)) ? String(entry_time) : null;
+  const finalDueDate = due_date && /^\d{4}-\d{2}-\d{2}$/.test(String(due_date)) ? String(due_date) : null;
+  const finalDueTime = due_time && /^\d{2}:\d{2}$/.test(String(due_time)) ? String(due_time) : null;
   const nowJst = getJstDateTimeStr();
 
   try {
@@ -1067,8 +1219,8 @@ router.post('/projects/:id/entries', authenticateToken, (req: Request, res: Resp
 
     const tx = db.transaction(() => {
       const info = db.prepare(`
-        INSERT INTO journal_entries (project_id, entry_type, speaker_name, content, entry_date, entry_time, completed_target_type, completed_target_id, author_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO journal_entries (project_id, entry_type, speaker_name, content, entry_date, entry_time, due_date, due_time, completed_target_type, completed_target_id, author_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         projectId,
         finalType,
@@ -1076,25 +1228,19 @@ router.post('/projects/:id/entries', authenticateToken, (req: Request, res: Resp
         String(content).trim(),
         finalDate,
         finalTime,
+        finalDueDate,
+        finalDueTime,
         validTargetType,
         validTargetId,
         userId
       );
 
       const updatedTurn = next_turn_state && VALID_TURN_STATES.has(next_turn_state) ? next_turn_state : existing.turn_state;
-      let updatedActiveTurnUserId = existing.active_turn_user_id ? Number(existing.active_turn_user_id) : null;
-      if (next_turn_state === 'MY_TURN') {
-        updatedActiveTurnUserId = userId;
-      } else if (next_turn_state === 'THEIR_TURN') {
-        if (members.length > 0) {
-          updatedActiveTurnUserId =
-            Number(existing.created_by) !== userId
-              ? Number(existing.created_by)
-              : Number(members[0].user_id);
-        } else {
-          updatedActiveTurnUserId = null;
-        }
-      }
+      const updatedActiveTurnUserId = next_turn_state
+        ? resolveTargetTurnUserId(existing, members, userId, updatedTurn, target_turn_user_id)
+        : existing.active_turn_user_id
+        ? Number(existing.active_turn_user_id)
+        : null;
 
       const updatedNextAction = next_action !== undefined ? (next_action ? String(next_action).trim() : null) : existing.next_action;
 
@@ -1120,10 +1266,15 @@ router.post('/projects/:id/entries', authenticateToken, (req: Request, res: Resp
     `).get(entryId);
 
     const snippet = String(content).trim().slice(0, 70);
+    const dueSuffix = finalDueDate ? ` (마감 ${finalDueDate}${finalDueTime ? ` ${finalDueTime}` : ''})` : '';
+    const entryBody =
+      finalType === 'PROGRESS'
+        ? `✅ ${req.user!.name}님이 완료 기록을 남겼습니다: ${snippet}`
+        : `${req.user!.name}: ${snippet}${dueSuffix}`;
     notifyProjectPeers(
       { id: projectId, title: existing.title, mode: existing.mode, created_by: Number(existing.created_by) },
       userId,
-      `${req.user!.name}: ${snippet}`,
+      entryBody,
       `entry-${entryId}`
     );
 
@@ -1140,7 +1291,7 @@ router.delete('/entries/:entryId', authenticateToken, (req: Request, res: Respon
 
   try {
     const entry = db.prepare(`
-      SELECT e.*, p.created_by as project_owner_id
+      SELECT e.*, p.created_by as project_owner_id, p.title as project_title, p.mode as project_mode
       FROM journal_entries e
       INNER JOIN journal_projects p ON p.id = e.project_id
       WHERE e.id = ?
@@ -1157,6 +1308,17 @@ router.delete('/entries/:entryId', authenticateToken, (req: Request, res: Respon
     }
 
     db.prepare('DELETE FROM journal_entries WHERE id = ?').run(entryId);
+    notifyProjectPeers(
+      {
+        id: Number(entry.project_id),
+        title: entry.project_title,
+        mode: entry.project_mode,
+        created_by: Number(entry.project_owner_id),
+      },
+      userId,
+      `🗑️ ${req.user!.name}님이 타임라인 기록을 삭제했습니다: ${String(entry.content || '').trim().slice(0, 45)}`,
+      `entry-del-${entryId}`
+    );
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: '기록 삭제 실패: ' + err.message });
@@ -1265,7 +1427,7 @@ router.patch('/ideas/:ideaId', authenticateToken, (req: Request, res: Response) 
 
   try {
     const existing = db.prepare(`
-      SELECT i.*, p.mode, p.created_by as project_owner_id
+      SELECT i.*, p.mode, p.title as project_title, p.created_by as project_owner_id
       FROM journal_ideas i
       INNER JOIN journal_projects p ON p.id = i.project_id
       WHERE i.id = ?
@@ -1382,6 +1544,34 @@ router.patch('/ideas/:ideaId', authenticateToken, (req: Request, res: Response) 
       LEFT JOIN users u ON i.author_id = u.id
       WHERE i.id = ?
     `).get(ideaId);
+
+    const prevParent = existing.parent_idea_id ? Number(existing.parent_idea_id) : null;
+    const prevRelatedStr = JSON.stringify(parseRelatedIdeaIds(existing.related_idea_ids));
+    const hasIdeaChange =
+      Boolean(promoteToNextStep) ||
+      nextTitle !== existing.title ||
+      nextNote !== existing.note ||
+      nextStatus !== existing.status ||
+      nextParentId !== prevParent ||
+      JSON.stringify(nextRelatedIds) !== prevRelatedStr;
+
+    if (hasIdeaChange) {
+      const ideaBody = promoteToNextStep
+        ? `🚀 ${req.user!.name}님이 아이디어 '${nextTitle}'을(를) 다음 할 일로 승격했습니다.`
+        : `💡 ${req.user!.name}님이 아이디어 '${nextTitle}'을(를) 수정했습니다.`;
+      notifyProjectPeers(
+        {
+          id: projectId,
+          title: existing.project_title,
+          mode: existing.mode,
+          created_by: Number(existing.project_owner_id),
+        },
+        userId,
+        ideaBody,
+        `idea-upd-${ideaId}`
+      );
+    }
+
     res.json(formatIdeaRow(updated));
   } catch (err: any) {
     res.status(500).json({ error: '아이디어 수정 실패: ' + err.message });
@@ -1395,7 +1585,7 @@ router.delete('/ideas/:ideaId', authenticateToken, (req: Request, res: Response)
 
   try {
     const existing = db.prepare(`
-      SELECT i.*, p.created_by as project_owner_id
+      SELECT i.*, p.created_by as project_owner_id, p.title as project_title, p.mode as project_mode
       FROM journal_ideas i
       INNER JOIN journal_projects p ON p.id = i.project_id
       WHERE i.id = ?
@@ -1428,6 +1618,18 @@ router.delete('/ideas/:ideaId', authenticateToken, (req: Request, res: Response)
         }
       }
     })();
+
+    notifyProjectPeers(
+      {
+        id: projectId,
+        title: existing.project_title,
+        mode: existing.project_mode,
+        created_by: Number(existing.project_owner_id),
+      },
+      userId,
+      `🗑️ ${req.user!.name}님이 아이디어 '${existing.title}'을(를) 삭제했습니다.`,
+      `idea-del-${ideaId}`
+    );
 
     res.json({ success: true });
   } catch (err: any) {
@@ -1507,6 +1709,20 @@ router.post('/inbox/:id/assign', authenticateToken, (req: Request, res: Response
       `).run(nowJst, project.id);
     })();
 
+    notifyProjectPeers(
+      {
+        id: Number(project.id),
+        title: project.title,
+        mode: project.mode,
+        created_by: Number(project.created_by),
+      },
+      userId,
+      target_kind === 'IDEA'
+        ? `💡 ${req.user!.name} — ${String(inboxItem.content).trim().slice(0, 60)}`
+        : `${req.user!.name}: ${String(inboxItem.content).trim().slice(0, 60)}`,
+      `inbox-${inboxId}`
+    );
+
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: '인박스 분류 실패: ' + err.message });
@@ -1545,10 +1761,32 @@ router.put('/projects/:id/mindmap-layout', authenticateToken, (req: Request, res
       return;
     }
 
+    const prevLayout = db
+      .prepare('SELECT edges_json, parent_overrides_json FROM journal_mindmap_layouts WHERE project_id = ?')
+      .get(projectId) as { edges_json?: string; parent_overrides_json?: string } | undefined;
+
+    let prevEdgesNormalized = '[]';
+    let prevParentsNormalized = '{}';
+    if (prevLayout) {
+      try {
+        prevEdgesNormalized = JSON.stringify(
+          sanitizeMindMapEdges(prevLayout.edges_json ? JSON.parse(prevLayout.edges_json) : [])
+        );
+      } catch {}
+      try {
+        prevParentsNormalized = JSON.stringify(
+          sanitizeParentOverrides(prevLayout.parent_overrides_json ? JSON.parse(prevLayout.parent_overrides_json) : {})
+        );
+      } catch {}
+    }
+
     const body = req.body || {};
     const sanitizedPositions = sanitizeMindMapPositions(body.positions);
     const sanitizedEdges = sanitizeMindMapEdges(body.custom_edges);
     const sanitizedParents = sanitizeParentOverrides(body.parent_overrides);
+
+    const edgesJson = JSON.stringify(sanitizedEdges);
+    const parentsJson = JSON.stringify(sanitizedParents);
 
     db.prepare(`
       INSERT INTO journal_mindmap_layouts (project_id, positions_json, edges_json, parent_overrides_json, updated_by, updated_at)
@@ -1559,7 +1797,17 @@ router.put('/projects/:id/mindmap-layout', authenticateToken, (req: Request, res
         parent_overrides_json = excluded.parent_overrides_json,
         updated_by = excluded.updated_by,
         updated_at = CURRENT_TIMESTAMP
-    `).run(projectId, JSON.stringify(sanitizedPositions), JSON.stringify(sanitizedEdges), JSON.stringify(sanitizedParents), userId);
+    `).run(projectId, JSON.stringify(sanitizedPositions), edgesJson, parentsJson, userId);
+
+    // Ignore position-only node drags; notify peers only when structural edges or hierarchy changed
+    if (edgesJson !== prevEdgesNormalized || parentsJson !== prevParentsNormalized) {
+      notifyProjectPeers(
+        { id: projectId, title: existing.title, mode: existing.mode, created_by: Number(existing.created_by) },
+        userId,
+        `🕸️ ${req.user!.name}님이 자유 마인드맵 연결 구조를 수정했습니다.`,
+        'mindmap-structure'
+      );
+    }
 
     res.json({
       positions: sanitizedPositions,

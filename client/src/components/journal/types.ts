@@ -28,6 +28,8 @@ export interface JournalEntry {
   content: string;
   entry_date: string;
   entry_time: string | null;
+  due_date?: string | null;
+  due_time?: string | null;
   completed_target_type?: 'ENTRY' | 'IDEA' | null;
   completed_target_id?: number | null;
   completed_target_summary?: string | null;
@@ -72,6 +74,7 @@ export interface JournalProject {
   partner_name: string | null;
   invite_token?: string | null;
   active_turn_user_id?: number | null;
+  active_turn_user_name?: string | null;
   resolved_partner_name?: string;
   creator_name?: string;
   members?: JournalMember[];

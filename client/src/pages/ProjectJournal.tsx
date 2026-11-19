@@ -124,10 +124,15 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   // Unified Timeline Composer State (Na / Them / Intent / Idea / Progress)
   const [composerKind, setComposerKind] = useState<EntryType | 'IDEA'>('INTENT');
   const [entryDate, setEntryDate] = useState<string>(getJstTodayStr);
+  const [entryTime, setEntryTime] = useState<string>('');
+  const [dueDate, setDueDate] = useState<string>('');
+  const [dueTime, setDueTime] = useState<string>('');
   const [entrySpeaker, setEntrySpeaker] = useState('');
   const [entryContent, setEntryContent] = useState('');
   const [completedTarget, setCompletedTarget] = useState<string>(''); // '' | 'ENTRY:123' | 'IDEA:45'
   const [autoSwitchTurn, setAutoSwitchTurn] = useState(true);
+  const [autoTurnTargetUserId, setAutoTurnTargetUserId] = useState<string>('');
+  const [showTurnTargetPicker, setShowTurnTargetPicker] = useState(false);
   const [isAddingEntry, setIsAddingEntry] = useState(false);
   const composerFormRef = useRef<HTMLFormElement>(null);
   const entryContentRef = useRef<HTMLTextAreaElement>(null);
@@ -264,6 +269,11 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       setSpeakerCustomInput(false);
       setEntrySpeaker('');
       setEntryDate(getJstTodayStr());
+      setEntryTime('');
+      setDueDate('');
+      setDueTime('');
+      setShowTurnTargetPicker(false);
+      setAutoTurnTargetUserId('');
     } else {
       setDetailProject(null);
       setDetailEntries([]);
@@ -513,9 +523,42 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     }
   };
 
-  const handleQuickTurnChange = async (projectId: number, nextTurn: TurnState) => {
+  const getOtherAppTurnTargets = (proj: JournalProject): Array<{ user_id: number; name: string }> => {
+    if (proj.mode !== 'COLLAB') return [];
+    const seen = new Set<number>();
+    const list: Array<{ user_id: number; name: string }> = [];
+    const myId = Number(user?.id || 0);
+    const pushIfOther = (uid: number | undefined | null, name?: string | null) => {
+      const n = Number(uid || 0);
+      if (!n || n === myId || seen.has(n)) return;
+      seen.add(n);
+      list.push({ user_id: n, name: (name || '').trim() || `User #${n}` });
+    };
+    pushIfOther(proj.created_by, proj.creator_name);
+    for (const m of proj.members || []) {
+      pushIfOther(m.user_id, m.name);
+    }
+    return list;
+  };
+
+  const handleQuickTurnChange = async (
+    projectId: number,
+    nextTurn: TurnState,
+    targetTurnUserId?: number | null
+  ) => {
+    if (nextTurn === 'THEIR_TURN' && targetTurnUserId === undefined) {
+      const proj = detailProject?.id === projectId ? detailProject : projects.find((p) => p.id === projectId);
+      if (proj && getOtherAppTurnTargets(proj).length >= 2) {
+        setShowTurnTargetPicker((prev) => !prev);
+        return;
+      }
+    }
     try {
-      await api.patch(`/journal/projects/${projectId}`, { turn_state: nextTurn });
+      await api.patch(`/journal/projects/${projectId}`, {
+        turn_state: nextTurn,
+        ...(targetTurnUserId ? { target_turn_user_id: targetTurnUserId } : {}),
+      });
+      setShowTurnTargetPicker(false);
       await fetchOverview();
       if (selectedProjectId === projectId) {
         await fetchProjectDetail(projectId);
@@ -619,6 +662,12 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       }
     }
 
+    let autoTargetUserIdNum: number | undefined;
+    if (nextTurnState === 'THEIR_TURN') {
+      const otherTargets = getOtherAppTurnTargets(detailProject);
+      autoTargetUserIdNum = autoTurnTargetUserId ? Number(autoTurnTargetUserId) : otherTargets[0]?.user_id;
+    }
+
     try {
       setIsAddingEntry(true);
       await api.post(`/journal/projects/${detailProject.id}/entries`, {
@@ -628,14 +677,22 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
             ? entrySpeaker.trim() || detailProject.resolved_partner_name || null
             : null,
         content: entryContent.trim(),
-        entry_date: entryDate || getJstTodayStr(),
+        entry_date: entryDate || '',
+        entry_time: entryTime || null,
+        due_date: dueDate || null,
+        due_time: dueTime || null,
         next_turn_state: nextTurnState,
+        ...(autoTargetUserIdNum ? { target_turn_user_id: autoTargetUserIdNum } : {}),
         completed_target_type,
         completed_target_id,
       });
       setEntryContent('');
       setEntrySpeaker('');
       setCompletedTarget('');
+      setEntryDate(getJstTodayStr());
+      setEntryTime('');
+      setDueDate('');
+      setDueTime('');
       await fetchOverview();
       await fetchProjectDetail(detailProject.id);
     } catch (err: any) {
@@ -649,6 +706,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     setComposerKind('PROGRESS');
     setCompletedTarget(targetKey);
     setEntryDate(getJstTodayStr());
+    setEntryTime('');
+    setDueDate('');
+    setDueTime('');
     setTimeout(() => {
       composerFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       entryContentRef.current?.focus();
@@ -834,8 +894,8 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
             <Hourglass className="w-3 h-3 text-sky-700" />
             <span>
               {partnerName
-                ? L(`${partnerName} 대기`, `${partnerName}待ち`, `Wait: ${partnerName}`)
-                : L('상대방 턴', '相手ターン', 'Their Turn')}
+                ? L(`상대 턴(${partnerName})`, `相手ターン(${partnerName})`, `Their Turn (${partnerName})`)
+                : L('상대 턴', '相手ターン', 'Their Turn')}
             </span>
           </span>
         );
@@ -876,10 +936,12 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const allUnifiedItems = useMemo<UnifiedTimelineItem[]>(() => {
     const items: UnifiedTimelineItem[] = [];
     for (const en of detailEntries) {
+      const sortDate = en.entry_date || getJstDateKey(en.created_at) || todayJst;
+      const sortTime = en.entry_time || formatJstTime(en.created_at) || '00:00';
       items.push({
         kind: 'ENTRY',
         id: en.id,
-        sortKey: `${en.entry_date} ${en.entry_time || '00:00'} E${String(en.id).padStart(8, '0')}`,
+        sortKey: `${sortDate} ${sortTime} E${String(en.id).padStart(8, '0')}`,
         entry: en,
       });
     }
@@ -939,7 +1001,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
         return {
           key: `ENTRY:${en.id}`,
           tag,
-          date: en.entry_date.slice(5),
+          date: en.entry_date ? en.entry_date.slice(5) : getJstDateKey(en.created_at).slice(5),
           text: en.content,
         };
       });
@@ -989,7 +1051,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                 <span>{L('사내 공유', '社内共有', 'Shared')}</span>
               </span>
             )}
-            {getTurnBadge(p.turn_state, p.resolved_partner_name)}
+            {getTurnBadge(p.turn_state, p.active_turn_user_name || p.resolved_partner_name)}
           </div>
 
           <span
@@ -1058,14 +1120,14 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   };
 
   return (
-    <div className="w-full max-w-full space-y-4 overflow-x-hidden pb-6">
+    <div className="w-full max-w-full space-y-2 sm:space-y-3 overflow-x-hidden pb-6">
       {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#E6E2D8]">
         <div>
           <div className="flex items-center gap-2">
             <BookMarked className="w-6 h-6 text-forest-700 shrink-0" />
             <h1 className="text-xl font-bold text-charcoal-900 break-keep">
-              {L('프로젝트 마인드맵 (맥락 · 턴 · 대화 트래커)', 'プロジェクトマインドマップ (文脈・ターン・対話記録)', 'Project Mindmap (Context, Turns & Logs)')}
+              {L('프로젝트 마인드맵', 'プロジェクトマインドマップ', 'Project Mindmap')}
             </h1>
           </div>
           <p className="text-xs text-charcoal-500 mt-0.5 break-keep">
@@ -1077,45 +1139,72 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              setJoinError('');
-              setJoinCodeInput('');
-              setIsJoinModalOpen(true);
-            }}
-            className="flex items-center gap-1 whitespace-nowrap"
-          >
-            <KeyRound className="w-3.5 h-3.5" />
-            <span>{L('초대코드 참여', '招待コード参加', 'Join Invite')}</span>
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => fetchOverview()}
-            className="flex items-center gap-1"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">{L('새로고침', '更新', 'Refresh')}</span>
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            onClick={handleOpenCreateModal}
-            className="flex items-center gap-1.5 whitespace-nowrap"
-          >
-            <Plus className="w-4 h-4" />
-            <span>{L('새 프로젝트', '新規プロジェクト', 'New Project')}</span>
-          </Button>
+        <div className="w-full sm:w-auto flex flex-col items-stretch sm:items-end gap-1.5 shrink-0">
+          <div className="w-full sm:w-auto flex items-center flex-wrap gap-1.5 sm:gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setJoinError('');
+                setJoinCodeInput('');
+                setIsJoinModalOpen(true);
+              }}
+              className="flex items-center gap-1 whitespace-nowrap"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span>{L('초대코드 참여', '招待コード参加', 'Join Invite')}</span>
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => fetchOverview()}
+              className="flex items-center gap-1"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">{L('새로고침', '更新', 'Refresh')}</span>
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleOpenCreateModal}
+              className="flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <Plus className="w-4 h-4" />
+              <span>{L('새 프로젝트', '新規プロジェクト', 'New Project')}</span>
+            </Button>
+            {selectedProjectId && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setSelectedProjectId(null)}
+                className="sm:hidden ml-auto flex items-center gap-1 font-bold whitespace-nowrap"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>{L('목록으로', '一覧へ戻る', 'Back to List')}</span>
+              </Button>
+            )}
+          </div>
+
+          {selectedProjectId && (
+            <div className="hidden sm:flex lg:hidden justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setSelectedProjectId(null)}
+                className="flex items-center gap-1.5 font-bold whitespace-nowrap"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>{L('목록으로', '一覧へ戻る', 'Back to List')}</span>
+              </Button>
+            </div>
+          )}
         </div>
       </div>
 
-      {!selectedProjectId && (
-        <>
-          {/* 3-Second Quick Capture Inbox Bar */}
-          <div className="bg-white p-3 rounded-xl border border-ivory-300 shadow-2xs space-y-2.5">
+      {/* 3-Second Quick Capture Inbox Bar */}
+      <div className="bg-white p-3 rounded-xl border border-ivory-300 shadow-2xs space-y-2.5">
         <form onSubmit={handleAddInbox} className="flex items-center gap-2">
           <div className="relative flex-1 min-w-0">
             <Inbox className="w-4 h-4 text-forest-700 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -1156,7 +1245,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         type="button"
                         onClick={() => {
                           setAssigningInboxId(assigningInboxId === item.id ? null : item.id);
-                          setAssignProjectId(projects[0]?.id ? String(projects[0].id) : '');
+                          setAssignProjectId(selectedProjectId ? String(selectedProjectId) : '');
                         }}
                         className="px-2 py-0.5 rounded bg-forest-800 text-white font-bold text-[11px] whitespace-nowrap"
                       >
@@ -1212,6 +1301,8 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
         )}
       </div>
 
+      {!selectedProjectId && (
+        <>
       {/* 4-Card Forget-Prevention Dashboard */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
         <button
@@ -1547,66 +1638,72 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       {/* Option 1 + Notion Width Toggle: Centered (896px) <-> Full Width */}
       {selectedProjectId && (
         <div
-          className={`transition-all duration-200 ${
+          className={`!mt-0 pt-2 lg:pt-3 space-y-4 transition-all duration-200 ${
             isCurrentFullWidth ? 'w-full max-w-full' : 'w-full max-w-4xl mx-auto'
           }`}
         >
-          <div className="bg-white dark:bg-[#111916] rounded-2xl border border-ivory-300 shadow-xs overflow-hidden">
-            {/* Top Detail Action Bar */}
-            <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 border-b border-ivory-200 bg-ivory-50/70">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setSelectedProjectId(null)}
-                className="flex items-center gap-1.5 font-bold"
-              >
-                <ArrowLeft className="w-4 h-4" />
-                <span>{L('목록으로', '一覧へ戻る', 'Back to List')}</span>
-              </Button>
+          {/* Top Detail Action Bar (on <1024px Back button lives in Page Header) */}
+          <div
+            className={`flex-wrap items-center justify-between gap-2 pb-2 border-b border-ivory-200 ${
+              projects.length > 1 ? 'flex' : 'hidden lg:flex'
+            }`}
+          >
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setSelectedProjectId(null)}
+              className="hidden lg:inline-flex items-center gap-1.5 font-bold"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>{L('목록으로', '一覧へ戻る', 'Back to List')}</span>
+            </Button>
 
-              <div className="flex items-center gap-2 min-w-0">
-                {projects.length > 1 && (
-                  <select
-                    value={selectedProjectId}
-                    onChange={(e) => {
-                      const nextId = Number(e.target.value);
-                      if (nextId) setSelectedProjectId(nextId);
-                    }}
-                    className="p-1.5 bg-white border border-ivory-300 rounded-lg text-xs font-bold text-charcoal-800 max-w-[180px] sm:max-w-[260px] truncate"
-                  >
-                    {projects.map((proj) => (
-                      <option key={proj.id} value={proj.id}>
-                        {proj.title}
-                      </option>
-                    ))}
-                  </select>
-                )}
-
-                <button
-                  type="button"
-                  onClick={handleToggleProjectFullWidth}
-                  className={`hidden lg:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-bold transition whitespace-nowrap ${
-                    isCurrentFullWidth
-                      ? 'bg-forest-800 text-white border-forest-900 shadow-2xs'
-                      : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
-                  }`}
-                  title={L('본문 너비 전환 (표준 896px ↔ 전체 너비)', '表示幅を切替 (標準 896px ↔ 全幅)', 'Toggle page width')}
+            <div className="flex items-center gap-2 min-w-0 ml-auto">
+              {projects.length > 1 && (
+                <select
+                  value={selectedProjectId}
+                  onChange={(e) => {
+                    const nextId = Number(e.target.value);
+                    if (nextId) setSelectedProjectId(nextId);
+                  }}
+                  className="p-1.5 bg-white border border-ivory-300 rounded-lg text-xs font-bold text-charcoal-800 max-w-[200px] sm:max-w-[260px] truncate"
                 >
-                  <ArrowRightLeft className="w-3.5 h-3.5" />
-                  <span>{L('전체 너비', '全幅', 'Full Width')}</span>
-                </button>
-              </div>
-            </div>
+                  {projects.map((proj) => (
+                    <option key={proj.id} value={proj.id}>
+                      {proj.title}
+                    </option>
+                  ))}
+                </select>
+              )}
 
-            {/* Project Header & Edit/Delete (Title spans full width below badges/actions on mobile) */}
-            <div className="px-4 sm:px-6 pt-4 pb-3 border-b border-ivory-200 space-y-2">
+              <button
+                type="button"
+                onClick={handleToggleProjectFullWidth}
+                className={`hidden lg:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-bold transition whitespace-nowrap ${
+                  isCurrentFullWidth
+                    ? 'bg-forest-800 text-white border-forest-900 shadow-2xs'
+                    : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
+                }`}
+                title={L('본문 너비 전환 (표준 896px ↔ 전체 너비)', '表示幅を切替 (標準 896px ↔ 全幅)', 'Toggle page width')}
+              >
+                <ArrowRightLeft className="w-3.5 h-3.5" />
+                <span>{L('전체 너비', '全幅', 'Full Width')}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Project Header & Edit/Delete (Title spans full width below badges/actions on mobile) */}
+          <div
+            className={`pb-2.5 border-b border-ivory-200 space-y-2 ${
+              projects.length > 1 ? '' : '!mt-0 lg:!mt-4'
+            }`}
+          >
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div className="flex items-center gap-1.5 flex-wrap min-w-0">
                   {detailProject?.mode === 'SOLO' || detailProject?.is_private === 1 ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-stone-100 text-stone-700 border border-stone-300 whitespace-nowrap">
-                      <Lock className="w-3 h-3 shrink-0" />
-                      <span>{L('본인 전용 비공개', '本人専用非公開', 'Private')}</span>
+                      <span>{L('🔒 개인', '🔒 個人', '🔒 Solo')}</span>
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-indigo-50 text-indigo-800 border border-indigo-200 whitespace-nowrap">
@@ -1684,7 +1781,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
             </div>
 
             {/* Detail Body */}
-            <div className="p-4 sm:p-6 space-y-4">
+            <div className="space-y-4">
 
                 {isDetailLoading || !detailProject ? (
                   <div className="py-10 text-center text-xs text-charcoal-400">{t('common.loading')}</div>
@@ -1731,9 +1828,10 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                   setIntentDraft(detailProject.intent_summary || '');
                                   setIsEditingIntent((prev) => !prev);
                                 }}
-                                className="text-[11px] font-bold text-amber-900 hover:underline px-1"
+                                className="px-2.5 py-0.5 rounded-md bg-amber-100/90 border border-amber-300 text-amber-950 text-[11px] font-bold hover:bg-amber-200/80 inline-flex items-center gap-1 shadow-2xs transition whitespace-nowrap"
                               >
-                                {isEditingIntent ? t('common.cancel') : t('common.edit')}
+                                {!isEditingIntent && <Edit2 className="w-3 h-3 shrink-0" />}
+                                <span>{isEditingIntent ? t('common.cancel') : t('common.edit')}</span>
                               </button>
                             </div>
                           </div>
@@ -1798,34 +1896,83 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                     })()}
 
                     {/* 1-Tap Turn Switcher */}
-                    <div className="space-y-1.5">
-                      <span className="text-[11px] font-bold text-charcoal-500 block">
-                        {L('현재 턴 상태 (원클릭 전환)', '現在のターン (ワンタップ切替)', 'Current Turn (1-tap)')}
-                      </span>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-xs font-bold">
-                        {(
-                          [
-                            { state: 'MY_TURN' as TurnState, label: L('🔥 내 턴', '🔥 自分', '🔥 Mine'), activeCls: 'bg-rose-600 text-white border-rose-700' },
-                            { state: 'THEIR_TURN' as TurnState, label: L('⏳ 상대 턴', '⏳ 相手', '⏳ Theirs'), activeCls: 'bg-sky-600 text-white border-sky-700' },
-                            { state: 'HOLD' as TurnState, label: L('⏸️ 보류', '⏸️ 保留', '⏸️ Hold'), activeCls: 'bg-stone-700 text-white border-stone-800' },
-                            { state: 'DONE' as TurnState, label: L('✅ 완료', '✅ 完了', '✅ Done'), activeCls: 'bg-emerald-700 text-white border-emerald-800' },
-                          ]
-                        ).map(btn => (
-                          <button
-                            key={btn.state}
-                            type="button"
-                            onClick={() => handleQuickTurnChange(detailProject.id, btn.state)}
-                            className={`py-1.5 px-1 rounded-lg border text-center transition whitespace-nowrap ${
-                              detailProject.turn_state === btn.state
-                                ? `${btn.activeCls} shadow-2xs`
-                                : 'bg-ivory-50 text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
-                            }`}
-                          >
-                            {btn.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
+                    {(() => {
+                      const otherTargets = getOtherAppTurnTargets(detailProject);
+                      const activeTurnName =
+                        detailProject.turn_state === 'THEIR_TURN'
+                          ? detailProject.active_turn_user_name || detailProject.resolved_partner_name
+                          : '';
+                      const theirLabel = activeTurnName
+                        ? L(`⏳ 상대 턴(${activeTurnName})`, `⏳ 相手(${activeTurnName})`, `⏳ Theirs (${activeTurnName})`)
+                        : L('⏳ 상대 턴', '⏳ 相手', '⏳ Theirs');
+                      return (
+                        <div className="space-y-1.5">
+                          <span className="text-[11px] font-bold text-charcoal-500 block">
+                            {L('현재 턴 상태 (원클릭 전환)', '現在のターン (ワンタップ切替)', 'Current Turn (1-tap)')}
+                          </span>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-xs font-bold">
+                            {(
+                              [
+                                { state: 'MY_TURN' as TurnState, label: L('🔥 내 턴', '🔥 自分', '🔥 Mine'), activeCls: 'bg-rose-600 text-white border-rose-700' },
+                                { state: 'THEIR_TURN' as TurnState, label: theirLabel, activeCls: 'bg-sky-600 text-white border-sky-700' },
+                                { state: 'HOLD' as TurnState, label: L('⏸️ 보류', '⏸️ 保留', '⏸️ Hold'), activeCls: 'bg-stone-700 text-white border-stone-800' },
+                                { state: 'DONE' as TurnState, label: L('✅ 완료', '✅ 完了', '✅ Done'), activeCls: 'bg-emerald-700 text-white border-emerald-800' },
+                              ]
+                            ).map(btn => (
+                              <button
+                                key={btn.state}
+                                type="button"
+                                onClick={() => handleQuickTurnChange(detailProject.id, btn.state)}
+                                className={`py-1.5 px-1.5 rounded-lg border text-center transition truncate ${
+                                  detailProject.turn_state === btn.state
+                                    ? `${btn.activeCls} shadow-2xs`
+                                    : 'bg-ivory-50 text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
+                                }`}
+                              >
+                                {btn.label}
+                              </button>
+                            ))}
+                          </div>
+                          {showTurnTargetPicker && otherTargets.length >= 2 && (
+                            <div className="p-2.5 rounded-xl bg-sky-50 border border-sky-200 space-y-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[11px] font-bold text-sky-900">
+                                  {L('누구에게 턴을 넘길까요?', '誰にターンを渡しますか？', 'Pass turn to whom?')}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => setShowTurnTargetPicker(false)}
+                                  className="text-[11px] font-bold text-charcoal-500 hover:text-charcoal-800"
+                                >
+                                  {t('common.cancel')}
+                                </button>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5">
+                                {otherTargets.map(target => {
+                                  const isActive =
+                                    detailProject.turn_state === 'THEIR_TURN' &&
+                                    Number(detailProject.active_turn_user_id) === target.user_id;
+                                  return (
+                                    <button
+                                      key={`turn-target-${target.user_id}`}
+                                      type="button"
+                                      onClick={() => handleQuickTurnChange(detailProject.id, 'THEIR_TURN', target.user_id)}
+                                      className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${
+                                        isActive
+                                          ? 'bg-sky-700 text-white border-sky-800 shadow-2xs'
+                                          : 'bg-white text-sky-900 border-sky-300 hover:bg-sky-100'
+                                      }`}
+                                    >
+                                      👤 {target.name}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {/* Next Step Card */}
                     <div className={`p-3 rounded-xl border space-y-2 ${
@@ -1914,9 +2061,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                               <React.Fragment key={`relay-m-${en.id}`}>
                                 <span
                                   className={`px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap shrink-0 ${pillCls}`}
-                                  title={`${en.entry_date} ${en.content}`}
+                                  title={`${en.entry_date ? `${en.entry_date} ` : ''}${en.content}`}
                                 >
-                                  {shortLbl} ({en.entry_date.slice(5)})
+                                  {shortLbl}{en.entry_date ? ` (${en.entry_date.slice(5)})` : ''}
                                 </span>
                                 {idx < arr.length - 1 && (
                                   <ArrowLeft className="w-3 h-3 text-charcoal-400 shrink-0" />
@@ -1948,9 +2095,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                               <React.Fragment key={`relay-d-${en.id}`}>
                                 <span
                                   className={`px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap shrink-0 ${pillCls}`}
-                                  title={`${en.entry_date} ${en.content}`}
+                                  title={`${en.entry_date ? `${en.entry_date} ` : ''}${en.content}`}
                                 >
-                                  {shortLbl} ({en.entry_date.slice(5)})
+                                  {shortLbl}{en.entry_date ? ` (${en.entry_date.slice(5)})` : ''}
                                 </span>
                                 {idx < arr.length - 1 && (
                                   <ArrowRight className="w-3 h-3 text-charcoal-400 shrink-0" />
@@ -2009,15 +2156,15 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         <form
                           ref={composerFormRef}
                           onSubmit={handleAddTimelineItem}
-                          className="p-3 rounded-xl bg-ivory-50 border border-ivory-200 space-y-2 text-xs"
+                          className="p-3 rounded-xl bg-white border border-ivory-300 shadow-2xs space-y-2 text-xs"
                         >
                           <div className="flex flex-wrap items-center gap-1.5">
                             {(
                               [
                                 { id: 'DIALOGUE_ME' as EntryType | 'IDEA', label: L('🗣️ 나', '🗣️ 自分', '🗣️ Me'), cls: 'bg-forest-700 text-white border-forest-800' },
                                 { id: 'DIALOGUE_THEM' as EntryType | 'IDEA', label: L('👤 상대방', '👤 相手', '👤 Partner'), cls: 'bg-sky-600 text-white border-sky-700' },
-                                { id: 'INTENT' as EntryType | 'IDEA', label: L('🧭 내 의도·결정', '🧭 意図・決定', '🧭 Intent'), cls: 'bg-amber-500 text-white border-amber-600' },
                                 { id: 'IDEA' as EntryType | 'IDEA', label: L('💡 아이디어', '💡 アイデア', '💡 Idea'), cls: 'bg-yellow-500 text-stone-950 border-yellow-600' },
+                                { id: 'INTENT' as EntryType | 'IDEA', label: L('🧭 내 의도·결정', '🧭 意図・決定', '🧭 Intent'), cls: 'bg-amber-500 text-white border-amber-600' },
                                 { id: 'PROGRESS' as EntryType | 'IDEA', label: L('✅ 완료 기록', '✅ 完了記録', '✅ Done'), cls: 'bg-emerald-600 text-white border-emerald-700' },
                               ]
                             ).map(tBtn => (
@@ -2059,13 +2206,79 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                             </div>
                           ) : (
                             <>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                {/* Occurrence Date & Time (Default: Today, Time Empty; Clearable) */}
+                                <div className="p-2 rounded-lg bg-ivory-50 border border-ivory-200 space-y-1">
+                                  <div className="flex items-center justify-between gap-1">
+                                    <span className="text-[11px] font-bold text-charcoal-700">
+                                      📅 {L('발생 일시 (선택)', '発生日時 (任意)', 'Occurred (optional)')}
+                                    </span>
+                                    {(entryDate || entryTime) && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEntryDate('');
+                                          setEntryTime('');
+                                        }}
+                                        className="text-[10px] font-bold text-charcoal-500 hover:text-rose-600 px-1"
+                                      >
+                                        {L('비우기', 'クリア', 'Clear')}
+                                      </button>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-1.5">
+                                    <input
+                                      type="date"
+                                      value={entryDate}
+                                      onChange={(e) => setEntryDate(e.target.value)}
+                                      className="flex-1 min-w-0 p-1.5 bg-white border border-ivory-300 rounded-lg font-mono font-bold text-xs"
+                                    />
+                                    <input
+                                      type="time"
+                                      value={entryTime}
+                                      onChange={(e) => setEntryTime(e.target.value)}
+                                      className="w-[105px] shrink-0 p-1.5 bg-white border border-ivory-300 rounded-lg font-mono font-bold text-xs"
+                                    />
+                                  </div>
+                                </div>
+
+                                {/* Deadline Date & Time (Default: Always Empty; Clearable) */}
+                                <div className="p-2 rounded-lg bg-amber-50/50 border border-amber-200/80 space-y-1">
+                                  <div className="flex items-center justify-between gap-1">
+                                    <span className="text-[11px] font-bold text-amber-900">
+                                      ⏰ {L('마감 일시 (선택)', '期限日時 (任意)', 'Deadline (optional)')}
+                                    </span>
+                                    {(dueDate || dueTime) && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setDueDate('');
+                                          setDueTime('');
+                                        }}
+                                        className="text-[10px] font-bold text-amber-700 hover:text-rose-600 px-1"
+                                      >
+                                        {L('비우기', 'クリア', 'Clear')}
+                                      </button>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-1.5">
+                                    <input
+                                      type="date"
+                                      value={dueDate}
+                                      onChange={(e) => setDueDate(e.target.value)}
+                                      className="flex-1 min-w-0 p-1.5 bg-white border border-amber-300 rounded-lg font-mono font-bold text-xs"
+                                    />
+                                    <input
+                                      type="time"
+                                      value={dueTime}
+                                      onChange={(e) => setDueTime(e.target.value)}
+                                      className="w-[105px] shrink-0 p-1.5 bg-white border border-amber-300 rounded-lg font-mono font-bold text-xs"
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+
                               <div className="flex flex-wrap items-center gap-2">
-                                <input
-                                  type="date"
-                                  value={entryDate}
-                                  onChange={(e) => setEntryDate(e.target.value)}
-                                  className="p-1.5 bg-white border border-ivory-300 rounded-lg font-mono font-bold text-xs"
-                                />
                                 {composerKind === 'DIALOGUE_THEM' && (() => {
                                   const presetList: JournalParticipant[] = [...(detailProject.participants || [])];
                                   if (
@@ -2150,20 +2363,38 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                     </div>
                                   );
                                 })()}
-                                {detailProject.mode === 'COLLAB' && (composerKind === 'DIALOGUE_ME' || composerKind === 'DIALOGUE_THEM') && (
-                                  <label className="inline-flex items-center gap-1.5 text-[11px] font-bold text-charcoal-700 cursor-pointer">
-                                    <input
-                                      type="checkbox"
-                                      checked={autoSwitchTurn}
-                                      onChange={(e) => setAutoSwitchTurn(e.target.checked)}
-                                    />
-                                    <span>
-                                      {composerKind === 'DIALOGUE_ME'
-                                        ? L('등록 시 [상대 턴]으로 자동 전환', '登録時に[相手ターン]へ自動切替', 'Auto-switch to Their Turn')
-                                        : L('등록 시 [내 턴]으로 자동 전환', '登録時に[自分のターン]へ自動切替', 'Auto-switch to My Turn')}
-                                    </span>
-                                  </label>
-                                )}
+                                {detailProject.mode === 'COLLAB' && (composerKind === 'DIALOGUE_ME' || composerKind === 'DIALOGUE_THEM') && (() => {
+                                  const otherTargets = getOtherAppTurnTargets(detailProject);
+                                  return (
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <label className="inline-flex items-center gap-1.5 text-[11px] font-bold text-charcoal-700 cursor-pointer">
+                                        <input
+                                          type="checkbox"
+                                          checked={autoSwitchTurn}
+                                          onChange={(e) => setAutoSwitchTurn(e.target.checked)}
+                                        />
+                                        <span>
+                                          {composerKind === 'DIALOGUE_ME'
+                                            ? L('등록 시 [상대 턴]으로 자동 전환', '登録時に[相手ターン]へ自動切替', 'Auto-switch to Their Turn')
+                                            : L('등록 시 [내 턴]으로 자동 전환', '登録時に[自分のターン]へ自動切替', 'Auto-switch to My Turn')}
+                                        </span>
+                                      </label>
+                                      {autoSwitchTurn && composerKind === 'DIALOGUE_ME' && otherTargets.length >= 2 && (
+                                        <select
+                                          value={autoTurnTargetUserId || String(otherTargets[0].user_id)}
+                                          onChange={(e) => setAutoTurnTargetUserId(e.target.value)}
+                                          className="px-2 py-0.5 bg-white border border-sky-300 rounded text-[11px] font-bold text-sky-900"
+                                        >
+                                          {otherTargets.map(t => (
+                                            <option key={`auto-turn-${t.user_id}`} value={t.user_id}>
+                                              → {t.name}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
                               </div>
 
                               {/* Target Picker for Completion Log (PROGRESS) */}
@@ -2415,12 +2646,29 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                   <div className="flex items-center justify-between gap-2">
                                     <div className="flex items-center gap-2 flex-wrap">
                                       <span className="font-bold text-charcoal-900">{badgeLabel}</span>
-                                      <span className="font-mono text-[11px] text-charcoal-500">
-                                        {en.entry_date}{en.entry_time ? ` ${en.entry_time}` : ''}
-                                      </span>
+                                      {(en.entry_date || en.entry_time) && (
+                                        <span className="font-mono text-[11px] text-charcoal-500">
+                                          {en.entry_date || ''}{en.entry_time ? `${en.entry_date ? ' ' : ''}${en.entry_time}` : ''}
+                                        </span>
+                                      )}
+                                      {(en.due_date || en.due_time) && (
+                                        <span
+                                          className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold border ${
+                                            !isCompleted && !isProgress && en.due_date && en.due_date <= todayJst
+                                              ? 'bg-rose-50 text-rose-800 border-rose-200'
+                                              : 'bg-amber-50 text-amber-900 border-amber-200'
+                                          }`}
+                                        >
+                                          ⏰ {L('마감', '期限', 'Due')} {en.due_date || ''}{en.due_time ? `${en.due_date ? ' ' : ''}${en.due_time}` : ''}
+                                        </span>
+                                      )}
                                       {isCompleted && latestComp && (
                                         <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-900 border border-emerald-300 text-[10px] font-bold">
-                                          {L(`✅ 완료됨 (${latestComp.entry_date.slice(5)})`, `✅ 完了済 (${latestComp.entry_date.slice(5)})`, `✅ Done (${latestComp.entry_date.slice(5)})`)}
+                                          {L(
+                                            `✅ 완료됨${latestComp.entry_date ? ` (${latestComp.entry_date.slice(5)})` : ''}`,
+                                            `✅ 完了済${latestComp.entry_date ? ` (${latestComp.entry_date.slice(5)})` : ''}`,
+                                            `✅ Done${latestComp.entry_date ? ` (${latestComp.entry_date.slice(5)})` : ''}`
+                                          )}
                                         </span>
                                       )}
                                     </div>
@@ -2503,7 +2751,6 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                   </>
                 )}
             </div>
-          </div>
         </div>
       )}
 

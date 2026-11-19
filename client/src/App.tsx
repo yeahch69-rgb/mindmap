@@ -121,7 +121,7 @@ const AppShell: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-ivory-100 flex flex-col">
+    <div className="min-h-screen bg-white lg:bg-ivory-100 flex flex-col">
       {/* Top Navbar */}
       <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-ivory-300">
         <div className="max-w-7xl mx-auto px-3 sm:px-6 h-12 flex items-center justify-between gap-2 sm:gap-3">
@@ -222,7 +222,7 @@ const AppShell: React.FC = () => {
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-4">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-2 sm:px-3 lg:px-6 py-3 lg:py-4">
         <ProjectJournal
           pendingInviteToken={pendingInviteToken}
           onConsumePendingInvite={handleConsumePendingInvite}

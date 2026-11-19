@@ -438,7 +438,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
         parentKey: 'proj-root',
         autoEdgeColor: edgeColor,
         kind: 'ENTRY',
-        title: `${en.entry_date.slice(5)} · ${getEntryLabel(en.entry_type, en.speaker_name)}`,
+        title: `${en.entry_date ? `${en.entry_date.slice(5)} · ` : ''}${getEntryLabel(en.entry_type, en.speaker_name)}`,
         subtitle: en.content,
         bgClass,
         borderClass,
