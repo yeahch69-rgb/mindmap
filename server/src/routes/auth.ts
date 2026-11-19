@@ -6,6 +6,24 @@ import { authenticateToken, signAuthToken } from '../middleware/auth.js';
 
 const router = Router();
 
+function formatUser(row: any) {
+  return {
+    id: Number(row.id),
+    email: row.email,
+    name: row.name,
+    fontSize: String(row.font_size || '100'),
+    mobileFontSize: String(row.mobile_font_size || '100'),
+    pushEnabled: Boolean(row.push_enabled ?? 1),
+  };
+}
+
+function clampFontScaleStr(raw: unknown): string {
+  const parsed = Number(String(raw ?? '100').replace('%', ''));
+  if (!Number.isFinite(parsed)) return '100';
+  const clamped = Math.min(150, Math.max(80, Math.round(parsed / 5) * 5));
+  return String(clamped);
+}
+
 router.post('/register', (req: Request, res: Response) => {
   const { email, password, name } = req.body || {};
   const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
@@ -37,8 +55,10 @@ router.post('/register', (req: Request, res: Response) => {
       .prepare('INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)')
       .run(cleanEmail, hash, cleanName);
 
-    const userId = Number(info.lastInsertRowid);
-    const userPayload = { id: userId, email: cleanEmail, name: cleanName };
+    const userRow = db
+      .prepare('SELECT id, email, name, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
+      .get(Number(info.lastInsertRowid));
+    const userPayload = formatUser(userRow);
     const token = signAuthToken(userPayload);
 
     res.status(201).json({ token, user: userPayload });
@@ -59,7 +79,7 @@ router.post('/login', (req: Request, res: Response) => {
 
   try {
     const userRow = db
-      .prepare('SELECT id, email, name, password_hash FROM users WHERE email = ?')
+      .prepare('SELECT id, email, name, password_hash, font_size, mobile_font_size, push_enabled FROM users WHERE email = ?')
       .get(cleanEmail) as any;
 
     if (!userRow || !bcrypt.compareSync(cleanPassword, userRow.password_hash)) {
@@ -67,11 +87,7 @@ router.post('/login', (req: Request, res: Response) => {
       return;
     }
 
-    const userPayload = {
-      id: Number(userRow.id),
-      email: userRow.email,
-      name: userRow.name,
-    };
+    const userPayload = formatUser(userRow);
     const token = signAuthToken(userPayload);
     res.json({ token, user: userPayload });
   } catch (err: any) {
@@ -82,7 +98,7 @@ router.post('/login', (req: Request, res: Response) => {
 router.post('/demo', (_req: Request, res: Response) => {
   try {
     const suffix = crypto.randomBytes(3).toString('hex');
-    const email = `demo-${suffix}@journal.local`;
+    const email = `demo-${suffix}@mindmap.local`;
     const name = `게스트 (${suffix.toUpperCase()})`;
     const hash = bcrypt.hashSync(crypto.randomBytes(12).toString('hex'), 8);
 
@@ -92,7 +108,10 @@ router.post('/demo', (_req: Request, res: Response) => {
     const userId = Number(info.lastInsertRowid);
     seedDemoDataForUser(userId);
 
-    const userPayload = { id: userId, email, name };
+    const userRow = db
+      .prepare('SELECT id, email, name, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
+      .get(userId);
+    const userPayload = formatUser(userRow);
     const token = signAuthToken(userPayload);
     res.status(201).json({ token, user: userPayload });
   } catch (err: any) {
@@ -102,6 +121,42 @@ router.post('/demo', (_req: Request, res: Response) => {
 
 router.get('/me', authenticateToken, (req: Request, res: Response) => {
   res.json({ user: req.user });
+});
+
+router.patch('/preferences', authenticateToken, (req: Request, res: Response) => {
+  const userId = Number(req.user!.id);
+  const { name, fontSize, mobileFontSize, pushEnabled } = req.body || {};
+
+  try {
+    const current = db
+      .prepare('SELECT id, email, name, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
+      .get(userId) as any;
+    if (!current) {
+      res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
+      return;
+    }
+
+    const nextName = typeof name === 'string' && name.trim() ? name.trim().slice(0, 40) : current.name;
+    const nextFontSize = fontSize !== undefined ? clampFontScaleStr(fontSize) : current.font_size;
+    const nextMobileFontSize =
+      mobileFontSize !== undefined ? clampFontScaleStr(mobileFontSize) : current.mobile_font_size;
+    const nextPushEnabled =
+      pushEnabled !== undefined ? (pushEnabled ? 1 : 0) : Number(current.push_enabled ?? 1);
+
+    db.prepare(`
+      UPDATE users
+      SET name = ?, font_size = ?, mobile_font_size = ?, push_enabled = ?
+      WHERE id = ?
+    `).run(nextName, nextFontSize, nextMobileFontSize, nextPushEnabled, userId);
+
+    const updated = db
+      .prepare('SELECT id, email, name, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
+      .get(userId);
+
+    res.json({ user: formatUser(updated) });
+  } catch (err: any) {
+    res.status(500).json({ error: '프로필 설정 저장 실패: ' + err.message });
+  }
 });
 
 export default router;

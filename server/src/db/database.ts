@@ -25,6 +25,9 @@ export function initDatabase() {
       email TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
       name TEXT NOT NULL,
+      font_size TEXT NOT NULL DEFAULT '100',
+      mobile_font_size TEXT NOT NULL DEFAULT '100',
+      push_enabled INTEGER NOT NULL DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -46,6 +49,7 @@ export function initDatabase() {
       next_action_date TEXT,
       stale_threshold_days INTEGER NOT NULL DEFAULT 7,
       last_activity_at TEXT NOT NULL,
+      stale_push_last_sent_at TEXT,
       color TEXT NOT NULL DEFAULT '#1B4D3E',
       created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -105,10 +109,41 @@ export function initDatabase() {
       updated_by INTEGER,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      endpoint TEXT NOT NULL UNIQUE,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      device_info TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
+
+  const userCols = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+  const userColNames = new Set(userCols.map((c) => c.name));
+  if (!userColNames.has('font_size')) {
+    db.exec("ALTER TABLE users ADD COLUMN font_size TEXT NOT NULL DEFAULT '100';");
+  }
+  if (!userColNames.has('mobile_font_size')) {
+    db.exec("ALTER TABLE users ADD COLUMN mobile_font_size TEXT NOT NULL DEFAULT '100';");
+  }
+  if (!userColNames.has('push_enabled')) {
+    db.exec("ALTER TABLE users ADD COLUMN push_enabled INTEGER NOT NULL DEFAULT 1;");
+  }
 
   const projCols = db.prepare("PRAGMA table_info(journal_projects)").all() as { name: string }[];
   const projColNames = new Set(projCols.map((c) => c.name));
+  if (!projColNames.has('stale_push_last_sent_at')) {
+    db.exec("ALTER TABLE journal_projects ADD COLUMN stale_push_last_sent_at TEXT;");
+  }
   if (!projColNames.has('initial_intent_summary')) {
     db.exec('ALTER TABLE journal_projects ADD COLUMN initial_intent_summary TEXT;');
     db.exec('UPDATE journal_projects SET initial_intent_summary = intent_summary WHERE initial_intent_summary IS NULL AND intent_summary IS NOT NULL;');

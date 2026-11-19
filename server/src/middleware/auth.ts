@@ -8,6 +8,9 @@ export interface AuthUserPayload {
   id: number;
   email: string;
   name: string;
+  fontSize?: string;
+  mobileFontSize?: string;
+  pushEnabled?: boolean;
 }
 
 declare global {
@@ -18,7 +21,7 @@ declare global {
   }
 }
 
-export function signAuthToken(user: AuthUserPayload): string {
+export function signAuthToken(user: { id: number; email: string; name: string }): string {
   return jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, {
     expiresIn: '30d',
   });
@@ -36,8 +39,8 @@ export function authenticateToken(req: Request, res: Response, next: NextFunctio
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     const row = db
-      .prepare('SELECT id, email, name FROM users WHERE id = ?')
-      .get(Number(decoded.id)) as AuthUserPayload | undefined;
+      .prepare('SELECT id, email, name, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
+      .get(Number(decoded.id)) as any;
 
     if (!row) {
       res.status(401).json({ error: '유효하지 않은 사용자입니다.' });
@@ -48,6 +51,9 @@ export function authenticateToken(req: Request, res: Response, next: NextFunctio
       id: Number(row.id),
       email: row.email,
       name: row.name,
+      fontSize: String(row.font_size || '100'),
+      mobileFontSize: String(row.mobile_font_size || '100'),
+      pushEnabled: Boolean(row.push_enabled ?? 1),
     };
     next();
   } catch {

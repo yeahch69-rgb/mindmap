@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { db, generateInviteToken } from '../db/database.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { getJstDateStr, getJstTimeStr, getJstDateTimeStr, getJstDateStrWithDayOffset } from '../utils/jstTime.js';
+import { sendPushToUsers } from '../utils/webPush.js';
 
 const router = Router();
 
@@ -32,6 +33,26 @@ function getProjectMembers(projectId: number): Array<{ user_id: number; name: st
       ORDER BY m.id ASC
     `)
     .all(projectId) as any[];
+}
+
+function notifyProjectPeers(
+  project: { id: number; title: string; mode: string; created_by: number },
+  actorUserId: number,
+  body: string,
+  tagSuffix: string
+) {
+  if (project.mode !== 'COLLAB') return;
+  const members = getProjectMembers(Number(project.id));
+  const peerIds = [Number(project.created_by), ...members.map((m) => Number(m.user_id))].filter(
+    (id) => id > 0 && id !== Number(actorUserId)
+  );
+  if (peerIds.length === 0) return;
+  void sendPushToUsers(peerIds, {
+    title: `📌 ${project.title}`,
+    body,
+    projectId: Number(project.id),
+    tag: `mindmap-${project.id}-${tagSuffix}`,
+  });
 }
 
 function diffJstDays(fromYmd: string, toYmd: string): number {
@@ -772,6 +793,23 @@ router.patch('/projects/:id', authenticateToken, (req: Request, res: Response) =
     );
 
     const updated = db.prepare('SELECT * FROM journal_projects WHERE id = ?').get(projectId) as any;
+
+    if (body.turn_state !== undefined && updated) {
+      const actorName = req.user!.name;
+      const bodyText =
+        nextTurnState === 'THEIR_TURN'
+          ? `${actorName}님이 턴을 넘겼습니다.`
+          : nextTurnState === 'DONE'
+          ? `${actorName}님이 프로젝트를 완료 상태로 변경했습니다.`
+          : `${actorName}님이 턴 상태를 업데이트했습니다.`;
+      notifyProjectPeers(
+        { id: projectId, title: nextTitle, mode: nextMode, created_by: Number(existing.created_by) },
+        userId,
+        bodyText,
+        'turn'
+      );
+    }
+
     res.json({
       ...updated,
       participants: parseParticipants(updated?.participants_json),
@@ -1080,6 +1118,15 @@ router.post('/projects/:id/entries', authenticateToken, (req: Request, res: Resp
       LEFT JOIN users u ON e.author_id = u.id
       WHERE e.id = ?
     `).get(entryId);
+
+    const snippet = String(content).trim().slice(0, 70);
+    notifyProjectPeers(
+      { id: projectId, title: existing.title, mode: existing.mode, created_by: Number(existing.created_by) },
+      userId,
+      `${req.user!.name}: ${snippet}`,
+      `entry-${entryId}`
+    );
+
     res.status(201).json(created);
   } catch (err: any) {
     res.status(500).json({ error: '기록 등록 실패: ' + err.message });
@@ -1193,6 +1240,14 @@ router.post('/projects/:id/ideas', authenticateToken, (req: Request, res: Respon
       LEFT JOIN users u ON i.author_id = u.id
       WHERE i.id = ?
     `).get(ideaId);
+
+    notifyProjectPeers(
+      { id: projectId, title: existing.title, mode: existing.mode, created_by: Number(existing.created_by) },
+      userId,
+      `💡 ${req.user!.name} — ${String(title).trim().slice(0, 60)}`,
+      `idea-${ideaId}`
+    );
+
     res.status(201).json(formatIdeaRow(created));
   } catch (err: any) {
     res.status(500).json({ error: '아이디어 등록 실패: ' + err.message });

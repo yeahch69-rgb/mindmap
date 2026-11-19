@@ -74,11 +74,15 @@ const COLOR_PRESETS = ['#1B4D3E', '#0369A1', '#7C3AED', '#C2410C', '#B45309', '#
 interface ProjectJournalProps {
   pendingInviteToken?: string | null;
   onConsumePendingInvite?: () => void;
+  initialProjectId?: number | null;
+  onConsumeInitialProjectId?: () => void;
 }
 
 export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   pendingInviteToken,
   onConsumePendingInvite,
+  initialProjectId,
+  onConsumeInitialProjectId,
 }) => {
   const { user } = useAuth();
   const { L, t } = useLanguage();
@@ -223,6 +227,12 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   useEffect(() => {
     fetchOverview();
   }, []);
+
+  useEffect(() => {
+    if (!initialProjectId || !user) return;
+    setSelectedProjectId(initialProjectId);
+    onConsumeInitialProjectId?.();
+  }, [initialProjectId, user?.id, onConsumeInitialProjectId]);
 
   useEffect(() => {
     if (!pendingInviteToken || !user) return;

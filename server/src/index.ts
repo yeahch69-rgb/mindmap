@@ -5,10 +5,14 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { initDatabase } from './db/database.js';
+import { initWebPush, startPushScheduler } from './utils/webPush.js';
 import authRoutes from './routes/auth.js';
 import journalRoutes from './routes/journal.js';
+import pushRoutes from './routes/push.js';
 
 initDatabase();
+initWebPush();
+startPushScheduler();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4100;
@@ -27,6 +31,7 @@ app.get('/api/health', (_req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/journal', journalRoutes);
+app.use('/api/push', pushRoutes);
 
 // Serve built client bundle in production when present
 const __filename = fileURLToPath(import.meta.url);
@@ -41,5 +46,5 @@ if (fs.existsSync(clientDistPath)) {
 }
 
 app.listen(PORT, () => {
-  console.log(`Project Journal server listening on http://localhost:${PORT}`);
+  console.log(`Project Mindmap server listening on http://localhost:${PORT}`);
 });
