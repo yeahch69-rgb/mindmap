@@ -6,11 +6,52 @@ import { authenticateToken, signAuthToken } from '../middleware/auth.js';
 
 const router = Router();
 
+function getAdminEmailsSet(): Set<string> {
+  const list = [process.env.ADMIN_EMAIL, process.env.ADMIN_EMAILS]
+    .filter(Boolean)
+    .join(',')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return new Set(list);
+}
+
+export function ensureAdminAccount() {
+  const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase() || '';
+  const adminPassword = process.env.ADMIN_PASSWORD?.trim() || '';
+  const adminName = process.env.ADMIN_NAME?.trim() || '관리자';
+  const adminEmails = getAdminEmailsSet();
+
+  for (const email of adminEmails) {
+    const existing = db.prepare('SELECT id, role FROM users WHERE email = ?').get(email) as
+      | { id: number; role: string }
+      | undefined;
+
+    if (existing) {
+      if (existing.role !== 'ADMIN') {
+        db.prepare("UPDATE users SET role = 'ADMIN' WHERE id = ?").run(existing.id);
+        console.log(`🛡️ [Admin] Promoted existing account to ADMIN: ${email}`);
+      }
+      if (email === adminEmail && adminPassword) {
+        const hash = bcrypt.hashSync(adminPassword, 10);
+        db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, existing.id);
+      }
+    } else if (email === adminEmail && adminPassword) {
+      const hash = bcrypt.hashSync(adminPassword, 10);
+      db.prepare(
+        "INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, 'ADMIN')"
+      ).run(email, hash, adminName);
+      console.log(`🛡️ [Admin] Created ADMIN account: ${email}`);
+    }
+  }
+}
+
 function formatUser(row: any) {
   return {
     id: Number(row.id),
     email: row.email,
     name: row.name,
+    role: (row.role === 'ADMIN' ? 'ADMIN' : 'USER') as 'USER' | 'ADMIN',
     fontSize: String(row.font_size || '100'),
     mobileFontSize: String(row.mobile_font_size || '100'),
     pushEnabled: Boolean(row.push_enabled ?? 1),
@@ -50,13 +91,14 @@ router.post('/register', (req: Request, res: Response) => {
       return;
     }
 
+    const assignedRole = getAdminEmailsSet().has(cleanEmail) ? 'ADMIN' : 'USER';
     const hash = bcrypt.hashSync(cleanPassword, 10);
     const info = db
-      .prepare('INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)')
-      .run(cleanEmail, hash, cleanName);
+      .prepare('INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, ?)')
+      .run(cleanEmail, hash, cleanName, assignedRole);
 
     const userRow = db
-      .prepare('SELECT id, email, name, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
+      .prepare('SELECT id, email, name, role, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
       .get(Number(info.lastInsertRowid));
     const userPayload = formatUser(userRow);
     const token = signAuthToken(userPayload);
@@ -79,7 +121,7 @@ router.post('/login', (req: Request, res: Response) => {
 
   try {
     const userRow = db
-      .prepare('SELECT id, email, name, password_hash, font_size, mobile_font_size, push_enabled FROM users WHERE email = ?')
+      .prepare('SELECT id, email, name, role, password_hash, font_size, mobile_font_size, push_enabled FROM users WHERE email = ?')
       .get(cleanEmail) as any;
 
     if (!userRow || !bcrypt.compareSync(cleanPassword, userRow.password_hash)) {
@@ -109,7 +151,7 @@ router.post('/demo', (_req: Request, res: Response) => {
     seedDemoDataForUser(userId);
 
     const userRow = db
-      .prepare('SELECT id, email, name, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
+      .prepare('SELECT id, email, name, role, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
       .get(userId);
     const userPayload = formatUser(userRow);
     const token = signAuthToken(userPayload);
@@ -129,7 +171,7 @@ router.patch('/preferences', authenticateToken, (req: Request, res: Response) =>
 
   try {
     const current = db
-      .prepare('SELECT id, email, name, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
+      .prepare('SELECT id, email, name, role, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
       .get(userId) as any;
     if (!current) {
       res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
@@ -150,7 +192,7 @@ router.patch('/preferences', authenticateToken, (req: Request, res: Response) =>
     `).run(nextName, nextFontSize, nextMobileFontSize, nextPushEnabled, userId);
 
     const updated = db
-      .prepare('SELECT id, email, name, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
+      .prepare('SELECT id, email, name, role, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
       .get(userId);
 
     res.json({ user: formatUser(updated) });

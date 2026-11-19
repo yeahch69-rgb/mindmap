@@ -8,6 +8,7 @@ export interface AuthUserPayload {
   id: number;
   email: string;
   name: string;
+  role: 'USER' | 'ADMIN';
   fontSize?: string;
   mobileFontSize?: string;
   pushEnabled?: boolean;
@@ -39,7 +40,7 @@ export function authenticateToken(req: Request, res: Response, next: NextFunctio
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     const row = db
-      .prepare('SELECT id, email, name, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
+      .prepare('SELECT id, email, name, role, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
       .get(Number(decoded.id)) as any;
 
     if (!row) {
@@ -51,6 +52,7 @@ export function authenticateToken(req: Request, res: Response, next: NextFunctio
       id: Number(row.id),
       email: row.email,
       name: row.name,
+      role: row.role === 'ADMIN' ? 'ADMIN' : 'USER',
       fontSize: String(row.font_size || '100'),
       mobileFontSize: String(row.mobile_font_size || '100'),
       pushEnabled: Boolean(row.push_enabled ?? 1),
@@ -59,4 +61,12 @@ export function authenticateToken(req: Request, res: Response, next: NextFunctio
   } catch {
     res.status(401).json({ error: '세션이 만료되었습니다. 다시 로그인해 주세요.' });
   }
+}
+
+export function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  if (!req.user || req.user.role !== 'ADMIN') {
+    res.status(403).json({ error: '관리자 권한이 필요합니다.' });
+    return;
+  }
+  next();
 }

@@ -12,9 +12,10 @@ import {
   scheduleCloudBackup,
   startCloudSyncDaemon,
 } from './db/cloudSync.js';
-import { authenticateToken } from './middleware/auth.js';
+import { authenticateToken, requireAdmin } from './middleware/auth.js';
 import { initWebPush, startPushScheduler } from './utils/webPush.js';
-import authRoutes from './routes/auth.js';
+import authRoutes, { ensureAdminAccount } from './routes/auth.js';
+import adminRoutes from './routes/admin.js';
 import journalRoutes from './routes/journal.js';
 import pushRoutes from './routes/push.js';
 
@@ -46,19 +47,20 @@ app.use('/api', (req, res, next) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, cloudSync: getCloudSyncStatus() });
+  res.json({ ok: true });
 });
 
-app.get('/api/system/cloud-sync', authenticateToken, (_req, res) => {
+app.get('/api/system/cloud-sync', authenticateToken, requireAdmin, (_req, res) => {
   res.json({ status: getCloudSyncStatus() });
 });
 
-app.post('/api/system/cloud-sync/backup', authenticateToken, async (_req, res) => {
+app.post('/api/system/cloud-sync/backup', authenticateToken, requireAdmin, async (_req, res) => {
   const ok = await backupDatabaseToFirebase('manual_user_trigger', true);
   res.json({ ok, status: getCloudSyncStatus() });
 });
 
 app.use('/api/auth', authRoutes);
+app.use('/api/admin', adminRoutes);
 app.use('/api/journal', journalRoutes);
 app.use('/api/push', pushRoutes);
 
@@ -77,6 +79,7 @@ if (fs.existsSync(clientDistPath)) {
 async function bootstrap() {
   await restoreDatabaseFromFirebaseOnStartup();
   initDatabase();
+  ensureAdminAccount();
   initWebPush();
   startPushScheduler();
   startCloudSyncDaemon();

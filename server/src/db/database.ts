@@ -62,6 +62,7 @@ export function initDatabase() {
       email TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
       name TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'USER',
       font_size TEXT NOT NULL DEFAULT '100',
       mobile_font_size TEXT NOT NULL DEFAULT '100',
       push_enabled INTEGER NOT NULL DEFAULT 1,
@@ -166,6 +167,9 @@ export function initDatabase() {
 
   const userCols = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
   const userColNames = new Set(userCols.map((c) => c.name));
+  if (!userColNames.has('role')) {
+    db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'USER';");
+  }
   if (!userColNames.has('font_size')) {
     db.exec("ALTER TABLE users ADD COLUMN font_size TEXT NOT NULL DEFAULT '100';");
   }

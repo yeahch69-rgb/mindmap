@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Bell, BookMarked, Download, LogOut, SlidersHorizontal } from 'lucide-react';
+import { Bell, BookMarked, Download, LogOut, Shield, SlidersHorizontal } from 'lucide-react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { LanguageProvider, useLanguage } from './context/LanguageContext';
 import { AuthScreen } from './components/auth/AuthScreen';
+import { AdminUsersModal } from './components/common/AdminUsersModal';
 import {
   BeforeInstallPromptEvent,
   ProfileModal,
@@ -34,6 +35,7 @@ const AppShell: React.FC = () => {
   });
 
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isAdminUsersOpen, setIsAdminUsersOpen] = useState(false);
   const [deferredInstallPrompt, setDeferredInstallPrompt] =
     useState<BeforeInstallPromptEvent | null>(null);
 
@@ -160,6 +162,18 @@ const AppShell: React.FC = () => {
               </button>
             )}
 
+            {user.role === 'ADMIN' && (
+              <button
+                type="button"
+                onClick={() => setIsAdminUsersOpen(true)}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300 text-xs font-bold transition"
+                title={L('관리자 · 전체 회원 계정 목록', '管理者 · 登録アカウント一覧', 'Admin · Registered Users')}
+              >
+                <Shield className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden sm:inline">{L('회원 관리', '会員管理', 'Admin')}</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => setIsProfileOpen(true)}
@@ -172,6 +186,18 @@ const AppShell: React.FC = () => {
             >
               <Bell className="w-4 h-4" />
             </button>
+
+            {user.role === 'ADMIN' && (
+              <button
+                type="button"
+                onClick={() => setIsAdminUsersOpen(true)}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300 text-xs font-bold transition"
+                title={L('관리자 · 전체 회원 계정 목록', '管理者 · 登録アカウント一覧', 'Admin · Registered Users')}
+              >
+                <Shield className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden sm:inline">{L('회원 관리', '会員管理', 'Admin')}</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -210,6 +236,15 @@ const AppShell: React.FC = () => {
         onClose={() => setIsProfileOpen(false)}
         deferredInstallPrompt={deferredInstallPrompt}
         onInstallPwa={handleInstallPwa}
+        onOpenAdminUsers={() => {
+          setIsProfileOpen(false);
+          setIsAdminUsersOpen(true);
+        }}
+      />
+
+      <AdminUsersModal
+        isOpen={isAdminUsersOpen}
+        onClose={() => setIsAdminUsersOpen(false)}
       />
     </div>
   );
