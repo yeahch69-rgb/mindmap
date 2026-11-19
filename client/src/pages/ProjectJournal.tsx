@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { api } from '../api/client';
 import { getJstTodayStr, formatJstTime, getJstDateKey } from '../utils/dateTime';
 import { useAuth } from '../context/AuthContext';
@@ -130,8 +130,10 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const [entrySpeaker, setEntrySpeaker] = useState('');
   const [entryContent, setEntryContent] = useState('');
   const [completedTarget, setCompletedTarget] = useState<string>(''); // '' | 'ENTRY:123' | 'IDEA:45'
-  const [autoSwitchTurn, setAutoSwitchTurn] = useState(true);
-  const [autoTurnTargetUserId, setAutoTurnTargetUserId] = useState<string>('');
+  const [editingEntryId, setEditingEntryId] = useState<number | null>(null);
+  const [revisionFormEntryId, setRevisionFormEntryId] = useState<number | null>(null);
+  const [revisionReason, setRevisionReason] = useState('');
+  const [isSubmittingRevision, setIsSubmittingRevision] = useState(false);
   const [showTurnTargetPicker, setShowTurnTargetPicker] = useState(false);
   const [isAddingEntry, setIsAddingEntry] = useState(false);
   const composerFormRef = useRef<HTMLFormElement>(null);
@@ -176,13 +178,13 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const [formColor, setFormColor] = useState('#1B4D3E');
   const [isSubmittingProject, setIsSubmittingProject] = useState(false);
 
-  // Generic Collaboration & Invite Modals
-  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  // Modal Sub-Tabs (Join merged into New Project modal, Invite/Members merged into People modal)
+  const [projectModalTab, setProjectModalTab] = useState<'CREATE' | 'JOIN'>('CREATE');
+  const [participantsModalTab, setParticipantsModalTab] = useState<'STAKEHOLDERS' | 'COLLAB'>('STAKEHOLDERS');
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteError, setInviteError] = useState('');
   const [isInvitingMember, setIsInvitingMember] = useState(false);
   const [copiedInvite, setCopiedInvite] = useState(false);
-  const [isJoinModalOpen, setIsJoinModalOpen] = useState(false);
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [joinError, setJoinError] = useState('');
   const [isJoiningByCode, setIsJoiningByCode] = useState(false);
@@ -198,7 +200,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       if (keepSelection && selectedProjectId) {
         const stillExists = list.some(p => p.id === selectedProjectId);
         if (!stillExists) {
-          setSelectedProjectId(null);
+          navigateProjectSelection(null);
           setDetailProject(null);
         }
       }
@@ -229,15 +231,73 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     }
   };
 
+  const navigateProjectSelection = useCallback((nextId: number | null) => {
+    try {
+      const currHistoryPid = Number(window.history.state?.journalProjectId || 0);
+      if (nextId !== null) {
+        const nextUrl = new URL(window.location.href);
+        nextUrl.searchParams.set('project', String(nextId));
+        if (currHistoryPid > 0) {
+          window.history.replaceState(
+            { ...(window.history.state || {}), journalProjectId: nextId },
+            '',
+            nextUrl.pathname + nextUrl.search
+          );
+        } else {
+          const listUrl = new URL(window.location.href);
+          listUrl.searchParams.delete('project');
+          window.history.replaceState(
+            { ...(window.history.state || {}), journalProjectId: null },
+            '',
+            listUrl.pathname + listUrl.search
+          );
+          window.history.pushState(
+            { ...(window.history.state || {}), journalProjectId: nextId },
+            '',
+            nextUrl.pathname + nextUrl.search
+          );
+        }
+        setSelectedProjectId(nextId);
+      } else {
+        if (currHistoryPid > 0) {
+          window.history.back();
+          return;
+        }
+        const listUrl = new URL(window.location.href);
+        listUrl.searchParams.delete('project');
+        window.history.replaceState(
+          { ...(window.history.state || {}), journalProjectId: null },
+          '',
+          listUrl.pathname + listUrl.search
+        );
+        setSelectedProjectId(null);
+      }
+    } catch {
+      setSelectedProjectId(nextId);
+    }
+  }, []);
+
   useEffect(() => {
     fetchOverview();
+    const handlePopState = (ev: PopStateEvent) => {
+      try {
+        const statePid = Number(ev.state?.journalProjectId || 0);
+        const urlPid = Number(new URLSearchParams(window.location.search).get('project') || 0);
+        const pid = statePid > 0 ? statePid : urlPid;
+        setSelectedProjectId(Number.isInteger(pid) && pid > 0 ? pid : null);
+      } catch {
+        setSelectedProjectId(null);
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
   useEffect(() => {
     if (!initialProjectId || !user) return;
-    setSelectedProjectId(initialProjectId);
+    navigateProjectSelection(initialProjectId);
     onConsumeInitialProjectId?.();
-  }, [initialProjectId, user?.id, onConsumeInitialProjectId]);
+  }, [initialProjectId, user?.id, onConsumeInitialProjectId, navigateProjectSelection]);
 
   useEffect(() => {
     if (!pendingInviteToken || !user) return;
@@ -248,7 +308,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
         });
         await fetchOverview();
         if (res?.project_id) {
-          setSelectedProjectId(res.project_id);
+          navigateProjectSelection(res.project_id);
         }
       } catch (err: any) {
         alert(err.message || t('common.error'));
@@ -266,18 +326,24 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       setShowInitialIntent(false);
       setIsEditingNextStep(false);
       setCompletedTarget('');
+      setEditingEntryId(null);
+      setRevisionFormEntryId(null);
+      setRevisionReason('');
       setSpeakerCustomInput(false);
       setEntrySpeaker('');
+      setEntryContent('');
       setEntryDate(getJstTodayStr());
       setEntryTime('');
       setDueDate('');
       setDueTime('');
       setShowTurnTargetPicker(false);
-      setAutoTurnTargetUserId('');
     } else {
       setDetailProject(null);
       setDetailEntries([]);
       setDetailIdeas([]);
+      setEditingEntryId(null);
+      setRevisionFormEntryId(null);
+      setRevisionReason('');
     }
   }, [selectedProjectId]);
 
@@ -374,6 +440,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   // Project Modal Openers
   const handleOpenCreateModal = () => {
     setEditingProject(null);
+    setProjectModalTab('CREATE');
+    setJoinCodeInput('');
+    setJoinError('');
     setFormTitle('');
     setFormMode('SOLO');
     setFormPartnerType('SHARED');
@@ -429,7 +498,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       } else {
         const created = await api.post<JournalProject>('/journal/projects', payload);
         await fetchOverview();
-        if (created?.id) setSelectedProjectId(created.id);
+        if (created?.id) navigateProjectSelection(created.id);
       }
       setIsProjectModalOpen(false);
     } catch (err: any) {
@@ -491,8 +560,8 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       await api.delete(`/journal/projects/${detailProject.id}/members/${memberUserId}`);
       await fetchOverview();
       if (memberUserId === Number(user?.id)) {
-        setIsShareModalOpen(false);
-        setSelectedProjectId(null);
+        setIsParticipantsModalOpen(false);
+        navigateProjectSelection(null);
       } else {
         await fetchProjectDetail(detailProject.id);
       }
@@ -510,11 +579,11 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       const res = await api.post<{ project_id: number }>('/journal/invites/accept', {
         token: joinCodeInput.trim(),
       });
-      setIsJoinModalOpen(false);
+      setIsProjectModalOpen(false);
       setJoinCodeInput('');
       await fetchOverview();
       if (res?.project_id) {
-        setSelectedProjectId(res.project_id);
+        navigateProjectSelection(res.project_id);
       }
     } catch (err: any) {
       setJoinError(err.message || t('common.error'));
@@ -610,7 +679,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     try {
       await api.delete(`/journal/projects/${proj.id}`);
       if (selectedProjectId === proj.id) {
-        setSelectedProjectId(null);
+        navigateProjectSelection(null);
       }
       await fetchOverview();
     } catch (err: any) {
@@ -645,12 +714,6 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
 
     if (!entryContent.trim()) return;
 
-    let nextTurnState: TurnState | undefined;
-    if (autoSwitchTurn && detailProject.mode === 'COLLAB') {
-      if (composerKind === 'DIALOGUE_ME') nextTurnState = 'THEIR_TURN';
-      if (composerKind === 'DIALOGUE_THEM') nextTurnState = 'MY_TURN';
-    }
-
     let completed_target_type: 'ENTRY' | 'IDEA' | undefined;
     let completed_target_id: number | undefined;
     if (composerKind === 'PROGRESS' && completedTarget) {
@@ -662,15 +725,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       }
     }
 
-    let autoTargetUserIdNum: number | undefined;
-    if (nextTurnState === 'THEIR_TURN') {
-      const otherTargets = getOtherAppTurnTargets(detailProject);
-      autoTargetUserIdNum = autoTurnTargetUserId ? Number(autoTurnTargetUserId) : otherTargets[0]?.user_id;
-    }
-
     try {
       setIsAddingEntry(true);
-      await api.post(`/journal/projects/${detailProject.id}/entries`, {
+      const payload = {
         entry_type: composerKind,
         speaker_name:
           composerKind === 'DIALOGUE_THEM'
@@ -681,11 +738,15 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
         entry_time: entryTime || null,
         due_date: dueDate || null,
         due_time: dueTime || null,
-        next_turn_state: nextTurnState,
-        ...(autoTargetUserIdNum ? { target_turn_user_id: autoTargetUserIdNum } : {}),
-        completed_target_type,
-        completed_target_id,
-      });
+        completed_target_type: completed_target_type ?? null,
+        completed_target_id: completed_target_id ?? null,
+      };
+      if (editingEntryId) {
+        await api.patch(`/journal/entries/${editingEntryId}`, payload);
+      } else {
+        await api.post(`/journal/projects/${detailProject.id}/entries`, payload);
+      }
+      setEditingEntryId(null);
       setEntryContent('');
       setEntrySpeaker('');
       setCompletedTarget('');
@@ -699,6 +760,79 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       alert(err.message || t('common.error'));
     } finally {
       setIsAddingEntry(false);
+    }
+  };
+
+  const handleStartEditEntry = (en: JournalEntry) => {
+    setEditingEntryId(en.id);
+    setComposerKind(en.entry_type);
+    setEntrySpeaker(en.speaker_name || '');
+    setSpeakerCustomInput(Boolean(en.speaker_name));
+    setEntryDate(en.entry_date || '');
+    setEntryTime(en.entry_time || '');
+    setDueDate(en.due_date || '');
+    setDueTime(en.due_time || '');
+    setEntryContent(en.content || '');
+    setCompletedTarget(
+      en.completed_target_type && en.completed_target_id
+        ? `${en.completed_target_type}:${en.completed_target_id}`
+        : ''
+    );
+    setDetailSubTab('TIMELINE');
+    setTimeout(() => {
+      composerFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      entryContentRef.current?.focus();
+    }, 30);
+  };
+
+  const handleCancelEditEntry = () => {
+    setEditingEntryId(null);
+    setEntryContent('');
+    setEntrySpeaker('');
+    setCompletedTarget('');
+    setEntryDate(getJstTodayStr());
+    setEntryTime('');
+    setDueDate('');
+    setDueTime('');
+  };
+
+  const handleSubmitRevisionRequest = async (entryId: number) => {
+    if (!detailProject || !revisionReason.trim()) return;
+    try {
+      setIsSubmittingRevision(true);
+      await api.post(`/journal/entries/${entryId}/revision-request`, {
+        reason: revisionReason.trim(),
+      });
+      setRevisionFormEntryId(null);
+      setRevisionReason('');
+      await fetchOverview();
+      await fetchProjectDetail(detailProject.id);
+    } catch (err: any) {
+      alert(err.message || t('common.error'));
+    } finally {
+      setIsSubmittingRevision(false);
+    }
+  };
+
+  const handleResolveRevisionRequest = async (requestId: number) => {
+    if (!detailProject) return;
+    try {
+      await api.patch(`/journal/revision-requests/${requestId}/resolve`, {});
+      await fetchOverview();
+      await fetchProjectDetail(detailProject.id);
+    } catch (err: any) {
+      alert(err.message || t('common.error'));
+    }
+  };
+
+  const handleCancelRevisionRequest = async (requestId: number) => {
+    if (!detailProject) return;
+    try {
+      await api.delete(`/journal/revision-requests/${requestId}`);
+      await fetchOverview();
+      await fetchProjectDetail(detailProject.id);
+    } catch (err: any) {
+      alert(err.message || t('common.error'));
     }
   };
 
@@ -815,8 +949,8 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     }
   };
 
-  // Stakeholders / Participants Modal Handlers
-  const handleOpenParticipantsModal = () => {
+  // Stakeholders / Participants & Collab Modal Handlers
+  const handleOpenParticipantsModal = (initialTab: 'STAKEHOLDERS' | 'COLLAB' = 'STAKEHOLDERS') => {
     if (!detailProject) return;
     const baseList = [...(detailProject.participants || [])];
     if (
@@ -828,6 +962,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     setParticipantsDraft(baseList);
     setNewParticipantName('');
     setNewParticipantRole('');
+    setInviteEmail('');
+    setInviteError('');
+    setParticipantsModalTab(initialTab);
     setIsParticipantsModalOpen(true);
   };
 
@@ -1028,7 +1165,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     return (
       <div
         key={p.id}
-        onClick={() => setSelectedProjectId(p.id)}
+        onClick={() => navigateProjectSelection(p.id)}
         className={`p-3 rounded-xl border transition cursor-pointer flex flex-col gap-2 ${
           isSelected
             ? 'bg-forest-50/70 border-forest-700 ring-2 ring-forest-700/30 shadow-xs'
@@ -1120,7 +1257,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   };
 
   return (
-    <div className="w-full max-w-full space-y-2 sm:space-y-3 overflow-x-hidden pb-6">
+    <div className="w-full max-w-full space-y-2.5 sm:space-y-3 overflow-x-hidden pb-6">
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#E6E2D8]">
         <div>
@@ -1144,19 +1281,6 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
             <Button
               variant="outline"
               size="sm"
-              onClick={() => {
-                setJoinError('');
-                setJoinCodeInput('');
-                setIsJoinModalOpen(true);
-              }}
-              className="flex items-center gap-1 whitespace-nowrap"
-            >
-              <KeyRound className="w-3.5 h-3.5" />
-              <span>{L('초대코드 참여', '招待コード参加', 'Join Invite')}</span>
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
               onClick={() => fetchOverview()}
               className="flex items-center gap-1"
             >
@@ -1177,7 +1301,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => setSelectedProjectId(null)}
+                onClick={() => navigateProjectSelection(null)}
                 className="sm:hidden ml-auto flex items-center gap-1 font-bold whitespace-nowrap"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
@@ -1192,7 +1316,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => setSelectedProjectId(null)}
+                onClick={() => navigateProjectSelection(null)}
                 className="flex items-center gap-1.5 font-bold whitespace-nowrap"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
@@ -1204,7 +1328,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       </div>
 
       {/* 3-Second Quick Capture Inbox Bar */}
-      <div className="bg-white p-3 rounded-xl border border-ivory-300 shadow-2xs space-y-2.5">
+      <div className="space-y-2.5">
         <form onSubmit={handleAddInbox} className="flex items-center gap-2">
           <div className="relative flex-1 min-w-0">
             <Inbox className="w-4 h-4 text-forest-700 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -1531,7 +1655,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               projects={filteredProjects}
               todayJst={todayJst}
               onSelectProject={(id) => {
-                setSelectedProjectId(id);
+                navigateProjectSelection(id);
                 setViewMode('BOARD');
               }}
             />
@@ -1543,7 +1667,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               allProjects={filteredProjects}
               onFocusProject={(id) => setMindMapProjectId(id ?? 'ALL')}
               onOpenProjectDetail={(id) => {
-                setSelectedProjectId(id);
+                navigateProjectSelection(id);
                 setDetailSubTab('MINDMAP');
                 setViewMode('BOARD');
               }}
@@ -1562,7 +1686,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               currentUserId={user?.id}
               onFocusProject={(id) => setMindMapProjectId(id ?? 'ALL')}
               onOpenProjectDetail={(id) => {
-                setSelectedProjectId(id);
+                navigateProjectSelection(id);
                 setDetailSubTab('FREEMAP');
                 setViewMode('BOARD');
               }}
@@ -1638,67 +1762,40 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       {/* Option 1 + Notion Width Toggle: Centered (896px) <-> Full Width */}
       {selectedProjectId && (
         <div
-          className={`!mt-0 pt-2 lg:pt-3 space-y-4 transition-all duration-200 ${
+          className={`border-t border-ivory-200 lg:border-t-0 pt-3 lg:pt-0 space-y-3 sm:space-y-4 transition-all duration-200 ${
             isCurrentFullWidth ? 'w-full max-w-full' : 'w-full max-w-4xl mx-auto'
           }`}
         >
           {/* Top Detail Action Bar (on <1024px Back button lives in Page Header) */}
-          <div
-            className={`flex-wrap items-center justify-between gap-2 pb-2 border-b border-ivory-200 ${
-              projects.length > 1 ? 'flex' : 'hidden lg:flex'
-            }`}
-          >
+          <div className="hidden lg:flex items-center justify-between gap-2 pb-2 border-b border-ivory-200">
             <Button
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => setSelectedProjectId(null)}
-              className="hidden lg:inline-flex items-center gap-1.5 font-bold"
+              onClick={() => navigateProjectSelection(null)}
+              className="inline-flex items-center gap-1.5 font-bold"
             >
               <ArrowLeft className="w-4 h-4" />
               <span>{L('목록으로', '一覧へ戻る', 'Back to List')}</span>
             </Button>
 
-            <div className="flex items-center gap-2 min-w-0 ml-auto">
-              {projects.length > 1 && (
-                <select
-                  value={selectedProjectId}
-                  onChange={(e) => {
-                    const nextId = Number(e.target.value);
-                    if (nextId) setSelectedProjectId(nextId);
-                  }}
-                  className="p-1.5 bg-white border border-ivory-300 rounded-lg text-xs font-bold text-charcoal-800 max-w-[200px] sm:max-w-[260px] truncate"
-                >
-                  {projects.map((proj) => (
-                    <option key={proj.id} value={proj.id}>
-                      {proj.title}
-                    </option>
-                  ))}
-                </select>
-              )}
-
-              <button
-                type="button"
-                onClick={handleToggleProjectFullWidth}
-                className={`hidden lg:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-bold transition whitespace-nowrap ${
-                  isCurrentFullWidth
-                    ? 'bg-forest-800 text-white border-forest-900 shadow-2xs'
-                    : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
-                }`}
-                title={L('본문 너비 전환 (표준 896px ↔ 전체 너비)', '表示幅を切替 (標準 896px ↔ 全幅)', 'Toggle page width')}
-              >
-                <ArrowRightLeft className="w-3.5 h-3.5" />
-                <span>{L('전체 너비', '全幅', 'Full Width')}</span>
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={handleToggleProjectFullWidth}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-bold transition whitespace-nowrap ${
+                isCurrentFullWidth
+                  ? 'bg-forest-800 text-white border-forest-900 shadow-2xs'
+                  : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
+              }`}
+              title={L('본문 너비 전환 (표준 896px ↔ 전체 너비)', '表示幅を切替 (標準 896px ↔ 全幅)', 'Toggle page width')}
+            >
+              <ArrowRightLeft className="w-3.5 h-3.5" />
+              <span>{L('전체 너비', '全幅', 'Full Width')}</span>
+            </button>
           </div>
 
           {/* Project Header & Edit/Delete (Title spans full width below badges/actions on mobile) */}
-          <div
-            className={`pb-2.5 border-b border-ivory-200 space-y-2 ${
-              projects.length > 1 ? '' : '!mt-0 lg:!mt-4'
-            }`}
-          >
+          <div className="!mt-0 lg:!mt-3 pb-2.5 border-b border-ivory-200 space-y-2">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div className="flex items-center gap-1.5 flex-wrap min-w-0">
                   {detailProject?.mode === 'SOLO' || detailProject?.is_private === 1 ? (
@@ -1724,25 +1821,12 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                 </div>
 
                 {detailProject && (
-                  <div className="flex items-center gap-1.5 shrink-0 ml-auto flex-wrap">
+                  <div className="flex items-center gap-1.5 shrink-0 ml-auto">
                     <button
                       type="button"
-                      onClick={() => {
-                        setInviteError('');
-                        setInviteEmail('');
-                        setIsShareModalOpen(true);
-                      }}
-                      className="px-2.5 py-1.5 rounded-lg bg-indigo-50 text-indigo-900 border border-indigo-200 hover:bg-indigo-100 text-xs font-bold inline-flex items-center gap-1 transition whitespace-nowrap"
-                      title={L('초대 링크 및 협업 멤버 관리', '招待リンク・メンバー管理', 'Invite link & members')}
-                    >
-                      <Share2 className="w-3.5 h-3.5" />
-                      <span>{L('초대·멤버', '招待・メンバー', 'Invite')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleOpenParticipantsModal}
+                      onClick={() => handleOpenParticipantsModal('STAKEHOLDERS')}
                       className="px-2.5 py-1.5 rounded-lg bg-sky-50 text-sky-900 border border-sky-200 hover:bg-sky-100 text-xs font-bold inline-flex items-center gap-1 transition whitespace-nowrap"
-                      title={L('이 프로젝트의 관계자(대화 상대) 사전 설정', 'プロジェクトの関係者設定', 'Configure project stakeholders')}
+                      title={L('관계자 명단 및 협업 초대·멤버 관리', '関係者・招待・メンバー管理', 'Configure stakeholders & invite members')}
                     >
                       <Users className="w-3.5 h-3.5" />
                       <span>
@@ -2033,14 +2117,19 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                     </div>
 
                     {/* Mini Relay Flow Visualization (Mobile: newest on left with ←; Desktop: chronological →) */}
-                    {detailEntries.length > 0 && (
+                    {detailEntries.length > 0 && (() => {
+                      const relayEntries = allUnifiedItems
+                        .filter((item): item is Extract<UnifiedTimelineItem, { kind: 'ENTRY' }> => item.kind === 'ENTRY')
+                        .map((item) => item.entry)
+                        .slice(-8);
+                      return (
                       <div className="space-y-1">
                         <span className="text-[11px] font-bold text-charcoal-500 block">
                           {L('진행 릴레이 흐름 (최근 기록)', '進行リレーの流れ', 'Relay Flow')}
                         </span>
                         {/* Mobile: Latest first on the left, flowing leftward */}
                         <div className="flex sm:hidden items-center gap-1 overflow-x-auto pb-1">
-                          {detailEntries.slice(-8).reverse().map((en, idx, arr) => {
+                          {[...relayEntries].reverse().map((en, idx, arr) => {
                             const pillCls =
                               en.entry_type === 'DIALOGUE_ME'
                                 ? 'bg-forest-700 text-white'
@@ -2074,7 +2163,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         </div>
                         {/* Desktop: Chronological oldest -> newest */}
                         <div className="hidden sm:flex items-center gap-1 overflow-x-auto pb-1">
-                          {detailEntries.slice(-8).map((en, idx, arr) => {
+                          {relayEntries.map((en, idx, arr) => {
                             const pillCls =
                               en.entry_type === 'DIALOGUE_ME'
                                 ? 'bg-forest-700 text-white'
@@ -2107,7 +2196,8 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                           })}
                         </div>
                       </div>
-                    )}
+                      );
+                    })()}
 
                     {/* Detail Subtabs: Timeline (incl. Ideas) vs Tree Mind Map vs Free Mind Map */}
                     <div className="grid grid-cols-3 gap-1 bg-ivory-100 p-1 rounded-xl border border-ivory-300 text-xs font-bold">
@@ -2156,8 +2246,28 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         <form
                           ref={composerFormRef}
                           onSubmit={handleAddTimelineItem}
-                          className="p-3 rounded-xl bg-white border border-ivory-300 shadow-2xs space-y-2 text-xs"
+                          className={`p-3 rounded-xl border shadow-2xs space-y-2 text-xs ${
+                            editingEntryId
+                              ? 'bg-amber-50/50 border-amber-400 ring-2 ring-amber-300/40'
+                              : 'bg-white border-ivory-300'
+                          }`}
                         >
+                          {editingEntryId && (
+                            <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-amber-100/90 border border-amber-300 text-amber-950">
+                              <span className="font-bold text-[11px] flex items-center gap-1.5">
+                                <Edit2 className="w-3.5 h-3.5 text-amber-700" />
+                                <span>{L('기존 타임라인 기록 수정 중 · 아래 내용을 수정하고 저장하세요', 'タイムライン記録を編集中', 'Editing entry · update below and save')}</span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={handleCancelEditEntry}
+                                className="px-2 py-0.5 rounded bg-white border border-amber-300 text-[11px] font-bold text-charcoal-700 hover:bg-amber-50 shrink-0"
+                              >
+                                {L('수정 취소', 'キャンセル', 'Cancel')}
+                              </button>
+                            </div>
+                          )}
+
                           <div className="flex flex-wrap items-center gap-1.5">
                             {(
                               [
@@ -2171,7 +2281,12 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                               <button
                                 key={tBtn.id}
                                 type="button"
-                                onClick={() => setComposerKind(tBtn.id)}
+                                onClick={() => {
+                                  if (tBtn.id === 'IDEA' && editingEntryId) {
+                                    handleCancelEditEntry();
+                                  }
+                                  setComposerKind(tBtn.id);
+                                }}
                                 className={`px-2.5 py-1 rounded-lg border font-bold transition whitespace-nowrap ${
                                   composerKind === tBtn.id ? tBtn.cls : 'bg-white text-charcoal-700 border-ivory-300'
                                 }`}
@@ -2324,7 +2439,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                         </button>
                                         <button
                                           type="button"
-                                          onClick={handleOpenParticipantsModal}
+                                          onClick={() => handleOpenParticipantsModal('STAKEHOLDERS')}
                                           className="px-2 py-1 rounded-full bg-sky-50 text-sky-800 border border-sky-200 text-[11px] font-bold hover:bg-sky-100 inline-flex items-center gap-1"
                                         >
                                           <Settings className="w-3 h-3" />
@@ -2354,44 +2469,12 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                       )}
                                       <button
                                         type="button"
-                                        onClick={handleOpenParticipantsModal}
+                                        onClick={() => handleOpenParticipantsModal('STAKEHOLDERS')}
                                         className="px-2.5 py-1 rounded-lg bg-sky-50 text-sky-900 border border-sky-200 text-[11px] font-bold hover:bg-sky-100 inline-flex items-center gap-1 shrink-0"
                                       >
                                         <Settings className="w-3 h-3" />
                                         <span>{L('관계자 사전설정', '関係者設定', 'Setup People')}</span>
                                       </button>
-                                    </div>
-                                  );
-                                })()}
-                                {detailProject.mode === 'COLLAB' && (composerKind === 'DIALOGUE_ME' || composerKind === 'DIALOGUE_THEM') && (() => {
-                                  const otherTargets = getOtherAppTurnTargets(detailProject);
-                                  return (
-                                    <div className="flex flex-wrap items-center gap-2">
-                                      <label className="inline-flex items-center gap-1.5 text-[11px] font-bold text-charcoal-700 cursor-pointer">
-                                        <input
-                                          type="checkbox"
-                                          checked={autoSwitchTurn}
-                                          onChange={(e) => setAutoSwitchTurn(e.target.checked)}
-                                        />
-                                        <span>
-                                          {composerKind === 'DIALOGUE_ME'
-                                            ? L('등록 시 [상대 턴]으로 자동 전환', '登録時に[相手ターン]へ自動切替', 'Auto-switch to Their Turn')
-                                            : L('등록 시 [내 턴]으로 자동 전환', '登録時に[自分のターン]へ自動切替', 'Auto-switch to My Turn')}
-                                        </span>
-                                      </label>
-                                      {autoSwitchTurn && composerKind === 'DIALOGUE_ME' && otherTargets.length >= 2 && (
-                                        <select
-                                          value={autoTurnTargetUserId || String(otherTargets[0].user_id)}
-                                          onChange={(e) => setAutoTurnTargetUserId(e.target.value)}
-                                          className="px-2 py-0.5 bg-white border border-sky-300 rounded text-[11px] font-bold text-sky-900"
-                                        >
-                                          {otherTargets.map(t => (
-                                            <option key={`auto-turn-${t.user_id}`} value={t.user_id}>
-                                              → {t.name}
-                                            </option>
-                                          ))}
-                                        </select>
-                                      )}
                                     </div>
                                   );
                                 })()}
@@ -2452,10 +2535,19 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 className="w-full p-2.5 bg-white border border-ivory-300 rounded-lg text-xs text-charcoal-900"
                               />
 
-                              <div className="flex justify-end">
+                              <div className="flex justify-end gap-2">
+                                {editingEntryId && (
+                                  <Button type="button" variant="secondary" size="sm" onClick={handleCancelEditEntry}>
+                                    <span>{t('common.cancel')}</span>
+                                  </Button>
+                                )}
                                 <Button type="submit" variant="primary" size="sm" isLoading={isAddingEntry}>
-                                  <Plus className="w-3.5 h-3.5" />
-                                  <span>{L('기록 남기기', '記録する', 'Add Log')}</span>
+                                  {editingEntryId ? <Edit2 className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+                                  <span>
+                                    {editingEntryId
+                                      ? L('수정 저장', '変更を保存', 'Save Changes')
+                                      : L('기록 남기기', '記録する', 'Add Log')}
+                                  </span>
                                 </Button>
                               </div>
                             </>
@@ -2685,6 +2777,30 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                           <span>{L('완료', '完了', 'Done')}</span>
                                         </button>
                                       )}
+                                      {Number(en.author_id) === Number(user?.id) ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleStartEditEntry(en)}
+                                          className="px-2 py-0.5 rounded-md bg-white border border-ivory-300 text-charcoal-700 font-bold text-[11px] hover:bg-ivory-100 inline-flex items-center gap-1"
+                                          title={L('이 기록 수정', 'この記録を編集', 'Edit this entry')}
+                                        >
+                                          <Edit2 className="w-3 h-3" />
+                                          <span>{t('common.edit')}</span>
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setRevisionFormEntryId(revisionFormEntryId === en.id ? null : en.id);
+                                            setRevisionReason('');
+                                          }}
+                                          className="px-2 py-0.5 rounded-md bg-amber-50 border border-amber-300 text-amber-900 font-bold text-[11px] hover:bg-amber-100 inline-flex items-center gap-1"
+                                          title={L('작성자에게 내용 수정 요청 보내기', '作成者に修正を依頼', 'Request revision from author')}
+                                        >
+                                          <AlertTriangle className="w-3 h-3" />
+                                          <span>{L('수정 요청', '修正依頼', 'Request Edit')}</span>
+                                        </button>
+                                      )}
                                       {(Number(en.author_id) === Number(user?.id) || Number(detailProject.created_by) === Number(user?.id)) && (
                                         <button
                                           type="button"
@@ -2711,6 +2827,88 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                   <p className="text-charcoal-900 whitespace-pre-wrap leading-relaxed font-medium">
                                     {en.content}
                                   </p>
+
+                                  {revisionFormEntryId === en.id && (
+                                    <div className="p-2 rounded-lg bg-amber-50 border border-amber-300 space-y-1.5">
+                                      <div className="text-[11px] font-bold text-amber-950">
+                                        {L('작성자에게 수정 요청 남기기', '作成者へ修正依頼を送る', 'Send revision request')}
+                                      </div>
+                                      <div className="flex items-center gap-1.5">
+                                        <input
+                                          type="text"
+                                          value={revisionReason}
+                                          onChange={(e) => setRevisionReason(e.target.value)}
+                                          placeholder={L('수정이 필요한 부분이나 사유를 입력하세요...', '修正が必要な理由や内容...', 'What needs correction?')}
+                                          className="flex-1 min-w-0 p-1.5 bg-white border border-amber-300 rounded text-[11px] text-charcoal-900"
+                                        />
+                                        <button
+                                          type="button"
+                                          disabled={!revisionReason.trim() || isSubmittingRevision}
+                                          onClick={() => handleSubmitRevisionRequest(en.id)}
+                                          className="px-2.5 py-1.5 rounded bg-amber-600 text-white font-bold text-[11px] hover:bg-amber-700 disabled:opacity-50 shrink-0"
+                                        >
+                                          {L('요청 전송', '送信', 'Send')}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setRevisionFormEntryId(null);
+                                            setRevisionReason('');
+                                          }}
+                                          className="px-2 py-1.5 rounded bg-white border border-ivory-300 text-charcoal-600 font-bold text-[11px] shrink-0"
+                                        >
+                                          {t('common.cancel')}
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {en.revision_requests && en.revision_requests.length > 0 && (
+                                    <div className="space-y-1 pt-1">
+                                      {en.revision_requests.map((rr) => (
+                                        <div
+                                          key={`rev-req-${rr.id}`}
+                                          className="p-2 rounded-lg bg-amber-50/90 border border-amber-300 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                                        >
+                                          <div className="text-amber-950 font-medium break-words">
+                                            <span className="font-bold">
+                                              📝 {rr.requester_name || L('참여자', 'メンバー', 'Member')} {L('수정 요청', '修正依頼', 'Revision Request')}:
+                                            </span>{' '}
+                                            {rr.reason}
+                                          </div>
+                                          <div className="flex items-center gap-1 shrink-0">
+                                            {Number(en.author_id) === Number(user?.id) && (
+                                              <>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => handleStartEditEntry(en)}
+                                                  className="px-2 py-0.5 rounded bg-forest-700 text-white font-bold hover:bg-forest-800"
+                                                >
+                                                  {L('수정하기', '修正する', 'Edit Now')}
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => handleResolveRevisionRequest(rr.id)}
+                                                  className="px-2 py-0.5 rounded bg-white border border-emerald-400 text-emerald-800 font-bold hover:bg-emerald-50"
+                                                >
+                                                  {L('확인 완료', '確認済', 'Resolve')}
+                                                </button>
+                                              </>
+                                            )}
+                                            {Number(rr.requester_id) === Number(user?.id) && (
+                                              <button
+                                                type="button"
+                                                onClick={() => handleCancelRevisionRequest(rr.id)}
+                                                className="px-2 py-0.5 rounded bg-white border border-ivory-300 text-charcoal-600 font-bold hover:bg-ivory-100"
+                                              >
+                                                {L('요청 취소', '取消', 'Withdraw')}
+                                              </button>
+                                            )}
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
                                   </div>
                                 </div>
                               );
@@ -2754,14 +2952,77 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
         </div>
       )}
 
-      {/* CREATE / EDIT PROJECT MODAL */}
+      {/* CREATE / EDIT PROJECT MODAL (includes Join by Invite tab on Create) */}
       {isProjectModalOpen && (
         <Modal
           isOpen={true}
           onClose={() => setIsProjectModalOpen(false)}
-          title={editingProject ? L('프로젝트 설정 수정', 'プロジェクト編集', 'Edit Project') : L('새 프로젝트 저널 만들기', '新規プロジェクト日誌作成', 'New Project Journal')}
-          maxWidth="xl"
+          title={
+            editingProject
+              ? L('프로젝트 설정 수정', 'プロジェクト編集', 'Edit Project')
+              : projectModalTab === 'JOIN'
+              ? L('초대 코드 · 링크로 프로젝트 참여', '招待コード・リンクで参加', 'Join Project via Invite')
+              : L('새 프로젝트 만들기', '新規プロジェクト作成', 'New Project')
+          }
+          maxWidth={projectModalTab === 'JOIN' && !editingProject ? 'sm' : 'xl'}
         >
+          {!editingProject && (
+            <div className="grid grid-cols-2 gap-1 p-1 mb-4 rounded-xl bg-ivory-100 border border-ivory-200 text-xs font-bold">
+              <button
+                type="button"
+                onClick={() => setProjectModalTab('CREATE')}
+                className={`py-1.5 px-2 rounded-lg flex items-center justify-center gap-1.5 transition ${
+                  projectModalTab === 'CREATE'
+                    ? 'bg-forest-800 text-white shadow-2xs'
+                    : 'text-charcoal-700 hover:bg-white'
+                }`}
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>{L('새 프로젝트 만들기', '新規作成', 'Create New')}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setProjectModalTab('JOIN')}
+                className={`py-1.5 px-2 rounded-lg flex items-center justify-center gap-1.5 transition ${
+                  projectModalTab === 'JOIN'
+                    ? 'bg-forest-800 text-white shadow-2xs'
+                    : 'text-charcoal-700 hover:bg-white'
+                }`}
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>{L('초대코드로 참여', '招待コード参加', 'Join Invite')}</span>
+              </button>
+            </div>
+          )}
+
+          {!editingProject && projectModalTab === 'JOIN' ? (
+            <form onSubmit={handleJoinByInviteCode} className="space-y-3 text-xs">
+              <p className="text-charcoal-600 leading-relaxed">
+                {L(
+                  '전달받은 초대 링크 전체 또는 초대 코드를 붙여넣으면 협업 프로젝트에 바로 참여할 수 있습니다.',
+                  '受け取った招待リンクまたは招待コードを貼り付けるとプロジェクトに参加できます。',
+                  'Paste the full invite URL or code shared with you to join the project.'
+                )}
+              </p>
+              <input
+                type="text"
+                autoFocus
+                value={joinCodeInput}
+                onChange={(e) => setJoinCodeInput(e.target.value)}
+                placeholder={L('예: http://localhost:5174/?invite=... 또는 코드', '例: 招待URL または コード', 'Paste invite URL or token...')}
+                className="w-full p-2.5 bg-ivory-50 border border-ivory-300 rounded-lg font-mono text-charcoal-900"
+              />
+              {joinError && <p className="text-rose-600 font-bold">{joinError}</p>}
+              <div className="flex justify-end gap-2 pt-2 border-t border-ivory-200">
+                <Button type="button" variant="secondary" onClick={() => setIsProjectModalOpen(false)}>
+                  {t('common.cancel')}
+                </Button>
+                <Button type="submit" variant="primary" isLoading={isJoiningByCode}>
+                  {L('참여하기', '参加する', 'Join')}
+                </Button>
+              </div>
+            </form>
+          ) : (
           <form onSubmit={handleSubmitProject} className="space-y-4 text-xs">
             <div>
               <label className="block font-bold text-charcoal-800 mb-1">{L('프로젝트 이름', 'プロジェクト名', 'Project Title')} *</label>
@@ -2848,9 +3109,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                 ) : (
                   <p className="text-[11px] text-sky-900 bg-white/80 border border-sky-200 rounded-lg p-2 font-medium">
                     {L(
-                      '생성 후 상단의 [초대·멤버] 버튼에서 초대 링크를 복사해 상대에게 보내거나 이메일로 바로 초대할 수 있습니다.',
-                      '作成後、上部の[招待・メンバー]ボタンから招待リンクを共有またはメール招待できます。',
-                      'After creation, open [Invite] at the top to copy a shareable invite link or invite by email.'
+                      '생성 후 상단의 [관계자] 버튼 안 [초대·멤버] 탭에서 초대 링크를 복사하거나 이메일로 바로 초대할 수 있습니다.',
+                      '作成後、上部の[関係者]ボタン内の[招待・メンバー]タブから招待リンクやメール招待を行えます。',
+                      'After creation, open [People] → [Invite & Members] to share an invite link or invite by email.'
                     )}
                   </p>
                 )}
@@ -2933,254 +3194,245 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               </Button>
             </div>
           </form>
+          )}
         </Modal>
       )}
 
-      {/* STAKEHOLDERS / PARTICIPANTS PRESET MODAL */}
+      {/* UNIFIED STAKEHOLDERS & COLLABORATION INVITE / MEMBERS MODAL */}
       {isParticipantsModalOpen && detailProject && (
         <Modal
           isOpen={true}
           onClose={() => setIsParticipantsModalOpen(false)}
-          title={L('프로젝트 관계자(대화 상대) 사전 설정', 'プロジェクト関係者（対話相手）事前設定', 'Configure Project Stakeholders')}
+          title={L('관계자 · 멤버 초대 관리', '関係者・招待・メンバー管理', 'People & Collaboration')}
           maxWidth="md"
         >
           <div className="space-y-4 text-xs">
-            <p className="text-charcoal-600 leading-relaxed">
-              {L(
-                '이 프로젝트에 참여하는 관계자(가족, 변호사, 거래처, 담당자 등)를 등록해 두면 타임라인에서 [상대방] 작성 시 매번 타이핑하지 않고 클릭만으로 바로 선택할 수 있습니다.',
-                'このプロジェクトに関わる関係者を登録しておくと、タイムラインで[相手]を記録する際に入力なしでワンクリック選択できます。',
-                'Register people involved in this project so you can pick them in one click when logging [Partner] entries.'
-              )}
-            </p>
-
-            {/* Quick Add Stakeholder Form */}
-            <form
-              onSubmit={handleAddDraftParticipant}
-              className="p-3 rounded-xl bg-ivory-50 border border-ivory-200 space-y-2"
-            >
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <input
-                  type="text"
-                  value={newParticipantName}
-                  onChange={(e) => setNewParticipantName(e.target.value)}
-                  placeholder={L('이름 / 호칭 (예: 김변호사, 장모님) *', '氏名・呼称 (例: 田中弁護士) *', 'Name / Label *')}
-                  className="p-2 bg-white border border-ivory-300 rounded-lg font-bold text-charcoal-900"
-                />
-                <input
-                  type="text"
-                  value={newParticipantRole}
-                  onChange={(e) => setNewParticipantRole(e.target.value)}
-                  placeholder={L('역할 / 관계 (선택, 예: 법률대리인)', '役割・関係 (任意)', 'Role (optional)')}
-                  className="p-2 bg-white border border-ivory-300 rounded-lg text-charcoal-800"
-                />
-              </div>
-              <div className="flex justify-end">
-                <Button type="submit" variant="secondary" size="sm" disabled={!newParticipantName.trim()}>
-                  <UserPlus className="w-3.5 h-3.5 mr-1" />
-                  <span>{L('명단에 추가', 'リストに追加', 'Add Person')}</span>
-                </Button>
-              </div>
-            </form>
-
-            {/* Registered Stakeholders List */}
-            {participantsDraft.length === 0 ? (
-              <div className="py-6 text-center text-charcoal-400 border border-dashed border-ivory-300 rounded-xl">
-                {L('등록된 관계자가 없습니다. 위에서 추가해 주세요.', '登録された関係者がいません。上から追加してください。', 'No stakeholders added yet.')}
-              </div>
-            ) : (
-              <div className="space-y-1.5 max-h-60 overflow-y-auto">
-                {participantsDraft.map((p, idx) => (
-                  <div
-                    key={`draft-p-${p.name}-${idx}`}
-                    className="px-3 py-2 rounded-lg bg-white border border-ivory-300 flex items-center justify-between gap-2"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="font-bold text-charcoal-900 truncate">👤 {p.name}</span>
-                      {p.role && (
-                        <span className="px-2 py-0.5 rounded-full bg-sky-50 text-sky-900 border border-sky-200 text-[11px] font-bold shrink-0">
-                          {p.role}
-                        </span>
-                      )}
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setParticipantsDraft((prev) => prev.filter((_, i) => i !== idx))
-                      }
-                      className="p-1 rounded hover:bg-rose-50 text-charcoal-400 hover:text-rose-600 shrink-0"
-                      title={t('common.delete')}
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div className="flex justify-end gap-2 pt-3 border-t border-ivory-200">
-              <Button type="button" variant="secondary" onClick={() => setIsParticipantsModalOpen(false)}>
-                {t('common.cancel')}
-              </Button>
-              <Button type="button" variant="primary" isLoading={isSavingParticipants} onClick={handleSaveParticipants}>
-                {t('common.save')}
-              </Button>
-            </div>
-          </div>
-        </Modal>
-      )}
-
-      {/* COLLABORATION INVITE & MEMBERS MODAL */}
-      {isShareModalOpen && detailProject && (
-        <Modal
-          isOpen={true}
-          onClose={() => setIsShareModalOpen(false)}
-          title={L('프로젝트 협업 초대 & 멤버 관리', '協業招待・メンバー管理', 'Project Collaboration & Invites')}
-          maxWidth="md"
-        >
-          <div className="space-y-4 text-xs">
-            {/* Shareable Invite Link */}
-            <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-2">
-              <div className="font-bold text-indigo-950 flex items-center justify-between gap-2">
-                <span>{L('초대 링크로 참여시키기', '招待リンクで招待', 'Shareable Invite Link')}</span>
-                {Number(detailProject.created_by) === Number(user?.id) && (
-                  <button
-                    type="button"
-                    onClick={handleRegenerateInvite}
-                    className="text-[11px] font-bold text-indigo-700 hover:underline"
-                  >
-                    {detailProject.invite_token
-                      ? L('링크 재발급', '再発行', 'Regenerate')
-                      : L('링크 생성', 'リンク作成', 'Generate Link')}
-                  </button>
-                )}
-              </div>
-
-              {detailProject.invite_token ? (
-                <div className="flex items-center gap-1.5">
-                  <input
-                    type="text"
-                    readOnly
-                    value={getInviteUrl(detailProject.invite_token)}
-                    className="flex-1 p-2 bg-white border border-indigo-200 rounded-lg font-mono text-[11px] text-charcoal-800"
-                  />
-                  <Button
-                    type="button"
-                    variant="primary"
-                    size="sm"
-                    onClick={() => handleCopyInviteLink(detailProject.invite_token)}
-                  >
-                    {copiedInvite ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedInvite ? L('복사됨', 'コピー済', 'Copied') : L('복사', 'コピー', 'Copy')}</span>
-                  </Button>
-                </div>
-              ) : (
-                <p className="text-[11px] text-indigo-800">
+            <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-ivory-100 border border-ivory-200 font-bold">
+              <button
+                type="button"
+                onClick={() => setParticipantsModalTab('STAKEHOLDERS')}
+                className={`py-1.5 px-2 rounded-lg flex items-center justify-center gap-1.5 transition ${
+                  participantsModalTab === 'STAKEHOLDERS'
+                    ? 'bg-forest-800 text-white shadow-2xs'
+                    : 'text-charcoal-700 hover:bg-white'
+                }`}
+              >
+                <Users className="w-3.5 h-3.5" />
+                <span>{L(`관계자 (${participantsDraft.length})`, `関係者 (${participantsDraft.length})`, `People (${participantsDraft.length})`)}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setParticipantsModalTab('COLLAB')}
+                className={`py-1.5 px-2 rounded-lg flex items-center justify-center gap-1.5 transition ${
+                  participantsModalTab === 'COLLAB'
+                    ? 'bg-forest-800 text-white shadow-2xs'
+                    : 'text-charcoal-700 hover:bg-white'
+                }`}
+              >
+                <Share2 className="w-3.5 h-3.5" />
+                <span>
                   {L(
-                    '현재 개인 비공개 프로젝트입니다. [링크 생성]을 누르면 초대 링크를 받아 협업 프로젝트로 전환됩니다.',
-                    '現在非公開プロジェクトです。[リンク作成]で招待リンクを発行し協業に切替えられます。',
-                    'Currently solo private. Click Generate Link to create an invite URL.'
+                    `초대 · 멤버 (${(detailProject.members?.length || 0) + 1})`,
+                    `招待・メンバー (${(detailProject.members?.length || 0) + 1})`,
+                    `Invite (${(detailProject.members?.length || 0) + 1})`
+                  )}
+                </span>
+              </button>
+            </div>
+
+            {participantsModalTab === 'STAKEHOLDERS' ? (
+              <>
+                <p className="text-charcoal-600 leading-relaxed">
+                  {L(
+                    '이 프로젝트에 참여하는 관계자(가족, 변호사, 거래처, 담당자 등)를 등록해 두면 타임라인에서 [상대방] 작성 시 매번 타이핑하지 않고 클릭만으로 바로 선택할 수 있습니다.',
+                    'このプロジェクトに関わる関係者を登録しておくと、タイムラインで[相手]を記録する際に入力なしでワンクリック選択できます。',
+                    'Register people involved in this project so you can pick them in one click when logging [Partner] entries.'
                   )}
                 </p>
-              )}
-            </div>
 
-            {/* Invite by exact email */}
-            {Number(detailProject.created_by) === Number(user?.id) && (
-              <form onSubmit={handleInviteMemberByEmail} className="space-y-1.5">
-                <label className="block font-bold text-charcoal-800">
-                  {L('가입된 상대 이메일로 바로 초대', '登録済みメールで直接招待', 'Invite Registered User by Email')}
-                </label>
-                <div className="flex items-center gap-1.5">
-                  <input
-                    type="email"
-                    value={inviteEmail}
-                    onChange={(e) => setInviteEmail(e.target.value)}
-                    placeholder="partner@example.com"
-                    className="flex-1 p-2 bg-ivory-50 border border-ivory-300 rounded-lg text-charcoal-900"
-                  />
-                  <Button type="submit" variant="secondary" size="sm" isLoading={isInvitingMember}>
-                    <UserPlus className="w-3.5 h-3.5" />
-                    <span>{L('초대', '招待', 'Invite')}</span>
+                {/* Quick Add Stakeholder Form */}
+                <form
+                  onSubmit={handleAddDraftParticipant}
+                  className="p-3 rounded-xl bg-ivory-50 border border-ivory-200 space-y-2"
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      value={newParticipantName}
+                      onChange={(e) => setNewParticipantName(e.target.value)}
+                      placeholder={L('이름 / 호칭 (예: 김변호사, 장모님) *', '氏名・呼称 (例: 田中弁護士) *', 'Name / Label *')}
+                      className="p-2 bg-white border border-ivory-300 rounded-lg font-bold text-charcoal-900"
+                    />
+                    <input
+                      type="text"
+                      value={newParticipantRole}
+                      onChange={(e) => setNewParticipantRole(e.target.value)}
+                      placeholder={L('역할 / 관계 (선택, 예: 법률대리인)', '役割・関係 (任意)', 'Role (optional)')}
+                      className="p-2 bg-white border border-ivory-300 rounded-lg text-charcoal-800"
+                    />
+                  </div>
+                  <div className="flex justify-end">
+                    <Button type="submit" variant="secondary" size="sm" disabled={!newParticipantName.trim()}>
+                      <UserPlus className="w-3.5 h-3.5 mr-1" />
+                      <span>{L('명단에 추가', 'リストに追加', 'Add Person')}</span>
+                    </Button>
+                  </div>
+                </form>
+
+                {/* Registered Stakeholders List */}
+                {participantsDraft.length === 0 ? (
+                  <div className="py-6 text-center text-charcoal-400 border border-dashed border-ivory-300 rounded-xl">
+                    {L('등록된 관계자가 없습니다. 위에서 추가해 주세요.', '登録された関係者がいません。上から追加してください。', 'No stakeholders added yet.')}
+                  </div>
+                ) : (
+                  <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                    {participantsDraft.map((p, idx) => (
+                      <div
+                        key={`draft-p-${p.name}-${idx}`}
+                        className="px-3 py-2 rounded-lg bg-white border border-ivory-300 flex items-center justify-between gap-2"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="font-bold text-charcoal-900 truncate">👤 {p.name}</span>
+                          {p.role && (
+                            <span className="px-2 py-0.5 rounded-full bg-sky-50 text-sky-900 border border-sky-200 text-[11px] font-bold shrink-0">
+                              {p.role}
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setParticipantsDraft((prev) => prev.filter((_, i) => i !== idx))
+                          }
+                          className="p-1 rounded hover:bg-rose-50 text-charcoal-400 hover:text-rose-600 shrink-0"
+                          title={t('common.delete')}
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-2 pt-3 border-t border-ivory-200">
+                  <Button type="button" variant="secondary" onClick={() => setIsParticipantsModalOpen(false)}>
+                    {t('common.cancel')}
+                  </Button>
+                  <Button type="button" variant="primary" isLoading={isSavingParticipants} onClick={handleSaveParticipants}>
+                    {t('common.save')}
                   </Button>
                 </div>
-                {inviteError && <p className="text-rose-600 font-bold">{inviteError}</p>}
-              </form>
-            )}
-
-            {/* Members list */}
-            <div className="space-y-1.5">
-              <div className="font-bold text-charcoal-800">
-                {L('현재 참여 멤버', '参加メンバー', 'Current Members')}
-              </div>
-              <div className="px-3 py-2 rounded-lg bg-ivory-50 border border-ivory-200 flex items-center justify-between">
-                <span className="font-bold text-charcoal-900">
-                  👑 {detailProject.creator_name || user?.name}
-                </span>
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-forest-100 text-forest-900">
-                  {L('소유자', 'オーナー', 'Owner')}
-                </span>
-              </div>
-              {(detailProject.members || []).map((m) => (
-                <div
-                  key={`mem-${m.user_id}`}
-                  className="px-3 py-2 rounded-lg bg-white border border-ivory-300 flex items-center justify-between gap-2"
-                >
-                  <div className="min-w-0">
-                    <div className="font-bold text-charcoal-900 truncate">{m.name}</div>
-                    <div className="text-[11px] text-charcoal-500 truncate">{m.email}</div>
+              </>
+            ) : (
+              <>
+                {/* Shareable Invite Link */}
+                <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-2">
+                  <div className="font-bold text-indigo-950 flex items-center justify-between gap-2">
+                    <span>{L('초대 링크로 참여시키기', '招待リンクで招待', 'Shareable Invite Link')}</span>
+                    {Number(detailProject.created_by) === Number(user?.id) && (
+                      <button
+                        type="button"
+                        onClick={handleRegenerateInvite}
+                        className="text-[11px] font-bold text-indigo-700 hover:underline"
+                      >
+                        {detailProject.invite_token
+                          ? L('링크 재발급', '再発行', 'Regenerate')
+                          : L('링크 생성', 'リンク作成', 'Generate Link')}
+                      </button>
+                    )}
                   </div>
-                  {(Number(detailProject.created_by) === Number(user?.id) || Number(m.user_id) === Number(user?.id)) && (
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveMember(m.user_id)}
-                      className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-200 text-[11px] font-bold hover:bg-rose-100 shrink-0"
-                    >
-                      {Number(m.user_id) === Number(user?.id)
-                        ? L('나가기', '退出', 'Leave')
-                        : L('제외', '削除', 'Remove')}
-                    </button>
+
+                  {detailProject.invite_token ? (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        readOnly
+                        value={getInviteUrl(detailProject.invite_token)}
+                        className="flex-1 p-2 bg-white border border-indigo-200 rounded-lg font-mono text-[11px] text-charcoal-800"
+                      />
+                      <Button
+                        type="button"
+                        variant="primary"
+                        size="sm"
+                        onClick={() => handleCopyInviteLink(detailProject.invite_token)}
+                      >
+                        {copiedInvite ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedInvite ? L('복사됨', 'コピー済', 'Copied') : L('복사', 'コピー', 'Copy')}</span>
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-indigo-800">
+                      {L(
+                        '현재 개인 비공개 프로젝트입니다. [링크 생성]을 누르면 초대 링크를 받아 협업 프로젝트로 전환됩니다.',
+                        '現在非公開プロジェクトです。[リンク作成]で招待リンクを発行し協業に切替えられます。',
+                        'Currently solo private. Click Generate Link to create an invite URL.'
+                      )}
+                    </p>
                   )}
                 </div>
-              ))}
-            </div>
-          </div>
-        </Modal>
-      )}
 
-      {/* JOIN BY INVITE CODE MODAL */}
-      {isJoinModalOpen && (
-        <Modal
-          isOpen={true}
-          onClose={() => setIsJoinModalOpen(false)}
-          title={L('초대 코드 · 링크로 프로젝트 참여', '招待コード・リンクで参加', 'Join Project via Invite')}
-          maxWidth="sm"
-        >
-          <form onSubmit={handleJoinByInviteCode} className="space-y-3 text-xs">
-            <p className="text-charcoal-600">
-              {L(
-                '전달받은 초대 링크 전체 또는 초대 코드를 붙여넣으면 협업 프로젝트에 바로 참여할 수 있습니다.',
-                '受け取った招待リンクまたは招待コードを貼り付けるとプロジェクトに参加できます。',
-                'Paste the full invite URL or code shared with you to join the project.'
-              )}
-            </p>
-            <input
-              type="text"
-              autoFocus
-              value={joinCodeInput}
-              onChange={(e) => setJoinCodeInput(e.target.value)}
-              placeholder={L('예: http://localhost:5174/?invite=... 또는 코드', '例: 招待URL または コード', 'Paste invite URL or token...')}
-              className="w-full p-2.5 bg-ivory-50 border border-ivory-300 rounded-lg font-mono text-charcoal-900"
-            />
-            {joinError && <p className="text-rose-600 font-bold">{joinError}</p>}
-            <div className="flex justify-end gap-2 pt-2">
-              <Button type="button" variant="secondary" onClick={() => setIsJoinModalOpen(false)}>
-                {t('common.cancel')}
-              </Button>
-              <Button type="submit" variant="primary" isLoading={isJoiningByCode}>
-                {L('참여하기', '参加する', 'Join')}
-              </Button>
-            </div>
-          </form>
+                {/* Invite by exact email */}
+                {Number(detailProject.created_by) === Number(user?.id) && (
+                  <form onSubmit={handleInviteMemberByEmail} className="space-y-1.5">
+                    <label className="block font-bold text-charcoal-800">
+                      {L('가입된 상대 이메일로 바로 초대', '登録済みメールで直接招待', 'Invite Registered User by Email')}
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="email"
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                        placeholder="partner@example.com"
+                        className="flex-1 p-2 bg-ivory-50 border border-ivory-300 rounded-lg text-charcoal-900"
+                      />
+                      <Button type="submit" variant="secondary" size="sm" isLoading={isInvitingMember}>
+                        <UserPlus className="w-3.5 h-3.5" />
+                        <span>{L('초대', '招待', 'Invite')}</span>
+                      </Button>
+                    </div>
+                    {inviteError && <p className="text-rose-600 font-bold">{inviteError}</p>}
+                  </form>
+                )}
+
+                {/* Members list */}
+                <div className="space-y-1.5">
+                  <div className="font-bold text-charcoal-800">
+                    {L('현재 참여 멤버', '参加メンバー', 'Current Members')}
+                  </div>
+                  <div className="px-3 py-2 rounded-lg bg-ivory-50 border border-ivory-200 flex items-center justify-between">
+                    <span className="font-bold text-charcoal-900">
+                      👑 {detailProject.creator_name || user?.name}
+                    </span>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-forest-100 text-forest-900">
+                      {L('소유자', 'オーナー', 'Owner')}
+                    </span>
+                  </div>
+                  {(detailProject.members || []).map((m) => (
+                    <div
+                      key={`mem-${m.user_id}`}
+                      className="px-3 py-2 rounded-lg bg-white border border-ivory-300 flex items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-bold text-charcoal-900 truncate">{m.name}</div>
+                        <div className="text-[11px] text-charcoal-500 truncate">{m.email}</div>
+                      </div>
+                      {(Number(detailProject.created_by) === Number(user?.id) || Number(m.user_id) === Number(user?.id)) && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveMember(m.user_id)}
+                          className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-200 text-[11px] font-bold hover:bg-rose-100 shrink-0"
+                        >
+                          {Number(m.user_id) === Number(user?.id)
+                            ? L('나가기', '退出', 'Leave')
+                            : L('제외', '削除', 'Remove')}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
         </Modal>
       )}
     </div>

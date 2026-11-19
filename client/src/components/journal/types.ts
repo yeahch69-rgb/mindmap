@@ -20,6 +20,17 @@ export interface MindMapLayoutData {
   parent_overrides?: Record<string, string>;
 }
 
+export interface JournalEntryRevisionRequest {
+  id: number;
+  project_id: number;
+  entry_id: number;
+  requester_id: number;
+  requester_name?: string;
+  reason: string;
+  status: 'OPEN' | 'RESOLVED';
+  created_at?: string;
+}
+
 export interface JournalEntry {
   id: number;
   project_id: number;
@@ -38,6 +49,7 @@ export interface JournalEntry {
   author_id: number;
   author_name?: string;
   created_at?: string;
+  revision_requests?: JournalEntryRevisionRequest[];
 }
 
 export interface JournalIdea {

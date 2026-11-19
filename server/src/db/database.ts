@@ -170,6 +170,17 @@ export function initDatabase() {
       dedup_key TEXT PRIMARY KEY,
       sent_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS journal_entry_revision_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id INTEGER NOT NULL REFERENCES journal_projects(id) ON DELETE CASCADE,
+      entry_id INTEGER NOT NULL REFERENCES journal_entries(id) ON DELETE CASCADE,
+      requester_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      resolved_at DATETIME
+    );
   `);
 
   const userCols = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];

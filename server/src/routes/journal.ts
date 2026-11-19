@@ -320,6 +320,30 @@ function mapEntryForViewer(en: any, viewerId: number) {
   return en;
 }
 
+function toJstDateAndTimeFromUtc(utcStr: string | null | undefined): { date: string; time: string } {
+  if (!utcStr) return { date: '', time: '00:00' };
+  const iso = utcStr.includes('T') ? utcStr : `${utcStr.replace(' ', 'T')}Z`;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return { date: '', time: '00:00' };
+  return { date: getJstDateStr(d), time: getJstTimeStr(d) };
+}
+
+function sortEntriesChronologically<T extends { id: number; entry_date?: string | null; entry_time?: string | null; created_at?: string | null }>(
+  list: T[]
+): T[] {
+  return [...list].sort((a, b) => {
+    const fbA = toJstDateAndTimeFromUtc(a.created_at);
+    const fbB = toJstDateAndTimeFromUtc(b.created_at);
+    const dateA = (a.entry_date && String(a.entry_date).trim()) || fbA.date || '9999-12-31';
+    const dateB = (b.entry_date && String(b.entry_date).trim()) || fbB.date || '9999-12-31';
+    if (dateA !== dateB) return dateA.localeCompare(dateB);
+    const timeA = (a.entry_time && String(a.entry_time).trim()) || fbA.time || '00:00';
+    const timeB = (b.entry_time && String(b.entry_time).trim()) || fbB.time || '00:00';
+    if (timeA !== timeB) return timeA.localeCompare(timeB);
+    return Number(a.id) - Number(b.id);
+  });
+}
+
 // 1. Overview (Accessible projects + Inbox + Entries + Ideas + Layouts)
 router.get('/overview', authenticateToken, (req: Request, res: Response) => {
   const userId = Number(req.user!.id);
@@ -402,7 +426,7 @@ router.get('/overview', authenticateToken, (req: Request, res: Response) => {
     }
 
     const allEntryRows = db.prepare(`
-      SELECT e.id, e.project_id, e.entry_type, e.speaker_name, e.content, e.entry_date, e.entry_time, e.due_date, e.due_time, e.completed_target_type, e.completed_target_id, e.author_id, u.name as author_name
+      SELECT e.id, e.project_id, e.entry_type, e.speaker_name, e.content, e.entry_date, e.entry_time, e.due_date, e.due_time, e.completed_target_type, e.completed_target_id, e.author_id, e.created_at, u.name as author_name
       FROM journal_entries e
       INNER JOIN journal_projects p ON p.id = e.project_id
       LEFT JOIN users u ON e.author_id = u.id
@@ -413,15 +437,45 @@ router.get('/overview', authenticateToken, (req: Request, res: Response) => {
           AND EXISTS (SELECT 1 FROM journal_project_members m WHERE m.project_id = p.id AND m.user_id = ?)
         )
       )
-      ORDER BY e.entry_date ASC, COALESCE(e.entry_time, '00:00') ASC, e.id ASC
+      ORDER BY e.id ASC
     `).all(userId, userId) as any[];
+
+    const openRevisionRows = db.prepare(`
+      SELECT r.*, u.name as requester_name
+      FROM journal_entry_revision_requests r
+      INNER JOIN journal_projects p ON p.id = r.project_id
+      LEFT JOIN users u ON r.requester_id = u.id
+      WHERE r.status = 'OPEN'
+        AND (
+          p.created_by = ?
+          OR (
+            p.mode != 'SOLO'
+            AND EXISTS (SELECT 1 FROM journal_project_members m WHERE m.project_id = p.id AND m.user_id = ?)
+          )
+        )
+      ORDER BY r.id ASC
+    `).all(userId, userId) as any[];
+
+    const revByEntry = new Map<number, any[]>();
+    for (const rr of openRevisionRows) {
+      const eid = Number(rr.entry_id);
+      const arr = revByEntry.get(eid) || [];
+      arr.push(rr);
+      revByEntry.set(eid, arr);
+    }
 
     const entriesByProject = new Map<number, any[]>();
     for (const row of allEntryRows) {
       const pid = Number(row.project_id);
       const list = entriesByProject.get(pid) || [];
-      list.push(mapEntryForViewer(row, userId));
+      list.push({
+        ...mapEntryForViewer(row, userId),
+        revision_requests: revByEntry.get(Number(row.id)) || [],
+      });
       entriesByProject.set(pid, list);
+    }
+    for (const [pid, list] of entriesByProject.entries()) {
+      entriesByProject.set(pid, sortEntriesChronologically(list));
     }
 
     const allIdeaRows = db.prepare(`
@@ -643,8 +697,23 @@ router.get('/projects/:id', authenticateToken, (req: Request, res: Response) => 
       FROM journal_entries e
       LEFT JOIN users u ON e.author_id = u.id
       WHERE e.project_id = ?
-      ORDER BY e.entry_date ASC, COALESCE(e.entry_time, '00:00') ASC, e.id ASC
+      ORDER BY e.id ASC
     `).all(projectId) as any[];
+
+    const openRevisionRows = db.prepare(`
+      SELECT r.*, u.name as requester_name
+      FROM journal_entry_revision_requests r
+      LEFT JOIN users u ON r.requester_id = u.id
+      WHERE r.project_id = ? AND r.status = 'OPEN'
+      ORDER BY r.id ASC
+    `).all(projectId) as any[];
+    const revByEntry = new Map<number, any[]>();
+    for (const rr of openRevisionRows) {
+      const eid = Number(rr.entry_id);
+      const arr = revByEntry.get(eid) || [];
+      arr.push(rr);
+      revByEntry.set(eid, arr);
+    }
 
     const rawIdeas = db.prepare(`
       SELECT i.*, u.name as author_name
@@ -655,7 +724,10 @@ router.get('/projects/:id', authenticateToken, (req: Request, res: Response) => 
     `).all(projectId) as any[];
     const ideas = rawIdeas.map(formatIdeaRow);
 
-    const mappedRawEntries = rawEntries.map((en) => mapEntryForViewer(en, userId));
+    const mappedRawEntries = sortEntriesChronologically(rawEntries).map((en) => ({
+      ...mapEntryForViewer(en, userId),
+      revision_requests: revByEntry.get(Number(en.id)) || [],
+    }));
     const entryLookup = new Map<number, any>();
     for (const en of mappedRawEntries) entryLookup.set(Number(en.id), en);
     const ideaLookup = new Map<number, any>();
@@ -1281,6 +1353,310 @@ router.post('/projects/:id/entries', authenticateToken, (req: Request, res: Resp
     res.status(201).json(created);
   } catch (err: any) {
     res.status(500).json({ error: '기록 등록 실패: ' + err.message });
+  }
+});
+
+// 6-1. Update own timeline entry (also auto-resolves open revision requests on this entry)
+router.patch('/entries/:entryId', authenticateToken, (req: Request, res: Response) => {
+  const entryId = Number(req.params.entryId);
+  const userId = Number(req.user!.id);
+  const {
+    entry_type,
+    speaker_name,
+    content,
+    entry_date,
+    entry_time,
+    due_date,
+    due_time,
+    completed_target_type,
+    completed_target_id,
+  } = req.body || {};
+
+  if (!content || !String(content).trim()) {
+    res.status(400).json({ error: '기록할 내용을 입력해주세요.' });
+    return;
+  }
+
+  try {
+    const existing = db.prepare(`
+      SELECT e.*, p.created_by as project_owner_id, p.title as project_title, p.mode as project_mode
+      FROM journal_entries e
+      INNER JOIN journal_projects p ON p.id = e.project_id
+      WHERE e.id = ?
+    `).get(entryId) as any;
+
+    if (!existing) {
+      res.status(404).json({ error: '기록을 찾을 수 없습니다.' });
+      return;
+    }
+
+    const projectId = Number(existing.project_id);
+    if (!canAccessJournalProject({ id: projectId, mode: existing.project_mode, created_by: existing.project_owner_id }, userId)) {
+      res.status(403).json({ error: '접근 권한이 없습니다.' });
+      return;
+    }
+
+    if (Number(existing.author_id) !== userId) {
+      res.status(403).json({ error: '본인이 작성한 기록만 직접 수정할 수 있습니다.' });
+      return;
+    }
+
+    const finalType = entry_type !== undefined && VALID_ENTRY_TYPES.has(entry_type) ? entry_type : existing.entry_type;
+    const finalSpeaker =
+      finalType === 'DIALOGUE_THEM'
+        ? speaker_name !== undefined
+          ? (speaker_name ? String(speaker_name).trim() : null)
+          : existing.speaker_name
+        : null;
+    const finalDate =
+      entry_date === undefined
+        ? existing.entry_date
+        : entry_date && /^\d{4}-\d{2}-\d{2}$/.test(String(entry_date))
+        ? String(entry_date)
+        : '';
+    const finalTime =
+      entry_time === undefined
+        ? existing.entry_time
+        : entry_time && /^\d{2}:\d{2}$/.test(String(entry_time))
+        ? String(entry_time)
+        : null;
+    const finalDueDate =
+      due_date === undefined
+        ? existing.due_date
+        : due_date && /^\d{4}-\d{2}-\d{2}$/.test(String(due_date))
+        ? String(due_date)
+        : null;
+    const finalDueTime =
+      due_time === undefined
+        ? existing.due_time
+        : due_time && /^\d{2}:\d{2}$/.test(String(due_time))
+        ? String(due_time)
+        : null;
+
+    let validTargetType: 'ENTRY' | 'IDEA' | null = existing.completed_target_type || null;
+    let validTargetId: number | null = existing.completed_target_id ? Number(existing.completed_target_id) : null;
+    if (finalType !== 'PROGRESS') {
+      validTargetType = null;
+      validTargetId = null;
+    } else if (completed_target_type !== undefined || completed_target_id !== undefined) {
+      validTargetType = null;
+      validTargetId = null;
+      if (completed_target_type && completed_target_id) {
+        const targetNum = Number(completed_target_id);
+        if (completed_target_type === 'ENTRY' && targetNum !== entryId) {
+          const tgt = db
+            .prepare("SELECT id FROM journal_entries WHERE id = ? AND project_id = ? AND entry_type != 'PROGRESS'")
+            .get(targetNum, projectId);
+          if (tgt) {
+            validTargetType = 'ENTRY';
+            validTargetId = targetNum;
+          }
+        } else if (completed_target_type === 'IDEA') {
+          const tgt = db.prepare('SELECT id FROM journal_ideas WHERE id = ? AND project_id = ?').get(targetNum, projectId);
+          if (tgt) {
+            validTargetType = 'IDEA';
+            validTargetId = targetNum;
+          }
+        }
+      }
+    }
+
+    const nowJst = getJstDateTimeStr();
+    const openReqs = db
+      .prepare("SELECT requester_id FROM journal_entry_revision_requests WHERE entry_id = ? AND status = 'OPEN'")
+      .all(entryId) as Array<{ requester_id: number }>;
+
+    db.transaction(() => {
+      db.prepare(`
+        UPDATE journal_entries
+        SET entry_type = ?, speaker_name = ?, content = ?, entry_date = ?, entry_time = ?,
+            due_date = ?, due_time = ?, completed_target_type = ?, completed_target_id = ?
+        WHERE id = ?
+      `).run(
+        finalType,
+        finalSpeaker,
+        String(content).trim(),
+        finalDate,
+        finalTime,
+        finalDueDate,
+        finalDueTime,
+        validTargetType,
+        validTargetId,
+        entryId
+      );
+
+      db.prepare(`
+        UPDATE journal_entry_revision_requests
+        SET status = 'RESOLVED', resolved_at = CURRENT_TIMESTAMP
+        WHERE entry_id = ? AND status = 'OPEN'
+      `).run(entryId);
+
+      db.prepare('UPDATE journal_projects SET last_activity_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(
+        nowJst,
+        projectId
+      );
+    })();
+
+    const updated = db.prepare(`
+      SELECT e.*, u.name as author_name
+      FROM journal_entries e
+      LEFT JOIN users u ON e.author_id = u.id
+      WHERE e.id = ?
+    `).get(entryId);
+
+    const snippet = String(content).trim().slice(0, 60);
+    if (existing.project_mode === 'COLLAB') {
+      const requesterIds = Array.from(new Set(openReqs.map((r) => Number(r.requester_id)))).filter(
+        (id) => id > 0 && id !== userId
+      );
+      if (requesterIds.length > 0) {
+        void sendPushToUsers(requesterIds, {
+          title: `📌 ${existing.project_title}`,
+          body: `✅ ${req.user!.name}님이 수정 요청을 반영해 기록을 수정했습니다: ${snippet}`,
+          projectId,
+          tag: `mindmap-${projectId}-entry-rev-done-${entryId}`,
+        });
+      }
+      notifyProjectPeers(
+        {
+          id: projectId,
+          title: existing.project_title,
+          mode: existing.project_mode,
+          created_by: Number(existing.project_owner_id),
+        },
+        userId,
+        `✏️ ${req.user!.name}님이 타임라인 기록을 수정했습니다: ${snippet}`,
+        `entry-edit-${entryId}`
+      );
+    }
+
+    res.json({ ...mapEntryForViewer(updated, userId), revision_requests: [] });
+  } catch (err: any) {
+    res.status(500).json({ error: '기록 수정 실패: ' + err.message });
+  }
+});
+
+// 6-2. Request revision on another participant's entry
+router.post('/entries/:entryId/revision-request', authenticateToken, (req: Request, res: Response) => {
+  const entryId = Number(req.params.entryId);
+  const userId = Number(req.user!.id);
+  const cleanReason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : '';
+
+  if (!cleanReason) {
+    res.status(400).json({ error: '수정 요청 사유를 입력해주세요.' });
+    return;
+  }
+
+  try {
+    const entry = db.prepare(`
+      SELECT e.*, p.created_by as project_owner_id, p.title as project_title, p.mode as project_mode
+      FROM journal_entries e
+      INNER JOIN journal_projects p ON p.id = e.project_id
+      WHERE e.id = ?
+    `).get(entryId) as any;
+
+    if (!entry) {
+      res.status(404).json({ error: '기록을 찾을 수 없습니다.' });
+      return;
+    }
+
+    const projectId = Number(entry.project_id);
+    if (!canAccessJournalProject({ id: projectId, mode: entry.project_mode, created_by: entry.project_owner_id }, userId)) {
+      res.status(403).json({ error: '접근 권한이 없습니다.' });
+      return;
+    }
+    if (Number(entry.author_id) === userId) {
+      res.status(400).json({ error: '본인이 작성한 기록은 직접 수정할 수 있습니다.' });
+      return;
+    }
+
+    const info = db.prepare(`
+      INSERT INTO journal_entry_revision_requests (project_id, entry_id, requester_id, reason, status)
+      VALUES (?, ?, ?, ?, 'OPEN')
+    `).run(projectId, entryId, userId, cleanReason);
+
+    const createdReq = db.prepare(`
+      SELECT r.*, u.name as requester_name
+      FROM journal_entry_revision_requests r
+      LEFT JOIN users u ON r.requester_id = u.id
+      WHERE r.id = ?
+    `).get(Number(info.lastInsertRowid));
+
+    void sendPushToUsers([Number(entry.author_id)], {
+      title: `📌 ${entry.project_title}`,
+      body: `📝 ${req.user!.name}님이 내 기록에 수정을 요청했습니다: ${cleanReason.slice(0, 60)}`,
+      projectId,
+      tag: `mindmap-${projectId}-rev-req-${entryId}`,
+    });
+
+    res.status(201).json(createdReq);
+  } catch (err: any) {
+    res.status(500).json({ error: '수정 요청 실패: ' + err.message });
+  }
+});
+
+// 6-3. Resolve or cancel revision request
+router.patch('/revision-requests/:requestId/resolve', authenticateToken, (req: Request, res: Response) => {
+  const requestId = Number(req.params.requestId);
+  const userId = Number(req.user!.id);
+
+  try {
+    const row = db.prepare(`
+      SELECT r.*, e.author_id as entry_author_id, p.title as project_title, p.created_by as project_owner_id
+      FROM journal_entry_revision_requests r
+      INNER JOIN journal_entries e ON e.id = r.entry_id
+      INNER JOIN journal_projects p ON p.id = r.project_id
+      WHERE r.id = ?
+    `).get(requestId) as any;
+
+    if (!row) {
+      res.status(404).json({ error: '수정 요청을 찾을 수 없습니다.' });
+      return;
+    }
+    if (Number(row.entry_author_id) !== userId && Number(row.project_owner_id) !== userId) {
+      res.status(403).json({ error: '권한이 없습니다.' });
+      return;
+    }
+
+    db.prepare(`
+      UPDATE journal_entry_revision_requests
+      SET status = 'RESOLVED', resolved_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(requestId);
+
+    if (Number(row.requester_id) !== userId) {
+      void sendPushToUsers([Number(row.requester_id)], {
+        title: `📌 ${row.project_title}`,
+        body: `✅ ${req.user!.name}님이 수정 요청을 확인 완료 처리했습니다.`,
+        projectId: Number(row.project_id),
+        tag: `mindmap-${row.project_id}-rev-resolve-${requestId}`,
+      });
+    }
+
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: '수정 요청 완료 처리 실패: ' + err.message });
+  }
+});
+
+router.delete('/revision-requests/:requestId', authenticateToken, (req: Request, res: Response) => {
+  const requestId = Number(req.params.requestId);
+  const userId = Number(req.user!.id);
+
+  try {
+    const row = db.prepare('SELECT * FROM journal_entry_revision_requests WHERE id = ?').get(requestId) as any;
+    if (!row) {
+      res.status(404).json({ error: '수정 요청을 찾을 수 없습니다.' });
+      return;
+    }
+    if (Number(row.requester_id) !== userId) {
+      res.status(403).json({ error: '요청자 본인만 취소할 수 있습니다.' });
+      return;
+    }
+    db.prepare('DELETE FROM journal_entry_revision_requests WHERE id = ?').run(requestId);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: '수정 요청 취소 실패: ' + err.message });
   }
 });
 
