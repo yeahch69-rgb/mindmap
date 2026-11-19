@@ -75,7 +75,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ pendingInviteToken }) =>
               <BookMarked className="w-6 h-6" />
             </div>
             <h1 className="text-xl font-bold text-charcoal-900">
-              {L('프로젝트 저널', 'プロジェクト日誌', 'Project Journal')}
+              {L('프로젝트 마인드맵', 'プロジェクトマインドマップ', 'Project Mindmap')}
             </h1>
             <p className="text-xs text-charcoal-600 leading-relaxed">
               {L(

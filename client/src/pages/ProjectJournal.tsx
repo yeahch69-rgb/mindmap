@@ -1055,7 +1055,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
           <div className="flex items-center gap-2">
             <BookMarked className="w-6 h-6 text-forest-700 shrink-0" />
             <h1 className="text-xl font-bold text-charcoal-900 break-keep">
-              {L('프로젝트 저널 (맥락 · 턴 · 대화 트래커)', 'プロジェクト日誌 (文脈・ターン・対話記録)', 'Project Journal (Context, Turns & Logs)')}
+              {L('프로젝트 마인드맵 (맥락 · 턴 · 대화 트래커)', 'プロジェクトマインドマップ (文脈・ターン・対話記録)', 'Project Mindmap (Context, Turns & Logs)')}
             </h1>
           </div>
           <p className="text-xs text-charcoal-500 mt-0.5 break-keep">

@@ -52,7 +52,7 @@ const AppShell: React.FC = () => {
               <BookMarked className="w-4 h-4" />
             </div>
             <span className="font-bold text-sm text-charcoal-900 truncate">
-              {L('프로젝트 저널', 'プロジェクト日誌', 'Project Journal')}
+              {L('프로젝트 마인드맵', 'プロジェクトマインドマップ', 'Project Mindmap')}
             </span>
           </div>
 
