@@ -60,6 +60,19 @@ import {
   MindMapLayoutData,
 } from '../components/journal/types';
 
+/** Format timeline date/time compactly as YY.MM.DD HH:MM. */
+function formatCompactTimelineDateTime(
+  dateStr: string,
+  timeStr: string
+): { compact: string; full: string } {
+  const full = `${dateStr}${timeStr ? `${dateStr ? ' ' : ''}${timeStr}` : ''}`;
+  const shortDate = /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
+    ? `${dateStr.slice(2, 4)}.${dateStr.slice(5, 7)}.${dateStr.slice(8, 10)}`
+    : dateStr;
+  const compact = `${shortDate}${timeStr ? `${shortDate ? ' ' : ''}${timeStr}` : ''}`;
+  return { compact, full };
+}
+
 interface JournalInboxItem {
   id: number;
   content: string;
@@ -131,6 +144,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const [entryContent, setEntryContent] = useState('');
   const [completedTarget, setCompletedTarget] = useState<string>(''); // '' | 'ENTRY:123' | 'IDEA:45'
   const [editingEntryId, setEditingEntryId] = useState<number | null>(null);
+  const [editingIdeaId, setEditingIdeaId] = useState<number | null>(null);
   const [revisionFormEntryId, setRevisionFormEntryId] = useState<number | null>(null);
   const [revisionReason, setRevisionReason] = useState('');
   const [isSubmittingRevision, setIsSubmittingRevision] = useState(false);
@@ -138,6 +152,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const [isAddingEntry, setIsAddingEntry] = useState(false);
   const composerFormRef = useRef<HTMLFormElement>(null);
   const entryContentRef = useRef<HTMLTextAreaElement>(null);
+  const ideaTitleRef = useRef<HTMLInputElement>(null);
 
   // Idea fields inside Unified Timeline Composer
   const [ideaTitle, setIdeaTitle] = useState('');
@@ -327,6 +342,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       setIsEditingNextStep(false);
       setCompletedTarget('');
       setEditingEntryId(null);
+      setEditingIdeaId(null);
+      setIdeaTitle('');
+      setIdeaNote('');
       setRevisionFormEntryId(null);
       setRevisionReason('');
       setSpeakerCustomInput(false);
@@ -342,6 +360,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       setDetailEntries([]);
       setDetailIdeas([]);
       setEditingEntryId(null);
+      setEditingIdeaId(null);
+      setIdeaTitle('');
+      setIdeaNote('');
       setRevisionFormEntryId(null);
       setRevisionReason('');
     }
@@ -696,10 +717,18 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       if (!ideaTitle.trim()) return;
       try {
         setIsAddingIdea(true);
-        await api.post(`/journal/projects/${detailProject.id}/ideas`, {
-          title: ideaTitle.trim(),
-          note: ideaNote.trim() || null,
-        });
+        if (editingIdeaId) {
+          await api.patch(`/journal/ideas/${editingIdeaId}`, {
+            title: ideaTitle.trim(),
+            note: ideaNote.trim() || null,
+          });
+          setEditingIdeaId(null);
+        } else {
+          await api.post(`/journal/projects/${detailProject.id}/ideas`, {
+            title: ideaTitle.trim(),
+            note: ideaNote.trim() || null,
+          });
+        }
         setIdeaTitle('');
         setIdeaNote('');
         await fetchOverview();
@@ -764,6 +793,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   };
 
   const handleStartEditEntry = (en: JournalEntry) => {
+    setEditingIdeaId(null);
+    setIdeaTitle('');
+    setIdeaNote('');
     setEditingEntryId(en.id);
     setComposerKind(en.entry_type);
     setEntrySpeaker(en.speaker_name || '');
@@ -785,8 +817,25 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     }, 30);
   };
 
+  const handleStartEditIdea = (idea: JournalIdea) => {
+    setEditingEntryId(null);
+    setEntryContent('');
+    setEntrySpeaker('');
+    setCompletedTarget('');
+    setEditingIdeaId(idea.id);
+    setComposerKind('IDEA');
+    setIdeaTitle(idea.title || '');
+    setIdeaNote(idea.note || '');
+    setDetailSubTab('TIMELINE');
+    setTimeout(() => {
+      composerFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      ideaTitleRef.current?.focus();
+    }, 30);
+  };
+
   const handleCancelEditEntry = () => {
     setEditingEntryId(null);
+    setEditingIdeaId(null);
     setEntryContent('');
     setEntrySpeaker('');
     setCompletedTarget('');
@@ -794,6 +843,8 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     setEntryTime('');
     setDueDate('');
     setDueTime('');
+    setIdeaTitle('');
+    setIdeaNote('');
   };
 
   const handleSubmitRevisionRequest = async (entryId: number) => {
@@ -2247,16 +2298,20 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                           ref={composerFormRef}
                           onSubmit={handleAddTimelineItem}
                           className={`p-3 rounded-xl border shadow-2xs space-y-2 text-xs ${
-                            editingEntryId
+                            editingEntryId || editingIdeaId
                               ? 'bg-amber-50/50 border-amber-400 ring-2 ring-amber-300/40'
                               : 'bg-white border-ivory-300'
                           }`}
                         >
-                          {editingEntryId && (
+                          {(editingEntryId || editingIdeaId) && (
                             <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-amber-100/90 border border-amber-300 text-amber-950">
                               <span className="font-bold text-[11px] flex items-center gap-1.5">
                                 <Edit2 className="w-3.5 h-3.5 text-amber-700" />
-                                <span>{L('기존 타임라인 기록 수정 중 · 아래 내용을 수정하고 저장하세요', 'タイムライン記録を編集中', 'Editing entry · update below and save')}</span>
+                                <span>
+                                  {editingIdeaId
+                                    ? L('기존 아이디어 수정 중 · 아래 내용을 수정하고 저장하세요', '既存アイデアを編集中', 'Editing idea · update below and save')
+                                    : L('기존 타임라인 기록 수정 중 · 아래 내용을 수정하고 저장하세요', 'タイムライン記録を編集中', 'Editing entry · update below and save')}
+                                </span>
                               </span>
                               <button
                                 type="button"
@@ -2282,7 +2337,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 key={tBtn.id}
                                 type="button"
                                 onClick={() => {
-                                  if (tBtn.id === 'IDEA' && editingEntryId) {
+                                  if ((tBtn.id === 'IDEA' && editingEntryId) || (tBtn.id !== 'IDEA' && editingIdeaId)) {
                                     handleCancelEditEntry();
                                   }
                                   setComposerKind(tBtn.id);
@@ -2299,6 +2354,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                           {composerKind === 'IDEA' ? (
                             <div className="space-y-2">
                               <input
+                                ref={ideaTitleRef}
                                 type="text"
                                 value={ideaTitle}
                                 onChange={(e) => setIdeaTitle(e.target.value)}
@@ -2312,10 +2368,19 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 placeholder={L('세부 메모 / 기대 효과 (선택)', 'メモ・詳細 (任意)', 'Details / notes (optional)')}
                                 className="w-full p-2 bg-white border border-ivory-300 rounded-lg text-charcoal-900"
                               />
-                              <div className="flex justify-end">
+                              <div className="flex items-center justify-end gap-1.5">
+                                {editingIdeaId && (
+                                  <Button type="button" variant="secondary" size="sm" onClick={handleCancelEditEntry}>
+                                    {t('common.cancel')}
+                                  </Button>
+                                )}
                                 <Button type="submit" variant="primary" size="sm" isLoading={isAddingIdea}>
                                   <Lightbulb className="w-3.5 h-3.5" />
-                                  <span>{L('아이디어 저장', 'アイデア保存', 'Save Idea')}</span>
+                                  <span>
+                                    {editingIdeaId
+                                      ? L('수정 저장', '変更を保存', 'Save Changes')
+                                      : L('아이디어 저장', 'アイデア保存', 'Save Idea')}
+                                  </span>
                                 </Button>
                               </div>
                             </div>
@@ -2607,7 +2672,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 return (
                                   <div
                                     key={`tl-idea-${idea.id}`}
-                                    className={`p-3 rounded-xl border space-y-2 text-xs ${
+                                    className={`p-2.5 sm:p-3 rounded-xl border space-y-2 text-xs ${
                                       idea.status === 'PROMOTED'
                                         ? 'bg-emerald-50/70 border-emerald-300'
                                         : idea.status === 'ARCHIVED'
@@ -2615,14 +2680,57 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                         : 'bg-yellow-50/50 border-amber-300'
                                     }`}
                                   >
-                                    <div className="flex items-start justify-between gap-2">
-                                      <div className="flex items-center gap-2 flex-wrap">
-                                        <span className="font-bold text-charcoal-900">
+                                    <div className="flex items-center justify-between gap-1.5 min-w-0">
+                                      <div className="flex items-center gap-1.5 min-w-0 flex-nowrap">
+                                        <span className="font-bold text-charcoal-900 truncate whitespace-nowrap">
                                           {L('💡 아이디어', '💡 アイデア', '💡 Idea')}
                                         </span>
-                                        <span className="font-mono text-[11px] text-charcoal-500">
-                                          {item.dateKey}{item.timeKey ? ` ${item.timeKey}` : ''}
-                                        </span>
+                                        {(() => {
+                                          const { compact, full } = formatCompactTimelineDateTime(item.dateKey, item.timeKey);
+                                          return compact ? (
+                                            <span
+                                              className="font-mono text-[10.5px] text-charcoal-500 whitespace-nowrap shrink-0"
+                                              title={full}
+                                            >
+                                              {compact}
+                                            </span>
+                                          ) : null;
+                                        })()}
+                                      </div>
+
+                                      <div className="flex items-center gap-0.5 shrink-0">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleStartCompleteTarget(targetKey)}
+                                          className="p-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 inline-flex items-center justify-center transition"
+                                          title={L('완료 기록 작성', '完了記録を作成', 'Mark as done')}
+                                          aria-label={L('완료 기록 작성', '完了記録を作成', 'Mark as done')}
+                                        >
+                                          <CheckCircle2 className="w-4 h-4" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleStartEditIdea(idea)}
+                                          className="p-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 hover:bg-ivory-100 inline-flex items-center justify-center transition"
+                                          title={L('아이디어 수정', 'アイデアを編集', 'Edit idea')}
+                                          aria-label={L('아이디어 수정', 'アイデアを編集', 'Edit idea')}
+                                        >
+                                          <Edit2 className="w-4 h-4" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDeleteIdea(idea.id)}
+                                          className="p-1 rounded-lg text-charcoal-400 hover:text-rose-600 hover:bg-rose-50 inline-flex items-center justify-center transition"
+                                          title={t('common.delete')}
+                                          aria-label={t('common.delete')}
+                                        >
+                                          <Trash2 className="w-4 h-4" />
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    {(idea.status === 'PROMOTED' || idea.status === 'ARCHIVED' || (isCompleted && latestComp)) && (
+                                      <div className="flex items-center gap-1.5 flex-wrap">
                                         {idea.status === 'PROMOTED' && (
                                           <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-bold">
                                             {L('Next Step 반영됨', 'Next Step反映済', 'Promoted')}
@@ -2639,26 +2747,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                           </span>
                                         )}
                                       </div>
-
-                                      <div className="flex items-center gap-1 shrink-0">
-                                        <button
-                                          type="button"
-                                          onClick={() => handleStartCompleteTarget(targetKey)}
-                                          className="px-2 py-0.5 rounded-md bg-emerald-600 text-white font-bold text-[11px] hover:bg-emerald-700 inline-flex items-center gap-1"
-                                          title={L('이 아이디어를 완료 대상으로 완료 기록 작성', 'このアイデアを完了記録として作成', 'Log completion for this idea')}
-                                        >
-                                          <CheckCircle2 className="w-3 h-3" />
-                                          <span>{L('완료', '完了', 'Done')}</span>
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => handleDeleteIdea(idea.id)}
-                                          className="p-1 text-charcoal-400 hover:text-rose-600 rounded"
-                                        >
-                                          <Trash2 className="w-3 h-3" />
-                                        </button>
-                                      </div>
-                                    </div>
+                                    )}
 
                                     <div className="space-y-0.5">
                                       <p className="font-bold text-charcoal-900">{idea.title}</p>
@@ -2708,9 +2797,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 : '';
 
                               const cardStyle = isMe
-                                ? 'w-[85%] sm:w-[60%] bg-forest-50/75 border-forest-300 rounded-xl'
+                                ? 'w-[92%] sm:w-[60%] bg-forest-50/75 border-forest-300 rounded-xl'
                                 : isThem
-                                ? 'w-[85%] sm:w-[60%] bg-sky-50/85 border-sky-300 rounded-xl'
+                                ? 'w-[92%] sm:w-[60%] bg-sky-50/85 border-sky-300 rounded-xl'
                                 : isProgress
                                 ? 'w-full bg-emerald-50/70 border-emerald-300 rounded-xl'
                                 : 'w-full bg-amber-50/60 border-amber-300 rounded-xl';
@@ -2734,15 +2823,77 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
 
                               return (
                                 <div key={`tl-entry-${en.id}`} className={wrapperStyle}>
-                                  <div className={`p-3 border space-y-1.5 text-xs ${cardStyle}`}>
-                                  <div className="flex items-center justify-between gap-2">
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                      <span className="font-bold text-charcoal-900">{badgeLabel}</span>
-                                      {(en.entry_date || en.entry_time) && (
-                                        <span className="font-mono text-[11px] text-charcoal-500">
-                                          {en.entry_date || ''}{en.entry_time ? `${en.entry_date ? ' ' : ''}${en.entry_time}` : ''}
-                                        </span>
+                                  <div className={`p-2.5 sm:p-3 border space-y-1.5 text-xs ${cardStyle}`}>
+                                  <div className="flex items-center justify-between gap-1.5 min-w-0">
+                                    <div className="flex items-center gap-1.5 min-w-0 flex-nowrap">
+                                      <span className="font-bold text-charcoal-900 truncate whitespace-nowrap">{badgeLabel}</span>
+                                      {(() => {
+                                        const displayDate = en.entry_date || (en.created_at ? getJstDateKey(en.created_at) : '');
+                                        const displayTime = en.entry_time || (en.created_at ? formatJstTime(en.created_at) : '');
+                                        const { compact, full } = formatCompactTimelineDateTime(displayDate, displayTime);
+                                        return compact ? (
+                                          <span
+                                            className="font-mono text-[10.5px] text-charcoal-500 whitespace-nowrap shrink-0"
+                                            title={full}
+                                          >
+                                            {compact}
+                                          </span>
+                                        ) : null;
+                                      })()}
+                                    </div>
+
+                                    <div className="flex items-center gap-0.5 shrink-0">
+                                      {!isProgress && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleStartCompleteTarget(targetKey)}
+                                          className="p-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 inline-flex items-center justify-center transition"
+                                          title={L('이 기록을 완료 대상으로 완료 기록 작성', 'この記録の完了記録を作成', 'Log completion for this entry')}
+                                          aria-label={L('완료 기록 작성', '完了記録を作成', 'Log completion for this entry')}
+                                        >
+                                          <CheckCircle2 className="w-4 h-4" />
+                                        </button>
                                       )}
+                                      {Number(en.author_id) === Number(user?.id) ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleStartEditEntry(en)}
+                                          className="p-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 hover:bg-ivory-100 inline-flex items-center justify-center transition"
+                                          title={L('이 기록 수정', 'この記録を編集', 'Edit this entry')}
+                                          aria-label={t('common.edit')}
+                                        >
+                                          <Edit2 className="w-4 h-4" />
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setRevisionFormEntryId(revisionFormEntryId === en.id ? null : en.id);
+                                            setRevisionReason('');
+                                          }}
+                                          className="px-1.5 py-0.5 rounded-md bg-amber-50 border border-amber-300 text-amber-900 font-bold text-[11px] hover:bg-amber-100 inline-flex items-center gap-1 whitespace-nowrap"
+                                          title={L('작성자에게 내용 수정 요청 보내기', '作成者に修正を依頼', 'Request revision from author')}
+                                        >
+                                          <AlertTriangle className="w-3 h-3" />
+                                          <span>{L('수정 요청', '修正依頼', 'Request Edit')}</span>
+                                        </button>
+                                      )}
+                                      {(Number(en.author_id) === Number(user?.id) || Number(detailProject.created_by) === Number(user?.id)) && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDeleteEntry(en.id)}
+                                          className="p-1 rounded-lg text-charcoal-400 hover:text-rose-600 hover:bg-rose-50 inline-flex items-center justify-center transition"
+                                          title={t('common.delete')}
+                                          aria-label={t('common.delete')}
+                                        >
+                                          <Trash2 className="w-4 h-4" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {(en.due_date || en.due_time || (isCompleted && latestComp)) && (
+                                    <div className="flex items-center gap-1.5 flex-wrap">
                                       {(en.due_date || en.due_time) && (
                                         <span
                                           className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold border ${
@@ -2764,54 +2915,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                         </span>
                                       )}
                                     </div>
-
-                                    <div className="flex items-center gap-1 shrink-0">
-                                      {!isProgress && (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleStartCompleteTarget(targetKey)}
-                                          className="px-2 py-0.5 rounded-md bg-emerald-600 text-white font-bold text-[11px] hover:bg-emerald-700 inline-flex items-center gap-1"
-                                          title={L('이 기록을 완료 대상으로 완료 기록 작성', 'この記録の完了記録を作成', 'Log completion for this entry')}
-                                        >
-                                          <CheckCircle2 className="w-3 h-3" />
-                                          <span>{L('완료', '完了', 'Done')}</span>
-                                        </button>
-                                      )}
-                                      {Number(en.author_id) === Number(user?.id) ? (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleStartEditEntry(en)}
-                                          className="px-2 py-0.5 rounded-md bg-white border border-ivory-300 text-charcoal-700 font-bold text-[11px] hover:bg-ivory-100 inline-flex items-center gap-1"
-                                          title={L('이 기록 수정', 'この記録を編集', 'Edit this entry')}
-                                        >
-                                          <Edit2 className="w-3 h-3" />
-                                          <span>{t('common.edit')}</span>
-                                        </button>
-                                      ) : (
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setRevisionFormEntryId(revisionFormEntryId === en.id ? null : en.id);
-                                            setRevisionReason('');
-                                          }}
-                                          className="px-2 py-0.5 rounded-md bg-amber-50 border border-amber-300 text-amber-900 font-bold text-[11px] hover:bg-amber-100 inline-flex items-center gap-1"
-                                          title={L('작성자에게 내용 수정 요청 보내기', '作成者に修正を依頼', 'Request revision from author')}
-                                        >
-                                          <AlertTriangle className="w-3 h-3" />
-                                          <span>{L('수정 요청', '修正依頼', 'Request Edit')}</span>
-                                        </button>
-                                      )}
-                                      {(Number(en.author_id) === Number(user?.id) || Number(detailProject.created_by) === Number(user?.id)) && (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleDeleteEntry(en.id)}
-                                          className="p-1 text-charcoal-400 hover:text-rose-600 rounded"
-                                        >
-                                          <Trash2 className="w-3 h-3" />
-                                        </button>
-                                      )}
-                                    </div>
-                                  </div>
+                                  )}
 
                                   {isProgress && en.completed_target_summary && (
                                     <div className="px-2.5 py-1.5 rounded-lg bg-white/80 border border-emerald-200 flex items-center gap-1.5 text-[11px]">
