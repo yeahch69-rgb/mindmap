@@ -4,15 +4,52 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { getJstDateStr, getJstDateStrWithDayOffset, getJstDateTimeStr, getJstTimeStr } from '../utils/jstTime.js';
 
-const dbPathEnv = process.env.DB_PATH || path.join(process.cwd(), 'data', 'journal.db');
+const dbPathEnv = path.resolve(process.env.DB_PATH || path.join(process.cwd(), 'data', 'journal.db'));
 const dbDir = path.dirname(dbPathEnv);
 if (!fs.existsSync(dbDir)) {
   fs.mkdirSync(dbDir, { recursive: true });
 }
 
-export const db: Database.Database = new Database(dbPathEnv);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+export function getDbPath(): string {
+  return dbPathEnv;
+}
+
+let currentDb: Database.Database = new Database(dbPathEnv);
+currentDb.pragma('journal_mode = WAL');
+currentDb.pragma('foreign_keys = ON');
+
+export const db: Database.Database = new Proxy({} as Database.Database, {
+  get(_target, prop) {
+    const val = (currentDb as any)[prop];
+    if (typeof val === 'function') {
+      return val.bind(currentDb);
+    }
+    return val;
+  },
+});
+
+export function reloadDatabase(newDbPath?: string) {
+  try {
+    currentDb.close();
+  } catch (err) {
+    console.error('Error closing current db:', err);
+  }
+
+  try {
+    if (fs.existsSync(`${dbPathEnv}-wal`)) fs.unlinkSync(`${dbPathEnv}-wal`);
+  } catch {}
+  try {
+    if (fs.existsSync(`${dbPathEnv}-shm`)) fs.unlinkSync(`${dbPathEnv}-shm`);
+  } catch {}
+
+  if (newDbPath && newDbPath !== dbPathEnv) {
+    fs.copyFileSync(newDbPath, dbPathEnv);
+  }
+
+  currentDb = new Database(dbPathEnv);
+  currentDb.pragma('journal_mode = WAL');
+  currentDb.pragma('foreign_keys = ON');
+}
 
 export function generateInviteToken(): string {
   return crypto.randomBytes(12).toString('hex');

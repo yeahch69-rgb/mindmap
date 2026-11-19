@@ -4,11 +4,13 @@ import {
   Bell,
   BellOff,
   Check,
+  Cloud,
   Download,
   Globe,
   Minus,
   Monitor,
   Plus,
+  RefreshCw,
   RotateCcw,
   Send,
   Smartphone,
@@ -69,6 +71,16 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
     null
   );
 
+  // Cloud sync states
+  const [cloudSync, setCloudSync] = useState<{
+    enabled: boolean;
+    status: string;
+    projectId: string | null;
+    lastSyncedAt: string | null;
+    message: string;
+  } | null>(null);
+  const [isSyncBusy, setIsSyncBusy] = useState(false);
+
   // PWA standalone check
   const [isStandalone, setIsStandalone] = useState(false);
   const [viewportWidth, setViewportWidth] = useState<number>(() =>
@@ -112,6 +124,15 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
       })
       .catch(() => {
         // ignore status error
+      });
+
+    api
+      .get<{ status: any }>('/system/cloud-sync')
+      .then((res) => {
+        if (res?.status) setCloudSync(res.status);
+      })
+      .catch(() => {
+        // ignore cloud sync status error
       });
     // Only re-initialize when modal opens (do not wipe saveMessage when user updates)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -719,6 +740,50 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
               </button>
             </div>
           </div>
+
+          {/* Section 4: Cloud DB Backup Status (Firebase Firestore) */}
+          {cloudSync && (
+            <div className="p-3.5 rounded-xl bg-ivory-50 border border-ivory-200 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Cloud
+                    className={`w-4 h-4 shrink-0 ${
+                      cloudSync.status === 'ACTIVE'
+                        ? 'text-emerald-700'
+                        : cloudSync.status === 'ERROR'
+                          ? 'text-rose-600'
+                          : 'text-charcoal-500'
+                    }`}
+                  />
+                  <span className="text-xs font-bold text-charcoal-900 truncate">
+                    {L('클라우드 DB 자동 백업 (Firebase)', 'クラウド自動バックアップ', 'Cloud DB Backup (Firebase)')}
+                  </span>
+                </div>
+                {cloudSync.enabled && (
+                  <button
+                    type="button"
+                    disabled={isSyncBusy}
+                    onClick={async () => {
+                      setIsSyncBusy(true);
+                      try {
+                        const res = await api.post<{ ok: boolean; status: any }>(
+                          '/system/cloud-sync/backup'
+                        );
+                        if (res?.status) setCloudSync(res.status);
+                      } finally {
+                        setIsSyncBusy(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-ivory-300 hover:bg-ivory-100 text-[11px] font-bold text-charcoal-800 disabled:opacity-50 shrink-0"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isSyncBusy ? 'animate-spin' : ''}`} />
+                    {L('지금 백업', '今すぐ保存', 'Backup Now')}
+                  </button>
+                )}
+              </div>
+              <p className="text-[11px] text-charcoal-600 leading-relaxed">{cloudSync.message}</p>
+            </div>
+          )}
         </div>
       </div>
     </div>

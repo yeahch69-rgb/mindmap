@@ -5,14 +5,18 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { initDatabase } from './db/database.js';
+import {
+  backupDatabaseToFirebase,
+  getCloudSyncStatus,
+  restoreDatabaseFromFirebaseOnStartup,
+  scheduleCloudBackup,
+  startCloudSyncDaemon,
+} from './db/cloudSync.js';
+import { authenticateToken } from './middleware/auth.js';
 import { initWebPush, startPushScheduler } from './utils/webPush.js';
 import authRoutes from './routes/auth.js';
 import journalRoutes from './routes/journal.js';
 import pushRoutes from './routes/push.js';
-
-initDatabase();
-initWebPush();
-startPushScheduler();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4100;
@@ -25,8 +29,33 @@ app.use(
 );
 app.use(express.json({ limit: '5mb' }));
 
+// Trigger debounced Firebase DB snapshot after mutating API calls
+app.use('/api', (req, res, next) => {
+  if (
+    ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) &&
+    req.path !== '/push/test' &&
+    req.path !== '/system/cloud-sync/backup'
+  ) {
+    res.on('finish', () => {
+      if (res.statusCode >= 200 && res.statusCode < 400) {
+        scheduleCloudBackup(`${req.method} ${req.path}`, 1200);
+      }
+    });
+  }
+  next();
+});
+
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, cloudSync: getCloudSyncStatus() });
+});
+
+app.get('/api/system/cloud-sync', authenticateToken, (_req, res) => {
+  res.json({ status: getCloudSyncStatus() });
+});
+
+app.post('/api/system/cloud-sync/backup', authenticateToken, async (_req, res) => {
+  const ok = await backupDatabaseToFirebase('manual_user_trigger', true);
+  res.json({ ok, status: getCloudSyncStatus() });
 });
 
 app.use('/api/auth', authRoutes);
@@ -45,6 +74,19 @@ if (fs.existsSync(clientDistPath)) {
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`Project Mindmap server listening on http://localhost:${PORT}`);
+async function bootstrap() {
+  await restoreDatabaseFromFirebaseOnStartup();
+  initDatabase();
+  initWebPush();
+  startPushScheduler();
+  startCloudSyncDaemon();
+
+  app.listen(PORT, () => {
+    console.log(`Project Mindmap server listening on http://localhost:${PORT}`);
+  });
+}
+
+bootstrap().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });
