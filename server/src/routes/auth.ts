@@ -162,7 +162,8 @@ router.post('/demo', (_req: Request, res: Response) => {
 });
 
 router.get('/me', authenticateToken, (req: Request, res: Response) => {
-  res.json({ user: req.user });
+  const refreshedToken = signAuthToken(req.user!);
+  res.json({ user: req.user, refreshedToken });
 });
 
 router.patch('/preferences', authenticateToken, (req: Request, res: Response) => {

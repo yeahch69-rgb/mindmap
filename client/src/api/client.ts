@@ -43,10 +43,12 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
   }
 
   if (!res.ok) {
-    if (res.status === 401 && !url.startsWith('/auth/')) {
+    if (res.status === 401 && (!url.startsWith('/auth/') || url === '/auth/me')) {
       setStoredToken(null);
     }
-    throw new Error(data?.error || `HTTP ${res.status}`);
+    const err = new Error(data?.error || `HTTP ${res.status}`) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
 
   return data as T;

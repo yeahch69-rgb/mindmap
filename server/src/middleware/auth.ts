@@ -24,7 +24,7 @@ declare global {
 
 export function signAuthToken(user: { id: number; email: string; name: string }): string {
   return jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, {
-    expiresIn: '30d',
+    expiresIn: '180d',
   });
 }
 

@@ -8,6 +8,28 @@ const FONT_PERCENT_STORAGE_KEYS = {
   desktop: 'pm_font_percent_desktop',
   mobile: 'pm_font_percent_mobile',
 } as const;
+const USER_CACHE_KEY = 'pj_auth_user';
+
+function getCachedUser(): AuthUser | null {
+  try {
+    const raw = localStorage.getItem(USER_CACHE_KEY);
+    return raw ? (JSON.parse(raw) as AuthUser) : null;
+  } catch {
+    return null;
+  }
+}
+
+function setCachedUser(nextUser: AuthUser | null) {
+  try {
+    if (nextUser) {
+      localStorage.setItem(USER_CACHE_KEY, JSON.stringify(nextUser));
+    } else {
+      localStorage.removeItem(USER_CACHE_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
 
 export function parseFontScalePercent(value?: string | null): number {
   if (!value) return 100;
@@ -92,26 +114,37 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [user, setUser] = useState<AuthUser | null>(() =>
+    getStoredToken() ? getCachedUser() : null
+  );
+  const [isLoading, setIsLoading] = useState<boolean>(() => !(getStoredToken() && getCachedUser()));
 
   const checkSession = useCallback(async () => {
     const token = getStoredToken();
     if (!token) {
+      setCachedUser(null);
       setUser(null);
       setIsLoading(false);
       return;
     }
     try {
-      const res = await api.get<{ user: AuthUser }>('/auth/me');
+      const res = await api.get<{ user: AuthUser; refreshedToken?: string }>('/auth/me');
+      if (res.refreshedToken) {
+        setStoredToken(res.refreshedToken);
+      }
+      setCachedUser(res.user);
       setUser(res.user);
       syncAndApplyUserFontScale(res.user);
       if (res.user.pushEnabled !== false) {
         void ensurePushSubscriptionSynced(false);
       }
-    } catch {
-      setStoredToken(null);
-      setUser(null);
+    } catch (err: any) {
+      // Clear session only on explicit 401 Unauthorized; keep cached login on transient offline/5xx
+      if (err?.status === 401) {
+        setStoredToken(null);
+        setCachedUser(null);
+        setUser(null);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -143,6 +176,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const login = async (email: string, password: string) => {
     const res = await api.post<{ token: string; user: AuthUser }>('/auth/login', { email, password });
     setStoredToken(res.token);
+    setCachedUser(res.user);
     setUser(res.user);
     syncAndApplyUserFontScale(res.user);
     if (res.user.pushEnabled !== false) {
@@ -153,6 +187,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const register = async (email: string, password: string, name: string) => {
     const res = await api.post<{ token: string; user: AuthUser }>('/auth/register', { email, password, name });
     setStoredToken(res.token);
+    setCachedUser(res.user);
     setUser(res.user);
     syncAndApplyUserFontScale(res.user);
     if (res.user.pushEnabled !== false) {
@@ -163,6 +198,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loginDemo = async () => {
     const res = await api.post<{ token: string; user: AuthUser }>('/auth/demo');
     setStoredToken(res.token);
+    setCachedUser(res.user);
     setUser(res.user);
     syncAndApplyUserFontScale(res.user);
     if (res.user.pushEnabled !== false) {
@@ -172,11 +208,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const logout = () => {
     setStoredToken(null);
+    setCachedUser(null);
     setUser(null);
   };
 
   const updatePreferences = async (payload: UpdatePreferencesPayload): Promise<AuthUser> => {
     const res = await api.patch<{ user: AuthUser }>('/auth/preferences', payload);
+    setCachedUser(res.user);
     setUser(res.user);
     syncAndApplyUserFontScale(res.user);
     return res.user;
