@@ -1,4 +1,4 @@
-const CACHE_NAME = 'project-mindmap-v2';
+const CACHE_NAME = 'project-mindmap-v3';
 const STATIC_ASSETS = [
   '/',
   '/index.html',

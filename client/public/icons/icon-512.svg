@@ -1,8 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="108" fill="#1B4332"/>
-  <path d="M256 256 C334 256, 334 150, 396 150 M256 256 C334 256, 334 362, 396 362 M256 256 C178 256, 178 176, 116 176" stroke="#D4B990" stroke-width="20" stroke-linecap="round" fill="none"/>
-  <circle cx="256" cy="256" r="46" fill="#F8F7F4"/>
-  <circle cx="396" cy="150" r="32" fill="#84B89B"/>
-  <circle cx="396" cy="362" r="32" fill="#DECBAE"/>
-  <circle cx="116" cy="176" r="32" fill="#84B89B"/>
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#2D6A4F"/>
+      <stop offset="100%" stop-color="#133527"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <path d="M198 218 C246 176, 250 138, 294 138" stroke="#D9E8DF" stroke-width="26" stroke-linecap="round" fill="none"/>
+  <path d="M224 256 L282 256" stroke="#D4B990" stroke-width="26" stroke-linecap="round" fill="none"/>
+  <path d="M198 294 C246 336, 250 374, 294 374" stroke="#D4B990" stroke-width="26" stroke-linecap="round" fill="none"/>
+  <rect x="106" y="202" width="108" height="108" rx="26" transform="rotate(45 160 256)" fill="#F8F7F4"/>
+  <circle cx="336" cy="138" r="35" fill="#D4B990"/>
+  <rect x="294" y="224" width="122" height="64" rx="32" fill="#7DD3FC"/>
+  <circle cx="336" cy="374" r="35" fill="#F8F7F4"/>
 </svg>

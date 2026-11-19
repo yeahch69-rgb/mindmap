@@ -1,8 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
-  <rect width="192" height="192" rx="40" fill="#1B4332"/>
-  <path d="M96 96 C125 96, 125 56, 148 56 M96 96 C125 96, 125 136, 148 136 M96 96 C67 96, 67 66, 44 66" stroke="#D4B990" stroke-width="8" stroke-linecap="round" fill="none"/>
-  <circle cx="96" cy="96" r="18" fill="#F8F7F4"/>
-  <circle cx="148" cy="56" r="12" fill="#84B89B"/>
-  <circle cx="148" cy="136" r="12" fill="#DECBAE"/>
-  <circle cx="44" cy="66" r="12" fill="#84B89B"/>
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#2D6A4F"/>
+      <stop offset="100%" stop-color="#133527"/>
+    </radialGradient>
+  </defs>
+  <rect width="192" height="192" rx="42" fill="url(#bg)"/>
+  <path d="M74 82 C92 66, 94 52, 110 52" stroke="#D9E8DF" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <path d="M84 96 L106 96" stroke="#D4B990" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <path d="M74 110 C92 126, 94 140, 110 140" stroke="#D4B990" stroke-width="10" stroke-linecap="round" fill="none"/>
+  <rect x="40" y="76" width="40" height="40" rx="10" transform="rotate(45 60 96)" fill="#F8F7F4"/>
+  <circle cx="126" cy="52" r="13" fill="#D4B990"/>
+  <rect x="110" y="84" width="46" height="24" rx="12" fill="#7DD3FC"/>
+  <circle cx="126" cy="140" r="13" fill="#F8F7F4"/>
 </svg>
