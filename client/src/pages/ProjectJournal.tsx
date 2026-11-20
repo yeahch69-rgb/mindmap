@@ -73,6 +73,13 @@ function formatCompactTimelineDateTime(
   return { compact, full };
 }
 
+function addDaysToYmd(ymd: string, days: number): string {
+  const [y, m, d] = String(ymd || '').slice(0, 10).split('-').map(Number);
+  if (!y || !m || !d) return ymd;
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return dt.toISOString().slice(0, 10); // jst-ignore: pure YYYY-MM-DD calendar arithmetic
+}
+
 interface JournalInboxItem {
   id: number;
   content: string;
@@ -148,7 +155,10 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const [revisionFormEntryId, setRevisionFormEntryId] = useState<number | null>(null);
   const [revisionReason, setRevisionReason] = useState('');
   const [isSubmittingRevision, setIsSubmittingRevision] = useState(false);
-  const [showTurnTargetPicker, setShowTurnTargetPicker] = useState(false);
+  const [showTheirTurnPanel, setShowTheirTurnPanel] = useState(false);
+  const [pendingTurnTargetUserId, setPendingTurnTargetUserId] = useState<number | null>(null);
+  const [pendingWaitDays, setPendingWaitDays] = useState<string>('');
+  const [isSavingTurnSwitch, setIsSavingTurnSwitch] = useState(false);
   const [isAddingEntry, setIsAddingEntry] = useState(false);
   const composerFormRef = useRef<HTMLFormElement>(null);
   const entryContentRef = useRef<HTMLTextAreaElement>(null);
@@ -354,7 +364,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       setEntryTime('');
       setDueDate('');
       setDueTime('');
-      setShowTurnTargetPicker(false);
+      setShowTheirTurnPanel(false);
+      setPendingTurnTargetUserId(null);
+      setPendingWaitDays('');
     } else {
       setDetailProject(null);
       setDetailEntries([]);
@@ -634,27 +646,77 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const handleQuickTurnChange = async (
     projectId: number,
     nextTurn: TurnState,
-    targetTurnUserId?: number | null
+    targetTurnUserId?: number | null,
+    waitDays?: number | null
   ) => {
-    if (nextTurn === 'THEIR_TURN' && targetTurnUserId === undefined) {
+    if (nextTurn === 'THEIR_TURN' && waitDays === undefined && targetTurnUserId === undefined) {
       const proj = detailProject?.id === projectId ? detailProject : projects.find((p) => p.id === projectId);
-      if (proj && getOtherAppTurnTargets(proj).length >= 2) {
-        setShowTurnTargetPicker((prev) => !prev);
+      if (proj) {
+        const targets = getOtherAppTurnTargets(proj);
+        const currentTarget =
+          targets.find((tg) => Number(proj.active_turn_user_id) === tg.user_id) || targets[0] || null;
+        setPendingTurnTargetUserId(currentTarget ? currentTarget.user_id : null);
+        setPendingWaitDays(proj.my_turn_wait ? String(proj.my_turn_wait.wait_days) : '');
+        setShowTheirTurnPanel((prev) => !prev);
         return;
       }
     }
     try {
+      setIsSavingTurnSwitch(true);
       await api.patch(`/journal/projects/${projectId}`, {
         turn_state: nextTurn,
         ...(targetTurnUserId ? { target_turn_user_id: targetTurnUserId } : {}),
+        ...(waitDays !== undefined ? { turn_wait_days: waitDays } : {}),
       });
-      setShowTurnTargetPicker(false);
+      setShowTheirTurnPanel(false);
       await fetchOverview();
       if (selectedProjectId === projectId) {
         await fetchProjectDetail(projectId);
       }
     } catch (err: any) {
       alert(err.message || t('common.error'));
+    } finally {
+      setIsSavingTurnSwitch(false);
+    }
+  };
+
+  const handleConfirmTheirTurn = async () => {
+    if (!detailProject) return;
+    const cleaned = pendingWaitDays.trim();
+    const parsedNum = cleaned === '' ? null : Number(cleaned);
+    if (parsedNum !== null && (!Number.isFinite(parsedNum) || parsedNum < 1 || parsedNum > 90)) {
+      alert(
+        L(
+          '대기 기간은 1~90일 사이로 입력하거나 설정 안 함을 선택해 주세요.',
+          '待機日数は1〜90日の間で入力してください。',
+          'Wait duration must be between 1 and 90 days.'
+        )
+      );
+      return;
+    }
+    const waitDaysPayload = parsedNum === null ? null : Math.round(parsedNum);
+    await handleQuickTurnChange(
+      detailProject.id,
+      'THEIR_TURN',
+      pendingTurnTargetUserId || undefined,
+      waitDaysPayload
+    );
+  };
+
+  const handleClearTurnWait = async (projectId: number) => {
+    try {
+      setIsSavingTurnSwitch(true);
+      await api.patch(`/journal/projects/${projectId}`, {
+        turn_wait_days: null,
+      });
+      await fetchOverview();
+      if (selectedProjectId === projectId) {
+        await fetchProjectDetail(projectId);
+      }
+    } catch (err: any) {
+      alert(err.message || t('common.error'));
+    } finally {
+      setIsSavingTurnSwitch(false);
     }
   };
 
@@ -1240,6 +1302,21 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               </span>
             )}
             {getTurnBadge(p.turn_state, p.active_turn_user_name || p.resolved_partner_name)}
+            {p.turn_state === 'THEIR_TURN' && p.my_turn_wait && (
+              <span
+                className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold border whitespace-nowrap ${
+                  p.my_turn_wait.is_overdue
+                    ? 'bg-rose-50 text-rose-700 border-rose-300'
+                    : 'bg-sky-50 text-sky-800 border-sky-200'
+                }`}
+                title={L('본인에게만 보이는 개인 대기 알림', '本人のみに表示される個人待機アラート', 'Private wait reminder (only visible to you)')}
+              >
+                <Lock className="w-2.5 h-2.5 shrink-0" />
+                {p.my_turn_wait.is_overdue
+                  ? L(`대기초과 (${p.my_turn_wait.wait_days}일)`, `待機超過 (${p.my_turn_wait.wait_days}日)`, `Overdue (${p.my_turn_wait.wait_days}d)`)
+                  : `~${p.my_turn_wait.target_date.slice(5)} (D-${p.my_turn_wait.days_remaining})`}
+              </span>
+            )}
           </div>
 
           <span
@@ -2068,40 +2145,184 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                               </button>
                             ))}
                           </div>
-                          {showTurnTargetPicker && otherTargets.length >= 2 && (
-                            <div className="p-2.5 rounded-xl bg-sky-50 border border-sky-200 space-y-2">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-[11px] font-bold text-sky-900">
-                                  {L('누구에게 턴을 넘길까요?', '誰にターンを渡しますか？', 'Pass turn to whom?')}
+                          {/* Private Turn Wait Status Banner (Only visible to the user who set the wait) */}
+                          {detailProject.turn_state === 'THEIR_TURN' && detailProject.my_turn_wait && !showTheirTurnPanel && (
+                            <div
+                              className={`p-2.5 rounded-xl border flex flex-wrap items-center justify-between gap-2 text-xs ${
+                                detailProject.my_turn_wait.is_overdue
+                                  ? 'bg-rose-50/90 border-rose-300 text-rose-900'
+                                  : 'bg-sky-50/80 border-sky-200 text-sky-900'
+                              }`}
+                            >
+                              <div className="flex items-center gap-1.5 flex-wrap font-bold">
+                                <Lock className="w-3.5 h-3.5 shrink-0 opacity-75" />
+                                <span>
+                                  {detailProject.my_turn_wait.is_overdue
+                                    ? L(
+                                        `대기 기간(${detailProject.my_turn_wait.wait_days}일) 초과 · 목표일 ${detailProject.my_turn_wait.target_date} 경과 (${detailProject.my_turn_wait.days_elapsed}일째)`,
+                                        `待機期間(${detailProject.my_turn_wait.wait_days}日)超過 · 目標日 ${detailProject.my_turn_wait.target_date} 経過 (${detailProject.my_turn_wait.days_elapsed}日目)`,
+                                        `Wait period (${detailProject.my_turn_wait.wait_days}d) elapsed since ${detailProject.my_turn_wait.target_date} (${detailProject.my_turn_wait.days_elapsed}d total)`
+                                      )
+                                    : L(
+                                        `나만의 대기 알림: ${detailProject.my_turn_wait.target_date}까지 (${detailProject.my_turn_wait.wait_days}일 대기 · D-${detailProject.my_turn_wait.days_remaining})`,
+                                        `個人待機アラート: ${detailProject.my_turn_wait.target_date}まで (${detailProject.my_turn_wait.wait_days}日待機 · D-${detailProject.my_turn_wait.days_remaining})`,
+                                        `Private wait reminder: until ${detailProject.my_turn_wait.target_date} (${detailProject.my_turn_wait.wait_days}d · D-${detailProject.my_turn_wait.days_remaining})`
+                                      )}
                                 </span>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
                                 <button
                                   type="button"
-                                  onClick={() => setShowTurnTargetPicker(false)}
-                                  className="text-[11px] font-bold text-charcoal-500 hover:text-charcoal-800"
+                                  onClick={() => handleQuickTurnChange(detailProject.id, 'THEIR_TURN')}
+                                  className="px-2 py-0.5 rounded bg-white border border-ivory-300 text-[11px] font-bold text-charcoal-700 hover:bg-ivory-100"
+                                >
+                                  {L('기간 변경', '変更', 'Edit')}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isSavingTurnSwitch}
+                                  onClick={() => handleClearTurnWait(detailProject.id)}
+                                  className="px-2 py-0.5 rounded bg-white border border-rose-200 text-[11px] font-bold text-rose-700 hover:bg-rose-50"
+                                >
+                                  {L('알림 해제', '解除', 'Clear')}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Their-Turn Handoff & Private Wait Duration Panel */}
+                          {showTheirTurnPanel && (
+                            <div className="p-3 rounded-xl bg-sky-50/90 border border-sky-200 space-y-3">
+                              {otherTargets.length >= 2 && (
+                                <div className="space-y-1.5">
+                                  <span className="text-[11px] font-bold text-sky-900 block">
+                                    {L('누구에게 턴을 넘길까요?', '誰にターンを渡しますか？', 'Pass turn to whom?')}
+                                  </span>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {otherTargets.map(target => {
+                                      const isSelected = pendingTurnTargetUserId === target.user_id;
+                                      return (
+                                        <button
+                                          key={`turn-target-${target.user_id}`}
+                                          type="button"
+                                          onClick={() => setPendingTurnTargetUserId(target.user_id)}
+                                          className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${
+                                            isSelected
+                                              ? 'bg-sky-700 text-white border-sky-800 shadow-2xs'
+                                              : 'bg-white text-sky-900 border-sky-300 hover:bg-sky-100'
+                                          }`}
+                                        >
+                                          👤 {target.name}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              )}
+
+                              <div className="space-y-1.5">
+                                <span className="text-[11px] font-bold text-sky-950 flex items-center gap-1">
+                                  <Hourglass className="w-3.5 h-3.5 text-sky-700" />
+                                  <span>
+                                    {L('며칠간 기다릴까요? (초과 시 나에게만 푸시알림)', '何日間待ちますか？ (超過時は自分のみに通知)', 'Wait how many days? (Private push to you if exceeded)')}
+                                  </span>
+                                </span>
+
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setPendingWaitDays('')}
+                                    className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${
+                                      pendingWaitDays === ''
+                                        ? 'bg-charcoal-800 text-white border-charcoal-900'
+                                        : 'bg-white text-charcoal-700 border-sky-200 hover:bg-sky-100'
+                                    }`}
+                                  >
+                                    {L('설정 안 함', '設定しない', 'None')}
+                                  </button>
+                                  {[1, 2, 3, 5, 7, 14].map((d) => (
+                                    <button
+                                      key={`wait-preset-${d}`}
+                                      type="button"
+                                      onClick={() => setPendingWaitDays(String(d))}
+                                      className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition tabular-nums ${
+                                        pendingWaitDays === String(d)
+                                          ? 'bg-sky-700 text-white border-sky-800'
+                                          : 'bg-white text-sky-900 border-sky-200 hover:bg-sky-100'
+                                      }`}
+                                    >
+                                      {L(`${d}일`, `${d}日`, `${d}d`)}
+                                    </button>
+                                  ))}
+                                  <div className="inline-flex items-center gap-1 bg-white border border-sky-300 rounded-lg px-2 py-0.5">
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      max={90}
+                                      value={pendingWaitDays}
+                                      onChange={(e) => setPendingWaitDays(e.target.value)}
+                                      placeholder={L('직접', '入力', 'Custom')}
+                                      className="w-12 text-xs font-bold text-center tabular-nums bg-transparent focus:outline-none text-charcoal-900"
+                                    />
+                                    <span className="text-[11px] font-bold text-charcoal-500">{L('일', '日', 'd')}</span>
+                                  </div>
+                                </div>
+
+                                {(() => {
+                                  const num = pendingWaitDays.trim() ? Number(pendingWaitDays.trim()) : 0;
+                                  const isValidDays = Number.isFinite(num) && num >= 1 && num <= 90;
+                                  const roundedDays = isValidDays ? Math.round(num) : 0;
+                                  const previewDate = isValidDays ? addDaysToYmd(todayJst, roundedDays) : '';
+                                  return (
+                                    <div className="space-y-1 text-[11px]">
+                                      {isValidDays ? (
+                                        <p className="font-bold text-sky-900 tabular-nums">
+                                          ⏰ {L(
+                                            `${previewDate} (${roundedDays}일 후)까지 응답이 없으면 나에게 푸시알림이 옵니다.`,
+                                            `${previewDate} (${roundedDays}日後)までに反応がなければ自分にプッシュ通知が届きます。`,
+                                            `You will receive a push reminder if there is no turn return by ${previewDate} (${roundedDays}d).`
+                                          )}
+                                        </p>
+                                      ) : (
+                                        <p className="text-charcoal-500">
+                                          {L('대기 알림 없이 상대 턴으로 전환합니다.', '待機アラートなしで相手ターンに切り替えます。', 'Switch to their turn without a wait reminder.')}
+                                        </p>
+                                      )}
+                                      {detailProject.mode === 'COLLAB' && (
+                                        <p className="text-sky-800/80 flex items-center gap-1">
+                                          <Lock className="w-3 h-3 shrink-0" />
+                                          <span>
+                                            {L(
+                                              '협업 프로젝트에서도 이 대기 기간과 초과 알림은 상대방에게 노출되지 않습니다.',
+                                              '協業プロジェクトでもこの待機期間と通知は相手には表示されません。',
+                                              'Your wait limit and overdue reminder are private and never shown to collaborators.'
+                                            )}
+                                          </span>
+                                        </p>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+
+                              <div className="flex items-center justify-end gap-2 pt-1 border-t border-sky-200/80">
+                                <button
+                                  type="button"
+                                  onClick={() => setShowTheirTurnPanel(false)}
+                                  className="px-3 py-1 rounded-lg bg-white border border-ivory-300 text-xs font-bold text-charcoal-600 hover:bg-ivory-100"
                                 >
                                   {t('common.cancel')}
                                 </button>
-                              </div>
-                              <div className="flex flex-wrap gap-1.5">
-                                {otherTargets.map(target => {
-                                  const isActive =
-                                    detailProject.turn_state === 'THEIR_TURN' &&
-                                    Number(detailProject.active_turn_user_id) === target.user_id;
-                                  return (
-                                    <button
-                                      key={`turn-target-${target.user_id}`}
-                                      type="button"
-                                      onClick={() => handleQuickTurnChange(detailProject.id, 'THEIR_TURN', target.user_id)}
-                                      className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${
-                                        isActive
-                                          ? 'bg-sky-700 text-white border-sky-800 shadow-2xs'
-                                          : 'bg-white text-sky-900 border-sky-300 hover:bg-sky-100'
-                                      }`}
-                                    >
-                                      👤 {target.name}
-                                    </button>
-                                  );
-                                })}
+                                <button
+                                  type="button"
+                                  disabled={isSavingTurnSwitch}
+                                  onClick={handleConfirmTheirTurn}
+                                  className="px-3 py-1 rounded-lg bg-sky-700 text-white text-xs font-bold hover:bg-sky-800 disabled:opacity-50"
+                                >
+                                  {detailProject.turn_state === 'THEIR_TURN'
+                                    ? L('적용 / 저장', '適用・保存', 'Save')
+                                    : L('상대 턴으로 넘기기', '相手ターンへ渡す', 'Pass Turn')}
+                                </button>
                               </div>
                             </div>
                           )}

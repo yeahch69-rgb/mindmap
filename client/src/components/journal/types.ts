@@ -77,6 +77,17 @@ export interface JournalMember {
   role: string;
 }
 
+export interface JournalTurnWait {
+  wait_days: number;
+  started_at: string;
+  target_date: string;
+  target_name: string | null;
+  days_elapsed: number;
+  days_remaining: number;
+  is_overdue: boolean;
+  notified_at: string | null;
+}
+
 export interface JournalProject {
   id: number;
   title: string;
@@ -87,6 +98,7 @@ export interface JournalProject {
   invite_token?: string | null;
   active_turn_user_id?: number | null;
   active_turn_user_name?: string | null;
+  my_turn_wait?: JournalTurnWait | null;
   resolved_partner_name?: string;
   creator_name?: string;
   members?: JournalMember[];

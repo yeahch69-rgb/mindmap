@@ -285,6 +285,58 @@ async function sendTimedEntryReminders(
   }
 }
 
+async function sendTurnWaitOverdueReminders(todayJst: string, nowJst: string) {
+  const overdueWaits = db
+    .prepare(`
+      SELECT w.id, w.project_id, w.watcher_user_id, w.wait_days, w.started_at, w.target_date, w.target_name,
+             p.title, p.mode, p.turn_state, p.active_turn_user_id, p.partner_name, p.created_by,
+             (SELECT COUNT(*) FROM journal_project_members m WHERE m.project_id = p.id) as member_count
+      FROM journal_turn_waits w
+      INNER JOIN journal_projects p ON p.id = w.project_id
+      WHERE w.notified_at IS NULL
+        AND p.turn_state NOT IN ('DONE', 'HOLD')
+        AND w.target_date <= ?
+    `)
+    .all(todayJst) as any[];
+
+  for (const w of overdueWaits) {
+    const watcherId = Number(w.watcher_user_id);
+    if (!watcherId || watcherId <= 0) continue;
+
+    const hasAppMembers = w.mode === 'COLLAB' && Number(w.member_count) > 0;
+    const activeTurnId = w.active_turn_user_id ? Number(w.active_turn_user_id) : Number(w.created_by);
+    const isStillWaiting = hasAppMembers
+      ? activeTurnId !== watcherId
+      : w.turn_state === 'THEIR_TURN';
+
+    if (!isStillWaiting) {
+      db.prepare('DELETE FROM journal_turn_waits WHERE id = ?').run(w.id);
+      continue;
+    }
+
+    const dedupKey = `turn-wait:${w.id}:${todayJst}`;
+    if (hasPushLog(dedupKey)) continue;
+
+    const elapsedDays = diffJstDays(String(w.started_at), todayJst);
+    const targetName = String(w.target_name || w.partner_name || '').trim();
+    const targetSuffix = targetName ? ` (${targetName}님 대기)` : '';
+
+    const sent = await sendPushToUsers([watcherId], {
+      title: `📌 ${w.title}`,
+      body: `⏰ 설정한 대기 기간(${w.wait_days}일)이 지났습니다${targetSuffix}. 현재 ${elapsedDays}일 경과 · 확인해 주세요.`,
+      projectId: Number(w.project_id),
+      tag: `mindmap-turn-wait-${w.project_id}-${w.id}`,
+    });
+    if (sent > 0) {
+      recordPushLog(dedupKey, nowJst);
+      db.prepare('UPDATE journal_turn_waits SET notified_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(
+        nowJst,
+        w.id
+      );
+    }
+  }
+}
+
 async function runJournalReminderChecks() {
   const todayJst = getJstDateStr();
   const tomorrowJst = getJstDateStrWithDayOffset(1);
@@ -371,6 +423,10 @@ async function runJournalReminderChecks() {
           }
         }
       }
+    }
+
+    if (nowHHMM >= '07:00' && nowHHMM < '21:00') {
+      await sendTurnWaitOverdueReminders(todayJst, nowJst);
     }
   } catch (err: any) {
     console.warn('Mindmap push reminder check error:', err?.message || err);

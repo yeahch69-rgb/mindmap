@@ -64,6 +64,125 @@ function diffJstDays(fromYmd: string, toYmd: string): number {
   return Math.max(0, Math.floor((toMs - fromMs) / (24 * 60 * 60 * 1000)));
 }
 
+function parseTurnWaitDaysInput(raw: unknown): number | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || raw === '' || Number(raw) === 0) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return Math.min(90, Math.max(1, Math.round(n)));
+}
+
+function formatTurnWaitForViewer(row: any, viewerTurnState: string, todayJst: string) {
+  if (!row || viewerTurnState !== 'THEIR_TURN') return null;
+  const startedAt = String(row.started_at || todayJst).slice(0, 10);
+  const targetDate = String(row.target_date || todayJst).slice(0, 10);
+  const waitDays = Math.max(1, Number(row.wait_days) || 1);
+  const daysElapsed = diffJstDays(startedAt, todayJst);
+  const [ty, tm, td] = targetDate.split('-').map(Number);
+  const [cy, cm, cd] = todayJst.split('-').map(Number);
+  const daysRemaining =
+    ty && tm && td && cy && cm && cd
+      ? Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(cy, cm - 1, cd)) / (24 * 60 * 60 * 1000))
+      : 0;
+  return {
+    wait_days: waitDays,
+    started_at: startedAt,
+    target_date: targetDate,
+    target_name: row.target_name || null,
+    days_elapsed: daysElapsed,
+    days_remaining: daysRemaining,
+    is_overdue: todayJst >= targetDate,
+    notified_at: row.notified_at || null,
+  };
+}
+
+function syncTurnWaitAfterTurnUpdate(params: {
+  projectId: number;
+  actorUserId: number;
+  mode: string;
+  membersCount: number;
+  createdBy: number;
+  nextTurnState: string;
+  activeUserId: number | null;
+  activeTargetName: string | null;
+  waitDaysInput: number | null | undefined;
+}) {
+  const {
+    projectId,
+    actorUserId,
+    mode,
+    membersCount,
+    createdBy,
+    nextTurnState,
+    activeUserId,
+    activeTargetName,
+    waitDaysInput,
+  } = params;
+  if (nextTurnState === 'DONE' || nextTurnState === 'HOLD') {
+    db.prepare('DELETE FROM journal_turn_waits WHERE project_id = ?').run(projectId);
+    return;
+  }
+
+  const hasAppMembers = mode === 'COLLAB' && membersCount > 0;
+  const effectiveActiveId = hasAppMembers ? (activeUserId ? Number(activeUserId) : Number(createdBy)) : null;
+
+  if (hasAppMembers && effectiveActiveId) {
+    db.prepare('DELETE FROM journal_turn_waits WHERE project_id = ? AND watcher_user_id = ?').run(
+      projectId,
+      effectiveActiveId
+    );
+  } else if (!hasAppMembers && nextTurnState !== 'THEIR_TURN') {
+    db.prepare('DELETE FROM journal_turn_waits WHERE project_id = ?').run(projectId);
+    return;
+  }
+
+  const isActorWaiting = hasAppMembers
+    ? effectiveActiveId !== actorUserId
+    : nextTurnState === 'THEIR_TURN';
+
+  if (!isActorWaiting) {
+    db.prepare('DELETE FROM journal_turn_waits WHERE project_id = ? AND watcher_user_id = ?').run(
+      projectId,
+      actorUserId
+    );
+    return;
+  }
+
+  if (waitDaysInput === null) {
+    db.prepare('DELETE FROM journal_turn_waits WHERE project_id = ? AND watcher_user_id = ?').run(
+      projectId,
+      actorUserId
+    );
+    return;
+  }
+
+  if (typeof waitDaysInput === 'number' && waitDaysInput >= 1) {
+    const startedAt = getJstDateStr();
+    const targetDate = getJstDateStrWithDayOffset(waitDaysInput);
+    db.prepare(`
+      INSERT INTO journal_turn_waits (
+        project_id, watcher_user_id, wait_days, started_at, target_date, target_user_id, target_name, notified_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+      ON CONFLICT(project_id, watcher_user_id) DO UPDATE SET
+        wait_days = excluded.wait_days,
+        started_at = excluded.started_at,
+        target_date = excluded.target_date,
+        target_user_id = excluded.target_user_id,
+        target_name = excluded.target_name,
+        notified_at = NULL,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(
+      projectId,
+      actorUserId,
+      waitDaysInput,
+      startedAt,
+      targetDate,
+      effectiveActiveId && effectiveActiveId !== actorUserId ? effectiveActiveId : null,
+      activeTargetName || null
+    );
+  }
+}
+
 function sanitizeColor(raw: unknown): string {
   const str = typeof raw === 'string' ? raw.trim() : '';
   return /^#[0-9a-fA-F]{6}$/.test(str) ? str : '#1B4D3E';
@@ -519,6 +638,19 @@ router.get('/overview', authenticateToken, (req: Request, res: Response) => {
       layoutsByProject.set(Number(row.project_id), formatMindMapLayoutRow(row));
     }
 
+    const waitByProject = new Map<number, any>();
+    const visibleProjectIds = rawProjects.map((p) => Number(p.id)).filter((id) => id > 0);
+    if (visibleProjectIds.length > 0) {
+      const idPlaceholders = visibleProjectIds.map(() => '?').join(',');
+      const myWaitRows = db.prepare(`
+        SELECT * FROM journal_turn_waits
+        WHERE watcher_user_id = ? AND project_id IN (${idPlaceholders})
+      `).all(userId, ...visibleProjectIds) as any[];
+      for (const wr of myWaitRows) {
+        waitByProject.set(Number(wr.project_id), wr);
+      }
+    }
+
     const projects = rawProjects.map((p) => {
       const members = membersByProject.get(Number(p.id)) || [];
       const { turn_state, resolved_partner_name, active_turn_user_name } = resolveViewerTurnPerspective(
@@ -535,6 +667,7 @@ router.get('/overview', authenticateToken, (req: Request, res: Response) => {
       const isOverdueNextAction = Boolean(
         isActive && p.next_action_date && String(p.next_action_date).slice(0, 10) < todayJst
       );
+      const myTurnWait = formatTurnWaitForViewer(waitByProject.get(Number(p.id)), turn_state, todayJst);
 
       return {
         ...p,
@@ -546,6 +679,7 @@ router.get('/overview', authenticateToken, (req: Request, res: Response) => {
         is_overdue_next_action: isOverdueNextAction,
         resolved_partner_name,
         active_turn_user_name,
+        my_turn_wait: myTurnWait,
         members,
         participants: parseParticipants(p.participants_json),
         recent_activity: recentMap.get(p.id) || {},
@@ -651,6 +785,20 @@ router.post('/projects', authenticateToken, (req: Request, res: Response) => {
     });
 
     const newId = createTx();
+    const waitDaysInput = parseTurnWaitDaysInput(req.body?.turn_wait_days);
+    if (finalTurnState === 'THEIR_TURN' && typeof waitDaysInput === 'number') {
+      syncTurnWaitAfterTurnUpdate({
+        projectId: newId,
+        actorUserId: userId,
+        mode: finalMode,
+        membersCount: 0,
+        createdBy: userId,
+        nextTurnState: finalTurnState,
+        activeUserId: null,
+        activeTargetName: finalPartnerName,
+        waitDaysInput,
+      });
+    }
     const created = db.prepare('SELECT * FROM journal_projects WHERE id = ?').get(newId) as any;
     res.status(201).json({
       ...created,
@@ -764,6 +912,12 @@ router.get('/projects/:id', authenticateToken, (req: Request, res: Response) => 
       .prepare('SELECT positions_json, edges_json, parent_overrides_json FROM journal_mindmap_layouts WHERE project_id = ?')
       .get(projectId);
 
+    const todayJst = getJstDateStr();
+    const myWaitRow = db
+      .prepare('SELECT * FROM journal_turn_waits WHERE project_id = ? AND watcher_user_id = ?')
+      .get(projectId, userId);
+    const myTurnWait = formatTurnWaitForViewer(myWaitRow, turn_state, todayJst);
+
     res.json({
       project: {
         ...project,
@@ -771,6 +925,7 @@ router.get('/projects/:id', authenticateToken, (req: Request, res: Response) => 
         is_private: Number(project.is_private),
         resolved_partner_name,
         active_turn_user_name,
+        my_turn_wait: myTurnWait,
         members,
         participants: parseParticipants(project.participants_json),
         mindmap_layout: formatMindMapLayoutRow(layoutRow),
@@ -901,6 +1056,31 @@ router.patch('/projects/:id', authenticateToken, (req: Request, res: Response) =
     );
 
     const updated = db.prepare('SELECT * FROM journal_projects WHERE id = ?').get(projectId) as any;
+
+    let resolvedTargetName: string | null = nextPartnerName || null;
+    if (nextActiveTurnUserId) {
+      const targetUser = members.find((m) => Number(m.user_id) === Number(nextActiveTurnUserId));
+      if (targetUser) {
+        resolvedTargetName = targetUser.name;
+      } else {
+        const uRow = db.prepare('SELECT name FROM users WHERE id = ?').get(nextActiveTurnUserId) as
+          | { name?: string }
+          | undefined;
+        if (uRow?.name) resolvedTargetName = uRow.name;
+      }
+    }
+
+    syncTurnWaitAfterTurnUpdate({
+      projectId,
+      actorUserId: userId,
+      mode: nextMode,
+      membersCount: members.length,
+      createdBy: Number(existing.created_by),
+      nextTurnState,
+      activeUserId: nextActiveTurnUserId,
+      activeTargetName: resolvedTargetName,
+      waitDaysInput: parseTurnWaitDaysInput(body.turn_wait_days),
+    });
 
     if (updated) {
       const actorName = req.user!.name;
@@ -1330,6 +1510,27 @@ router.post('/projects/:id/entries', authenticateToken, (req: Request, res: Resp
     });
 
     const entryId = tx();
+    if (next_turn_state) {
+      const refreshedProj = db.prepare('SELECT * FROM journal_projects WHERE id = ?').get(projectId) as any;
+      if (refreshedProj) {
+        const activeId = refreshedProj.active_turn_user_id ? Number(refreshedProj.active_turn_user_id) : null;
+        const tName =
+          members.find((m) => Number(m.user_id) === activeId)?.name ||
+          refreshedProj.partner_name ||
+          null;
+        syncTurnWaitAfterTurnUpdate({
+          projectId,
+          actorUserId: userId,
+          mode: refreshedProj.mode,
+          membersCount: members.length,
+          createdBy: Number(refreshedProj.created_by),
+          nextTurnState: refreshedProj.turn_state,
+          activeUserId: activeId,
+          activeTargetName: tName,
+          waitDaysInput: parseTurnWaitDaysInput(req.body?.turn_wait_days),
+        });
+      }
+    }
     const created = db.prepare(`
       SELECT e.*, u.name as author_name
       FROM journal_entries e

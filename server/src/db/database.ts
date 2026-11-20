@@ -181,6 +181,23 @@ export function initDatabase() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       resolved_at DATETIME
     );
+
+    CREATE TABLE IF NOT EXISTS journal_turn_waits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id INTEGER NOT NULL REFERENCES journal_projects(id) ON DELETE CASCADE,
+      watcher_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      wait_days INTEGER NOT NULL,
+      started_at TEXT NOT NULL,
+      target_date TEXT NOT NULL,
+      target_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      target_name TEXT,
+      notified_at TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(project_id, watcher_user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_journal_turn_waits_due
+      ON journal_turn_waits(notified_at, target_date);
   `);
 
   const userCols = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
