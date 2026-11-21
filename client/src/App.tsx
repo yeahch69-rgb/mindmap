@@ -187,18 +187,6 @@ const AppShell: React.FC = () => {
               <Bell className="w-4 h-4" />
             </button>
 
-            {user.role === 'ADMIN' && (
-              <button
-                type="button"
-                onClick={() => setIsAdminUsersOpen(true)}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300 text-xs font-bold transition"
-                title={L('관리자 · 전체 회원 계정 목록', '管理者 · 登録アカウント一覧', 'Admin · Registered Users')}
-              >
-                <Shield className="w-3.5 h-3.5 shrink-0" />
-                <span className="hidden sm:inline">{L('회원 관리', '会員管理', 'Admin')}</span>
-              </button>
-            )}
-
             <button
               type="button"
               onClick={() => setIsProfileOpen(true)}

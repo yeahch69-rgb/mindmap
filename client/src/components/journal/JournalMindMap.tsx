@@ -1,22 +1,67 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLanguage } from '../../context/LanguageContext';
 import {
   Archive,
+  Check,
+  CheckCircle2,
+  Copy,
+  CornerDownRight,
+  Download,
+  Edit2,
   ExternalLink,
   GitBranch,
   Link2,
   Lock,
+  MessageSquare,
   Plus,
   RotateCcw,
+  Search,
   Sparkles,
   Trash2,
+  Undo2,
   Unlink,
   Users,
   X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { EntryType, IdeaStatus, JournalEntry, JournalIdea, JournalProject, TurnState } from './types';
+import {
+  EntryType,
+  FreeMapEdge,
+  IdeaStatus,
+  JournalEntry,
+  JournalIdea,
+  JournalProject,
+  MindMapLayoutData,
+  PortSide,
+  TurnState,
+} from './types';
+import {
+  CreateJournalEntryPayload,
+  CreateJournalIdeaPayload,
+  ObstacleBox,
+  PORT_SIDES,
+  ROOT_SUBTOPIC_KEY,
+  WIRE_COLOR_PRESETS,
+  buildDirectionalBezier,
+  buildMindMapMarkdown,
+  buildObstacleAvoidingPath,
+  buildRelatedIdeaWires,
+  chooseSmartLeftRightPorts,
+  cleanTopicMilestoneTitle,
+  computeSubtreeCollapseState,
+  computeTopicAndDialogueDefaultParents,
+  downloadMindMapAsPng,
+  findDuplicateInitialIntentEntryId,
+  getDefaultComposerKindForNode,
+  getPortCoords,
+  getWsFreeMindMapStorageKey,
+  isCurrentFocusIntentEntry,
+  isTopicMilestoneEntry,
+  remapMindMapKey,
+  wouldCycleInParentMap,
+} from './mindmapUtils';
+import { MindMapNodeComposer } from './MindMapNodeComposer';
 
 interface JournalMindMapProps {
   /** Single-project mode when provided; workspace overview mode when null */
@@ -25,27 +70,48 @@ interface JournalMindMapProps {
   ideas?: JournalIdea[];
   /** Workspace overview mode project list */
   allProjects?: JournalProject[];
+  currentUserId?: number;
   /** Select a project inside global Mind Map view */
   onFocusProject?: (projectId: number | null) => void;
   /** Open full project detail view */
   onOpenProjectDetail?: (projectId: number) => void;
-  /** Idea CRUD callbacks (required for interactive editing in single-project mode) */
-  onAddIdea?: (payload: { projectId: number; title: string; note: string | null; parent_idea_id: number | null }) => Promise<void>;
+  /** Persist shared custom_edges + parent_overrides while preserving FreeMindMap positions */
+  onSaveLayout?: (projectId: number, layout: MindMapLayoutData) => Promise<void>;
+  /** Idea & Entry CRUD callbacks (required for interactive editing in single-project mode) */
+  onAddIdea?: (payload: CreateJournalIdeaPayload) => Promise<JournalIdea | null | void>;
+  onAddEntry?: (payload: CreateJournalEntryPayload) => Promise<JournalEntry | null | void>;
+  onEditEntry?: (entry: JournalEntry, updates: { content: string; speaker_name?: string | null }) => Promise<void>;
+  onDeleteEntry?: (entryId: number) => Promise<void>;
+  onPromoteEntryToNextStep?: (entry: JournalEntry) => Promise<void>;
   onToggleRelatedIdea?: (ideaId: number, targetIdeaId: number, projectId: number) => Promise<void>;
   onPromoteIdea?: (idea: JournalIdea) => Promise<void>;
   onUpdateIdeaStatus?: (idea: JournalIdea, status: IdeaStatus) => Promise<void>;
   onDeleteIdea?: (idea: JournalIdea) => Promise<void>;
+  /** Jump to a specific card in Timeline tab */
+  onJumpToTimeline?: (targetKey: string) => void;
+  /** External request to select & center a specific node (e.g. jumped from Timeline) */
+  focusNodeKey?: string | null;
+  onConsumedFocusNode?: () => void;
 }
 
-interface PositionedNode {
+type NodeKind =
+  | 'ROOT'
+  | 'HUB'
+  | 'INTENT_PINNED'
+  | 'ENTRY'
+  | 'IDEA'
+  | 'NEXT_STEP'
+  | 'ADD_HINT'
+  | 'PROJECT_LEAF';
+
+interface TreeNodeDef {
   key: string;
-  x: number;
-  y: number;
   w: number;
   h: number;
-  parentKey?: string;
+  defaultParentKey?: string;
+  homeHubKey?: string;
   edgeColor: string;
-  kind: 'ROOT' | 'HUB' | 'INTENT_LEAF' | 'DIALOGUE_LEAF' | 'IDEA' | 'NEXT_STEP' | 'ADD_HINT' | 'TURN_HUB' | 'PROJECT_LEAF';
+  kind: NodeKind;
   title: string;
   subtitle?: string;
   badge?: string;
@@ -53,7 +119,14 @@ interface PositionedNode {
   bgClass: string;
   borderClass: string;
   idea?: JournalIdea;
+  entry?: JournalEntry;
   projectItem?: JournalProject;
+}
+
+interface PositionedNode extends TreeNodeDef {
+  x: number;
+  y: number;
+  parentKey?: string;
 }
 
 const ZOOM_LEVELS = [0.75, 0.9, 1, 1.15, 1.3];
@@ -63,37 +136,180 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
   entries = [],
   ideas = [],
   allProjects = [],
+  currentUserId = 0,
   onFocusProject,
   onOpenProjectDetail,
+  onSaveLayout,
   onAddIdea,
+  onAddEntry,
+  onEditEntry,
+  onDeleteEntry,
+  onPromoteEntryToNextStep,
   onToggleRelatedIdea,
   onPromoteIdea,
   onUpdateIdeaStatus,
   onDeleteIdea,
+  onJumpToTimeline,
+  focusNodeKey,
+  onConsumedFocusNode,
 }) => {
   const { L } = useLanguage();
+
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
 
   const [zoomIdx, setZoomIdx] = useState(2); // 1.0 default
   const scale = ZOOM_LEVELS[zoomIdx] || 1;
 
-  const [selectedIdeaId, setSelectedIdeaId] = useState<number | null>(null);
-  const [linkingSourceId, setLinkingSourceId] = useState<number | null>(null);
+  const wsStorageKey = getWsFreeMindMapStorageKey(currentUserId);
 
-  // Quick Idea Composer state inside Mind Map
-  const [composerOpen, setComposerOpen] = useState(false);
-  const [composerParentId, setComposerParentId] = useState<number | null>(null);
-  const [composerTitle, setComposerTitle] = useState('');
-  const [composerNote, setComposerNote] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [customEdges, setCustomEdges] = useState<FreeMapEdge[]>([]);
+  const [parentOverrides, setParentOverrides] = useState<Record<string, string>>({});
+  const [undoStack, setUndoStack] = useState<
+    Array<{ customEdges: FreeMapEdge[]; parentOverrides: Record<string, string> }>
+  >([]);
+  const [collapsedKeys, setCollapsedKeys] = useState<Set<string>>(() => new Set());
+  const [searchQuery, setSearchQuery] = useState('');
+  const [nodeKindFilter, setNodeKindFilter] = useState<'ALL' | 'DIALOGUE' | 'IDEA' | 'TOPIC'>('ALL');
+  const [copiedMd, setCopiedMd] = useState(false);
 
-  const selectedIdea = useMemo(
-    () => ideas.find((i) => i.id === selectedIdeaId) || null,
-    [ideas, selectedIdeaId]
-  );
+  const [connectMode, setConnectMode] = useState(false);
+  const [nestMode, setNestMode] = useState(false);
 
-  const linkingSourceIdea = useMemo(
-    () => ideas.find((i) => i.id === linkingSourceId) || null,
-    [ideas, linkingSourceId]
+  const [selectedNodeKey, setSelectedNodeKey] = useState<string | null>(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [highlightedNodeKey, setHighlightedNodeKey] = useState<string | null>(null);
+  const [wireLabelDraft, setWireLabelDraft] = useState('');
+
+  // Inline entry editing in Mind Map inspector bar
+  const [editingEntryInline, setEditingEntryInline] = useState(false);
+  const [entryEditContent, setEntryEditContent] = useState('');
+  const [isSavingEntryEdit, setIsSavingEntryEdit] = useState(false);
+
+  // 2-Click source for Node Nesting & Node Connection
+  const [nestSourceKey, setNestSourceKey] = useState<string | null>(null);
+  const [connectPendingSource, setConnectPendingSource] = useState<{
+    key: string;
+    side?: PortSide;
+  } | null>(null);
+
+  // Drag-and-drop Ghost state for Node Nesting
+  const [draggingNest, setDraggingNest] = useState<{
+    key: string;
+    startClientX: number;
+    startClientY: number;
+    origX: number;
+    origY: number;
+    grabOffsetX: number;
+    grabOffsetY: number;
+    pointerX: number;
+    pointerY: number;
+    moved: boolean;
+  } | null>(null);
+
+  // Drag-or-click Port Wire state for Node Connection
+  const [connectingWire, setConnectingWire] = useState<{
+    fromKey: string;
+    fromSide: PortSide;
+    startClientX: number;
+    startClientY: number;
+    pointerX: number;
+    pointerY: number;
+    moved: boolean;
+  } | null>(null);
+
+  // Quick Unified Node Composer state inside Mind Map
+  const [composerState, setComposerState] = useState<{
+    open: boolean;
+    initialKind: EntryType | 'IDEA';
+    initialCompletedTarget: string;
+    parentNodeKey: string | null;
+    parentNodeTitle: string | null;
+    parentIdeaId: number | null;
+  }>({
+    open: false,
+    initialKind: 'IDEA',
+    initialCompletedTarget: '',
+    parentNodeKey: null,
+    parentNodeTitle: null,
+    parentIdeaId: null,
+  });
+
+  // Hydrate shared custom_edges + parent_overrides from project.mindmap_layout or localStorage
+  const prevProjectIdRef = useRef<number | null>(project?.id ?? null);
+  useEffect(() => {
+    const currPid = project?.id ?? null;
+    if (prevProjectIdRef.current !== currPid) {
+      prevProjectIdRef.current = currPid;
+      setSelectedNodeKey(null);
+      setSelectedEdgeId(null);
+      setCollapsedKeys(new Set());
+      setUndoStack([]);
+      setEditingEntryInline(false);
+      setSearchQuery('');
+      setNodeKindFilter('ALL');
+    }
+    setNestSourceKey(null);
+    setConnectPendingSource(null);
+    setConnectingWire(null);
+    setDraggingNest(null);
+
+    if (project) {
+      setCustomEdges(project.mindmap_layout?.custom_edges || []);
+      setParentOverrides(project.mindmap_layout?.parent_overrides || {});
+    } else {
+      try {
+        const raw = localStorage.getItem(wsStorageKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          setCustomEdges(Array.isArray(parsed?.custom_edges) ? parsed.custom_edges : []);
+          setParentOverrides(
+            parsed?.parent_overrides && typeof parsed.parent_overrides === 'object'
+              ? parsed.parent_overrides
+              : {}
+          );
+          return;
+        }
+      } catch {
+        // ignore invalid storage
+      }
+      setCustomEdges([]);
+      setParentOverrides({});
+    }
+  }, [project?.id, project?.mindmap_layout, wsStorageKey]);
+
+  const persistLayout = useCallback(
+    (nextEdges: FreeMapEdge[], nextParents: Record<string, string>) => {
+      if (project && onSaveLayout) {
+        void onSaveLayout(project.id, {
+          positions: project.mindmap_layout?.positions || {},
+          custom_edges: nextEdges,
+          parent_overrides: nextParents,
+        });
+      } else if (!project) {
+        try {
+          let existingPositions: Record<string, { x: number; y: number }> = {};
+          const raw = localStorage.getItem(wsStorageKey);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed?.positions && typeof parsed.positions === 'object') {
+              existingPositions = parsed.positions;
+            }
+          }
+          localStorage.setItem(
+            wsStorageKey,
+            JSON.stringify({
+              positions: existingPositions,
+              custom_edges: nextEdges,
+              parent_overrides: nextParents,
+            })
+          );
+        } catch {
+          // ignore storage quota errors
+        }
+      }
+    },
+    [project, onSaveLayout, wsStorageKey]
   );
 
   const getTurnMeta = (turn: TurnState) => {
@@ -133,16 +349,145 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
     if (type === 'DIALOGUE_ME') return L('🗣️ 나', '🗣️ 自分', '🗣️ Me');
     if (type === 'DIALOGUE_THEM') return `👤 ${speaker || L('상대방', '相手', 'Partner')}`;
     if (type === 'PROGRESS') return L('✅ 완료', '✅ 完了', '✅ Done');
-    return L('🧭 의도', '🧭 意図', '🧭 Intent');
+    return L('🧭 의도·결정', '🧭 意図・決定', '🧭 Intent');
   };
 
-  // Compute Layout (either Workspace Overview OR Single-Project Tree)
+  const duplicateInitialEntryId = useMemo(
+    () => findDuplicateInitialIntentEntryId(project, entries),
+    [project, entries]
+  );
+
+  // Keys referenced in shared customEdges or parentOverrides (ensure older referenced entries stay visible)
+  const referencedKeys = useMemo(() => {
+    const s = new Set<string>();
+    for (const e of customEdges) {
+      s.add(remapMindMapKey(e.fromKey, duplicateInitialEntryId));
+      s.add(remapMindMapKey(e.toKey, duplicateInitialEntryId));
+    }
+    for (const [k, v] of Object.entries(parentOverrides)) {
+      s.add(remapMindMapKey(k, duplicateInitialEntryId));
+      s.add(remapMindMapKey(v, duplicateInitialEntryId));
+    }
+    return s;
+  }, [customEdges, parentOverrides, duplicateInitialEntryId]);
+
+  // Compute Left-to-Right Hierarchical Layout with universal recursive nesting
   const layout = useMemo(() => {
     const nodes: PositionedNode[] = [];
-    const crossLinks: Array<{ fromKey: string; toKey: string; fromId: number; toId: number }> = [];
     const promotedLinks: Array<{ fromKey: string; toKey: string }> = [];
+    const V_GAP = 26;
+    const CHILD_GAP_X = 68;
 
-    const V_GAP = 16;
+    // Helper: Build tree children map from defs + parentOverrides
+    const resolveHierarchy = (defs: TreeNodeDef[], rootKey: string) => {
+      const defMap = new Map<string, TreeNodeDef>();
+      for (const d of defs) defMap.set(d.key, d);
+
+      const effectiveParentMap = new Map<string, string | undefined>();
+      for (const d of defs) {
+        effectiveParentMap.set(d.key, d.defaultParentKey);
+      }
+      for (const d of defs) {
+        if (d.kind === 'ROOT' || d.kind === 'HUB' || d.kind === 'ADD_HINT') continue;
+        const rawOv = parentOverrides[d.key];
+        if (!rawOv) continue;
+        const ov = remapMindMapKey(rawOv, duplicateInitialEntryId);
+        if (ov === ROOT_SUBTOPIC_KEY) {
+          effectiveParentMap.set(d.key, rootKey);
+          continue;
+        }
+        if (ov === rootKey) {
+          // Detach to node's natural top-level hub
+          effectiveParentMap.set(d.key, d.homeHubKey || d.defaultParentKey);
+          continue;
+        }
+        if (
+          defMap.has(ov) &&
+          ov !== d.key &&
+          !wouldCycleInParentMap(d.key, ov, effectiveParentMap)
+        ) {
+          effectiveParentMap.set(d.key, ov);
+        }
+      }
+
+      const childrenByParent = new Map<string, TreeNodeDef[]>();
+      for (const d of defs) {
+        const pk = effectiveParentMap.get(d.key);
+        if (!pk) continue;
+        const arr = childrenByParent.get(pk) || [];
+        arr.push(d);
+        childrenByParent.set(pk, arr);
+      }
+
+      return { defMap, effectiveParentMap, childrenByParent };
+    };
+
+    const createSubtreePlacer = (
+      childrenByParent: Map<string, TreeNodeDef[]>,
+      effectiveParentMap: Map<string, string | undefined>,
+      onPlacedWidth: (rightEdge: number) => void
+    ) => {
+      const subtreeHCache = new Map<string, number>();
+
+      const calcSubtreeH = (node: TreeNodeDef, visited: Set<string>): number => {
+        if (visited.has(node.key)) return node.h;
+        if (collapsedKeys.has(node.key)) {
+          subtreeHCache.set(node.key, node.h);
+          return node.h;
+        }
+        const nextVisited = new Set(visited);
+        nextVisited.add(node.key);
+
+        const kids = (childrenByParent.get(node.key) || []).filter((k) => !nextVisited.has(k.key));
+        if (kids.length === 0) {
+          subtreeHCache.set(node.key, node.h);
+          return node.h;
+        }
+        let sum = 0;
+        kids.forEach((k, idx) => {
+          sum += calcSubtreeH(k, nextVisited);
+          if (idx < kids.length - 1) sum += V_GAP;
+        });
+        const total = Math.max(node.h, sum);
+        subtreeHCache.set(node.key, total);
+        return total;
+      };
+
+      const placeSubtree = (
+        node: TreeNodeDef,
+        x: number,
+        topY: number,
+        visited: Set<string>
+      ) => {
+        if (visited.has(node.key)) return;
+        const nextVisited = new Set(visited);
+        nextVisited.add(node.key);
+
+        const totalH = subtreeHCache.get(node.key) || node.h;
+        const y = topY + (totalH - node.h) / 2;
+        onPlacedWidth(x + node.w + 80);
+
+        nodes.push({
+          ...node,
+          x,
+          y,
+          parentKey: effectiveParentMap.get(node.key),
+        });
+
+        if (collapsedKeys.has(node.key)) return;
+
+        const kids = (childrenByParent.get(node.key) || []).filter((k) => !nextVisited.has(k.key));
+        let childTop = topY;
+        const nextX = x + node.w + CHILD_GAP_X;
+        for (const k of kids) {
+          const kidH = subtreeHCache.get(k.key) || k.h;
+          placeSubtree(k, nextX, childTop, nextVisited);
+          childTop += kidH + V_GAP;
+        }
+      };
+
+      return { calcSubtreeH, placeSubtree, subtreeHCache };
+    };
 
     // ---------------------------------------------------------
     // MODE A: WORKSPACE OVERVIEW MIND MAP (ALL PROJECTS)
@@ -158,30 +503,53 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
 
       const activeBuckets = turnBuckets.filter((t) => (grouped.get(t)?.length || 0) > 0);
       if (activeBuckets.length === 0) {
-        return { nodes: [], crossLinks: [], promotedLinks: [], width: 700, height: 240 };
+        return {
+          nodes: [],
+          nodeMap: new Map<string, PositionedNode>(),
+          effectiveParentMap: new Map<string, string | undefined>(),
+          descendantCountMap: new Map<string, number>(),
+          promotedLinks,
+          leafAddButtons: [] as Array<{
+            key: string;
+            parentNode: PositionedNode;
+            isRootSubtopicTrigger?: boolean;
+            portX: number;
+            portY: number;
+            x: number;
+            y: number;
+            size: number;
+          }>,
+          width: 700,
+          height: 240,
+        };
       }
 
       const LEAF_H = 66;
       const HUB_H = 48;
-      let cursorY = 28;
-      const hubPositions: Array<{ turn: TurnState; y: number; h: number; items: JournalProject[] }> = [];
+      const defs: TreeNodeDef[] = [];
 
       for (const t of activeBuckets) {
-        const items = grouped.get(t) || [];
-        const branchHeight = Math.max(HUB_H, items.length * LEAF_H + Math.max(0, items.length - 1) * V_GAP);
-        const hubY = cursorY + (branchHeight - HUB_H) / 2;
-        hubPositions.push({ turn: t, y: hubY, h: branchHeight, items });
-
-        let leafCursorY = cursorY;
         const meta = getTurnMeta(t);
+        const items = grouped.get(t) || [];
+        defs.push({
+          key: `hub-${t}`,
+          w: 180,
+          h: HUB_H,
+          defaultParentKey: 'ws-root',
+          edgeColor: meta.color,
+          kind: 'HUB',
+          title: `${meta.label} (${items.length})`,
+          accentColor: meta.color,
+          bgClass: meta.bg,
+          borderClass: meta.border,
+        });
         for (const p of items) {
-          nodes.push({
+          defs.push({
             key: `proj-${p.id}`,
-            x: 530,
-            y: leafCursorY,
             w: 270,
             h: LEAF_H,
-            parentKey: `hub-${t}`,
+            defaultParentKey: `hub-${t}`,
+            homeHubKey: `hub-${t}`,
             edgeColor: meta.color,
             kind: 'PROJECT_LEAF',
             title: p.title,
@@ -194,22 +562,46 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
             borderClass: p.is_stale ? 'border-rose-300' : 'border-ivory-300',
             projectItem: p,
           });
-          leafCursorY += LEAF_H + V_GAP;
+        }
+      }
+
+      const { effectiveParentMap, childrenByParent } = resolveHierarchy(defs, 'ws-root');
+      let maxCanvasX = 860;
+      const { calcSubtreeH, placeSubtree, subtreeHCache } = createSubtreePlacer(
+        childrenByParent,
+        effectiveParentMap,
+        (right) => {
+          maxCanvasX = Math.max(maxCanvasX, right);
+        }
+      );
+
+      let cursorY = 28;
+      const hubPositions: Array<{ y: number }> = [];
+
+      for (const t of activeBuckets) {
+        const hubDef = defs.find((d) => d.key === `hub-${t}`)!;
+        const directKids = childrenByParent.get(hubDef.key) || [];
+        let branchSum = 0;
+        directKids.forEach((kid, idx) => {
+          branchSum += calcSubtreeH(kid, new Set());
+          if (idx < directKids.length - 1) branchSum += V_GAP;
+        });
+        const branchHeight = Math.max(HUB_H, branchSum);
+        const hubY = cursorY + (branchHeight - HUB_H) / 2;
+        hubPositions.push({ y: hubY });
+
+        let leafCursorY = cursorY;
+        for (const kid of directKids) {
+          const kidH = subtreeHCache.get(kid.key) || kid.h;
+          placeSubtree(kid, 530, leafCursorY, new Set());
+          leafCursorY += kidH + V_GAP;
         }
 
         nodes.push({
-          key: `hub-${t}`,
+          ...hubDef,
           x: 280,
           y: hubY,
-          w: 180,
-          h: HUB_H,
           parentKey: 'ws-root',
-          edgeColor: meta.color,
-          kind: 'TURN_HUB',
-          title: `${meta.label} (${items.length})`,
-          accentColor: meta.color,
-          bgClass: meta.bg,
-          borderClass: meta.border,
         });
 
         cursorY += branchHeight + 28;
@@ -236,114 +628,281 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
         borderClass: 'border-forest-900',
       });
 
-      return { nodes, crossLinks, promotedLinks, width: 860, height: totalH };
+      const nodeMap = new Map<string, PositionedNode>();
+      for (const n of nodes) nodeMap.set(n.key, n);
+
+      const wsCollapse = computeSubtreeCollapseState(
+        defs.map((d) => d.key),
+        effectiveParentMap,
+        collapsedKeys
+      );
+
+      return {
+        nodes,
+        nodeMap,
+        effectiveParentMap,
+        descendantCountMap: wsCollapse.descendantCountMap,
+        promotedLinks,
+        leafAddButtons: [] as Array<{
+          key: string;
+          parentNode: PositionedNode;
+          isRootSubtopicTrigger?: boolean;
+          portX: number;
+          portY: number;
+          x: number;
+          y: number;
+          size: number;
+        }>,
+        width: maxCanvasX,
+        height: totalH,
+      };
     }
 
     // ---------------------------------------------------------
-    // MODE B: SINGLE-PROJECT RECURSIVE TREE MIND MAP
+    // MODE B: SINGLE-PROJECT UNIVERSAL RECURSIVE TREE MIND MAP
     // ---------------------------------------------------------
     const turnMeta = getTurnMeta(project.turn_state);
+    const HUB_X = 295;
+    const HUB_W = 180;
+    const HUB_H = 44;
+    const LEAF_X = 540;
+    const LEAF_W = 230;
+    const LEAF_H = 60;
+    const IDEA_W = 225;
+    const IDEA_H = 66;
+    const NEXT_H = 62;
+    const SECTION_GAP = 34;
 
-    // Prepare children of the 4 main branches:
-    // 1. INTENT branch
-    const intentEntries = entries.filter((e) => e.entry_type === 'INTENT').slice(-4);
-    const intentLeaves: Array<{ title: string; subtitle?: string; badge?: string }> = [];
-    if (project.intent_summary) {
-      intentLeaves.push({
-        title: L('최초 의도 (Pinned)', '当初の目的 (Pinned)', 'Pinned Intent'),
-        subtitle: project.intent_summary,
+    const defs: TreeNodeDef[] = [];
+
+    // 4 Hubs
+    defs.push({
+      key: 'hub-intent',
+      w: HUB_W,
+      h: HUB_H,
+      defaultParentKey: 'proj-root',
+      edgeColor: '#D97706',
+      kind: 'HUB',
+      title: L('🧭 의도 · 결정 맥락', '🧭 意図・決定文脈', '🧭 Intent & Decisions'),
+      accentColor: '#D97706',
+      bgClass: 'bg-amber-50',
+      borderClass: 'border-amber-300',
+    });
+
+    defs.push({
+      key: 'hub-dialogue',
+      w: HUB_W,
+      h: HUB_H,
+      defaultParentKey: 'proj-root',
+      edgeColor: '#0284C7',
+      kind: 'HUB',
+      title: L(`💬 대화 · 진행 (${entries.length})`, `💬 対話・進捗 (${entries.length})`, `💬 Dialogue (${entries.length})`),
+      accentColor: '#0284C7',
+      bgClass: 'bg-sky-50',
+      borderClass: 'border-sky-300',
+    });
+
+    defs.push({
+      key: 'hub-ideas',
+      w: HUB_W,
+      h: HUB_H,
+      defaultParentKey: 'proj-root',
+      edgeColor: '#B45309',
+      kind: 'HUB',
+      title: L(`💡 아이디어 가지 (${ideas.length})`, `💡 アイデア分岐 (${ideas.length})`, `💡 Idea Tree (${ideas.length})`),
+      accentColor: '#B45309',
+      bgClass: 'bg-amber-50',
+      borderClass: 'border-amber-400',
+    });
+
+    defs.push({
+      key: 'hub-next',
+      w: HUB_W,
+      h: HUB_H,
+      defaultParentKey: 'proj-root',
+      edgeColor: project.next_action ? '#059669' : '#E11D48',
+      kind: 'HUB',
+      title: L('🎯 다음 할 일 (Next)', '🎯 次の行動 (Next)', '🎯 Next Step'),
+      accentColor: project.next_action ? '#059669' : '#E11D48',
+      bgClass: project.next_action ? 'bg-emerald-50' : 'bg-rose-50',
+      borderClass: project.next_action ? 'border-emerald-300' : 'border-rose-300',
+    });
+
+    // 1. Pinned Initial Intent + Current Focus Revisions + Pure INTENT Entries
+    const initialIntentText = (project.initial_intent_summary || project.intent_summary || '').trim();
+    if (initialIntentText) {
+      defs.push({
+        key: 'intent-pinned',
+        w: LEAF_W,
+        h: LEAF_H,
+        defaultParentKey: 'hub-intent',
+        homeHubKey: 'hub-intent',
+        edgeColor: '#D97706',
+        kind: 'INTENT_PINNED',
+        title: L('🧭 최초 의도 (Pinned)', '🧭 当初の目的 (Pinned)', '🧭 Pinned Intent'),
+        subtitle: initialIntentText,
+        accentColor: '#D97706',
+        bgClass: 'bg-white',
+        borderClass: 'border-amber-200',
       });
     }
+
+    // Current Focus ('현재 방향 · 핵심 메모') revisions nested sequentially under 'intent-pinned'
+    const focusIntentEntries = [...entries]
+      .filter(isCurrentFocusIntentEntry)
+      .sort((a, b) => a.id - b.id);
+    focusIntentEntries.forEach((fEn, fIdx) => {
+      const isLatestFocus = fIdx === focusIntentEntries.length - 1;
+      const fKey = `entry-${fEn.id}`;
+      const defaultParent =
+        fIdx === 0
+          ? initialIntentText
+            ? 'intent-pinned'
+            : 'hub-intent'
+          : `entry-${focusIntentEntries[fIdx - 1].id}`;
+      defs.push({
+        key: fKey,
+        w: LEAF_W,
+        h: LEAF_H,
+        defaultParentKey: defaultParent,
+        homeHubKey: 'hub-intent',
+        edgeColor: '#B45309',
+        kind: 'ENTRY',
+        title: isLatestFocus
+          ? L('🧭 현재 방향 · 핵심 메모', '🧭 現在の方針・メモ', '🧭 Current Focus')
+          : `${fEn.entry_date ? `${fEn.entry_date.slice(5)} · ` : ''}${L('🧭 이전 방향 · 메모', '🧭 以前の方針', '🧭 Previous Focus')}`,
+        subtitle: fEn.content,
+        badge: isLatestFocus
+          ? L('현재 방향', '現在方針', 'Current')
+          : L(`방향 ${fIdx + 1}`, `方針${fIdx + 1}`, `Focus ${fIdx + 1}`),
+        accentColor: '#B45309',
+        bgClass: isLatestFocus ? 'bg-amber-100/80' : 'bg-amber-50/75',
+        borderClass: isLatestFocus ? 'border-amber-400' : 'border-amber-300',
+        entry: fEn,
+      });
+    });
+
+    const intentEntries = entries.filter(
+      (e) =>
+        e.entry_type === 'INTENT' &&
+        !isTopicMilestoneEntry(e) &&
+        !isCurrentFocusIntentEntry(e) &&
+        e.id !== duplicateInitialEntryId
+    );
     for (const en of intentEntries) {
-      intentLeaves.push({
-        title: `${en.entry_date ? `${en.entry_date.slice(5)} ` : ''}${L('의도·결정', '意図・決定', 'Intent')}`,
+      defs.push({
+        key: `entry-${en.id}`,
+        w: LEAF_W,
+        h: LEAF_H,
+        defaultParentKey: 'hub-intent',
+        homeHubKey: 'hub-intent',
+        edgeColor: '#D97706',
+        kind: 'ENTRY',
+        title: `${en.entry_date ? `${en.entry_date.slice(5)} · ` : ''}${getEntryLabel(en.entry_type, en.speaker_name)}`,
         subtitle: en.content,
-      });
-    }
-    if (intentLeaves.length === 0) {
-      intentLeaves.push({
-        title: L('기록된 의도 없음', '意図の記録なし', 'No intent logs yet'),
+        accentColor: '#D97706',
+        bgClass: 'bg-amber-50/60',
+        borderClass: 'border-amber-200',
+        entry: en,
       });
     }
 
-    // 2. DIALOGUE / PROGRESS branch
-    const dialogueEntries = entries.filter((e) => e.entry_type !== 'INTENT').slice(-5);
-    const dialogueLeaves: Array<{ title: string; subtitle?: string; edgeColor: string }> = dialogueEntries.map((en) => ({
-      title: `${en.entry_date ? `${en.entry_date.slice(5)} · ` : ''}${getEntryLabel(en.entry_type, en.speaker_name)}`,
-      subtitle: en.content,
-      edgeColor:
-        en.entry_type === 'DIALOGUE_ME'
+    // 2. TOPIC MILESTONES & DIALOGUE / PROGRESS CHAIN (Full unbroken chain; users fold past branches via [-]/[+N])
+    const allTopicEntries = entries.filter(isTopicMilestoneEntry);
+    const dialogueEntries = entries.filter((e) => e.entry_type !== 'INTENT');
+
+    const { topicEntries, defaultParents: topicDialogueParents } =
+      computeTopicAndDialogueDefaultParents(
+        [...allTopicEntries, ...dialogueEntries],
+        parentOverrides,
+        'hub-dialogue'
+      );
+
+    topicEntries.forEach((tEn, tIdx) => {
+      const isCurrentTopic = tIdx === topicEntries.length - 1;
+      const cleanTitle = cleanTopicMilestoneTitle(tEn.content);
+      const tKey = `entry-${tEn.id}`;
+      const isRootSub = parentOverrides[tKey] === ROOT_SUBTOPIC_KEY;
+      defs.push({
+        key: tKey,
+        w: LEAF_W,
+        h: LEAF_H,
+        defaultParentKey: topicDialogueParents.get(tKey) || 'hub-dialogue',
+        homeHubKey: 'hub-dialogue',
+        edgeColor: isCurrentTopic ? '#059669' : '#D97706',
+        kind: 'ENTRY',
+        title: `🎯 ${cleanTitle}`,
+        subtitle: tEn.due_date
+          ? `📅 ${tEn.due_date}`
+          : isCurrentTopic
+          ? L('현재 진행 토픽 (다음 할 일)', '現在の進行トピック', 'Active Topic (Next Step)')
+          : L(`토픽 ${tIdx + 1} (이전 할 일)`, `トピック ${tIdx + 1} (前の行動)`, `Topic ${tIdx + 1} (Previous)`),
+        badge: isRootSub
+          ? L('🌿 서브토픽', '🌿 サブ', '🌿 Subtopic')
+          : isCurrentTopic
+          ? L('현재 토픽', '現在', 'Current')
+          : L(`토픽 ${tIdx + 1}`, `T${tIdx + 1}`, `T${tIdx + 1}`),
+        accentColor: isCurrentTopic ? '#059669' : '#D97706',
+        bgClass: isCurrentTopic ? 'bg-emerald-50/90' : 'bg-amber-50/90',
+        borderClass: isCurrentTopic ? 'border-emerald-400' : 'border-amber-300',
+        entry: tEn,
+      });
+    });
+
+    for (const en of dialogueEntries) {
+      const eKey = `entry-${en.id}`;
+      const isRootSub = parentOverrides[eKey] === ROOT_SUBTOPIC_KEY;
+      const edgeColor =
+        isRootSub
+          ? '#7C3AED'
+          : en.entry_type === 'DIALOGUE_ME'
           ? '#1B4D3E'
           : en.entry_type === 'DIALOGUE_THEM'
           ? '#0284C7'
-          : '#059669',
-    }));
-    if (dialogueLeaves.length === 0) {
-      dialogueLeaves.push({
-        title: L('대화·진행 기록 없음', '対話・進捗記録なし', 'No dialogue logs yet'),
-        edgeColor: '#0284C7',
+          : '#059669';
+      const bgClass =
+        isRootSub
+          ? 'bg-purple-50/75'
+          : en.entry_type === 'DIALOGUE_ME'
+          ? 'bg-emerald-50/50'
+          : en.entry_type === 'DIALOGUE_THEM'
+          ? 'bg-sky-50/70'
+          : 'bg-emerald-50/80';
+      const borderClass =
+        isRootSub
+          ? 'border-purple-300'
+          : en.entry_type === 'DIALOGUE_ME'
+          ? 'border-forest-300'
+          : en.entry_type === 'DIALOGUE_THEM'
+          ? 'border-sky-300'
+          : 'border-emerald-300';
+      defs.push({
+        key: eKey,
+        w: LEAF_W,
+        h: LEAF_H,
+        defaultParentKey: topicDialogueParents.get(eKey) || 'hub-dialogue',
+        homeHubKey: 'hub-dialogue',
+        edgeColor,
+        kind: 'ENTRY',
+        title: `${en.entry_date ? `${en.entry_date.slice(5)} · ` : ''}${getEntryLabel(en.entry_type, en.speaker_name)}`,
+        subtitle: en.content,
+        badge: isRootSub ? L('🌿 서브토픽', '🌿 サブ', '🌿 Subtopic') : undefined,
+        accentColor: edgeColor,
+        bgClass,
+        borderClass,
+        entry: en,
       });
     }
 
-    // 3. RECURSIVE IDEA TREE
+    // 3. IDEAS (use unified key: 'idea-${idea.id}')
     const ideaMap = new Map<number, JournalIdea>();
-    const childrenMap = new Map<number, JournalIdea[]>();
-    const rootIdeas: JournalIdea[] = [];
+    ideas.forEach((i) => ideaMap.set(i.id, i));
+
     for (const idea of ideas) {
-      ideaMap.set(idea.id, idea);
-    }
-    for (const idea of ideas) {
-      if (idea.parent_idea_id && ideaMap.has(idea.parent_idea_id) && idea.parent_idea_id !== idea.id) {
-        const arr = childrenMap.get(idea.parent_idea_id) || [];
-        arr.push(idea);
-        childrenMap.set(idea.parent_idea_id, arr);
-      } else {
-        rootIdeas.push(idea);
-      }
-    }
-
-    const IDEA_W = 225;
-    const IDEA_H = 66;
-    const IDEA_X0 = 540;
-    const IDEA_DX = 260;
-    let maxCanvasX = 820;
-
-    // Recursive subtree height calculator (guard against cycles via visited set)
-    const subtreeHCache = new Map<number, number>();
-    const calcIdeaSubtreeHeight = (ideaId: number, visited: Set<number>): number => {
-      if (visited.has(ideaId)) return IDEA_H;
-      visited.add(ideaId);
-      const kids = (childrenMap.get(ideaId) || []).filter((k) => !visited.has(k.id));
-      if (kids.length === 0) {
-        subtreeHCache.set(ideaId, IDEA_H);
-        return IDEA_H;
-      }
-      let sum = 0;
-      kids.forEach((k, idx) => {
-        sum += calcIdeaSubtreeHeight(k.id, new Set(visited));
-        if (idx < kids.length - 1) sum += V_GAP;
-      });
-      const total = Math.max(IDEA_H, sum);
-      subtreeHCache.set(ideaId, total);
-      return total;
-    };
-
-    for (const r of rootIdeas) {
-      calcIdeaSubtreeHeight(r.id, new Set());
-    }
-
-    const ideaNodePosMap = new Map<number, { x: number; y: number; w: number; h: number }>();
-
-    const placeIdeaSubtree = (idea: JournalIdea, depth: number, topY: number, parentNodeKey: string, visited: Set<number>) => {
-      if (visited.has(idea.id)) return;
-      visited.add(idea.id);
-
-      const x = IDEA_X0 + depth * IDEA_DX;
-      maxCanvasX = Math.max(maxCanvasX, x + IDEA_W + 80);
-
-      const totalH = subtreeHCache.get(idea.id) || IDEA_H;
-      const y = topY + (totalH - IDEA_H) / 2;
-      const nodeKey = `idea-${idea.id}`;
+      const hasValidDbParent =
+        Boolean(idea.parent_idea_id) &&
+        idea.parent_idea_id !== idea.id &&
+        ideaMap.has(idea.parent_idea_id!);
 
       const linkedCount = (idea.related_idea_ids || []).filter((id) => ideaMap.has(id)).length;
       const statusBadge =
@@ -366,13 +925,12 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
           ? 'border-stone-300'
           : 'border-amber-300';
 
-      nodes.push({
-        key: nodeKey,
-        x,
-        y,
+      defs.push({
+        key: `idea-${idea.id}`,
         w: IDEA_W,
         h: IDEA_H,
-        parentKey: parentNodeKey,
+        defaultParentKey: hasValidDbParent ? `idea-${idea.parent_idea_id}` : 'hub-ideas',
+        homeHubKey: 'hub-ideas',
         edgeColor: idea.status === 'PROMOTED' ? '#059669' : '#D97706',
         kind: 'IDEA',
         title: idea.title,
@@ -383,173 +941,15 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
         borderClass,
         idea,
       });
-
-      ideaNodePosMap.set(idea.id, { x, y, w: IDEA_W, h: IDEA_H });
-
-      const kids = (childrenMap.get(idea.id) || []).filter((k) => !visited.has(k.id));
-      let childTop = topY;
-      for (const k of kids) {
-        const kidH = subtreeHCache.get(k.id) || IDEA_H;
-        placeIdeaSubtree(k, depth + 1, childTop, nodeKey, new Set(visited));
-        childTop += kidH + V_GAP;
-      }
-    };
-
-    // Place the 4 vertical sections cleanly
-    const HUB_X = 295;
-    const HUB_W = 180;
-    const HUB_H = 44;
-    const LEAF_X = 540;
-    const LEAF_W = 230;
-    const LEAF_H = 56;
-    const SECTION_GAP = 26;
-
-    let cursorY = 24;
-
-    // Section 1: INTENT
-    const intentSpanH = Math.max(HUB_H, intentLeaves.length * LEAF_H + (intentLeaves.length - 1) * V_GAP);
-    const intentHubY = cursorY + (intentSpanH - HUB_H) / 2;
-    nodes.push({
-      key: 'hub-intent',
-      x: HUB_X,
-      y: intentHubY,
-      w: HUB_W,
-      h: HUB_H,
-      parentKey: 'proj-root',
-      edgeColor: '#D97706',
-      kind: 'HUB',
-      title: L('🧭 의도 · 결정 맥락', '🧭 意図・決定文脈', '🧭 Intent & Decisions'),
-      accentColor: '#D97706',
-      bgClass: 'bg-amber-50',
-      borderClass: 'border-amber-300',
-    });
-    intentLeaves.forEach((leaf, idx) => {
-      nodes.push({
-        key: `intent-leaf-${idx}`,
-        x: LEAF_X,
-        y: cursorY + idx * (LEAF_H + V_GAP),
-        w: LEAF_W,
-        h: LEAF_H,
-        parentKey: 'hub-intent',
-        edgeColor: '#D97706',
-        kind: 'INTENT_LEAF',
-        title: leaf.title,
-        subtitle: leaf.subtitle,
-        accentColor: '#D97706',
-        bgClass: 'bg-white',
-        borderClass: 'border-amber-200',
-      });
-    });
-    cursorY += intentSpanH + SECTION_GAP;
-
-    // Section 2: DIALOGUE & PROGRESS
-    const dialSpanH = Math.max(HUB_H, dialogueLeaves.length * LEAF_H + (dialogueLeaves.length - 1) * V_GAP);
-    const dialHubY = cursorY + (dialSpanH - HUB_H) / 2;
-    nodes.push({
-      key: 'hub-dialogue',
-      x: HUB_X,
-      y: dialHubY,
-      w: HUB_W,
-      h: HUB_H,
-      parentKey: 'proj-root',
-      edgeColor: '#0284C7',
-      kind: 'HUB',
-      title: L(`💬 대화 · 진행 (${entries.length})`, `💬 対話・進捗 (${entries.length})`, `💬 Dialogue (${entries.length})`),
-      accentColor: '#0284C7',
-      bgClass: 'bg-sky-50',
-      borderClass: 'border-sky-300',
-    });
-    dialogueLeaves.forEach((leaf, idx) => {
-      nodes.push({
-        key: `dial-leaf-${idx}`,
-        x: LEAF_X,
-        y: cursorY + idx * (LEAF_H + V_GAP),
-        w: LEAF_W,
-        h: LEAF_H,
-        parentKey: 'hub-dialogue',
-        edgeColor: leaf.edgeColor,
-        kind: 'DIALOGUE_LEAF',
-        title: leaf.title,
-        subtitle: leaf.subtitle,
-        accentColor: leaf.edgeColor,
-        bgClass: 'bg-white',
-        borderClass: 'border-sky-200',
-      });
-    });
-    cursorY += dialSpanH + SECTION_GAP;
-
-    // Section 3: IDEA TREE
-    const ideasTotalH =
-      rootIdeas.length > 0
-        ? rootIdeas.reduce((acc, r, i) => acc + (subtreeHCache.get(r.id) || IDEA_H) + (i > 0 ? V_GAP : 0), 0)
-        : 58;
-    const ideasSpanH = Math.max(HUB_H, ideasTotalH);
-    const ideasHubY = cursorY + (ideasSpanH - HUB_H) / 2;
-    nodes.push({
-      key: 'hub-ideas',
-      x: HUB_X,
-      y: ideasHubY,
-      w: HUB_W,
-      h: HUB_H,
-      parentKey: 'proj-root',
-      edgeColor: '#B45309',
-      kind: 'HUB',
-      title: L(`💡 아이디어 가지 (${ideas.length})`, `💡 アイデア分岐 (${ideas.length})`, `💡 Idea Tree (${ideas.length})`),
-      accentColor: '#B45309',
-      bgClass: 'bg-amber-50',
-      borderClass: 'border-amber-400',
-    });
-
-    if (rootIdeas.length === 0) {
-      nodes.push({
-        key: 'idea-add-hint',
-        x: LEAF_X,
-        y: cursorY,
-        w: LEAF_W,
-        h: 56,
-        parentKey: 'hub-ideas',
-        edgeColor: '#D97706',
-        kind: 'ADD_HINT',
-        title: L('+ 첫 아이디어 가지 추가', '+ 最初のアイデアを追加', '+ Add first idea branch'),
-        subtitle: L('클릭해서 가지를 뻗어보세요', 'クリックして分岐を追加', 'Click to start branching'),
-        accentColor: '#D97706',
-        bgClass: 'bg-amber-50/50 border-dashed',
-        borderClass: 'border-amber-400',
-      });
-    } else {
-      let ideaTop = cursorY;
-      for (const r of rootIdeas) {
-        const subH = subtreeHCache.get(r.id) || IDEA_H;
-        placeIdeaSubtree(r, 0, ideaTop, 'hub-ideas', new Set());
-        ideaTop += subH + V_GAP;
-      }
     }
-    cursorY += ideasSpanH + SECTION_GAP;
 
-    // Section 4: NEXT STEP TARGET
-    const NEXT_H = 62;
-    const nextHubY = cursorY + (NEXT_H - HUB_H) / 2;
-    nodes.push({
-      key: 'hub-next',
-      x: HUB_X,
-      y: nextHubY,
-      w: HUB_W,
-      h: HUB_H,
-      parentKey: 'proj-root',
-      edgeColor: project.next_action ? '#059669' : '#E11D48',
-      kind: 'HUB',
-      title: L('🎯 다음 할 일 (Next)', '🎯 次の行動 (Next)', '🎯 Next Step'),
-      accentColor: project.next_action ? '#059669' : '#E11D48',
-      bgClass: project.next_action ? 'bg-emerald-50' : 'bg-rose-50',
-      borderClass: project.next_action ? 'border-emerald-300' : 'border-rose-300',
-    });
-    nodes.push({
-      key: 'next-step-target',
-      x: LEAF_X,
-      y: cursorY,
+    // 4. NEXT STEP TARGET (unified key: 'next-step')
+    defs.push({
+      key: 'next-step',
       w: 245,
       h: NEXT_H,
-      parentKey: 'hub-next',
+      defaultParentKey: 'hub-next',
+      homeHubKey: 'hub-next',
       edgeColor: project.next_action ? '#059669' : '#E11D48',
       kind: 'NEXT_STEP',
       title: project.next_action || L('Next Step 미지정 (방치 위험)', 'Next Step未定 (放置リスク)', 'No Next Step set'),
@@ -558,12 +958,124 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
       bgClass: project.next_action ? 'bg-emerald-50/90' : 'bg-rose-50/90',
       borderClass: project.next_action ? 'border-emerald-400' : 'border-rose-300',
     });
-    cursorY += NEXT_H + 30;
 
-    // Root Project Node centered across hubs
+    const { defMap, effectiveParentMap, childrenByParent } = resolveHierarchy(defs, 'proj-root');
+
+    // Placeholder hints if a section hub currently has zero direct children
+    const ensureHintIfEmpty = (hubKey: string, hintDef: TreeNodeDef) => {
+      const kids = childrenByParent.get(hubKey) || [];
+      if (kids.length === 0) {
+        childrenByParent.set(hubKey, [hintDef]);
+        effectiveParentMap.set(hintDef.key, hubKey);
+      }
+    };
+
+    ensureHintIfEmpty('hub-intent', {
+      key: 'intent-empty-hint',
+      w: LEAF_W,
+      h: 56,
+      defaultParentKey: 'hub-intent',
+      edgeColor: '#D97706',
+      kind: 'ADD_HINT',
+      title: L('+ 의도·결정 추가', '+ 意図・決定を追加', '+ Add intent log'),
+      subtitle: L('클릭해서 의도를 기록하세요', 'クリックして意図を追加', 'Click to log intent'),
+      accentColor: '#D97706',
+      bgClass: 'bg-amber-50/40 border-dashed',
+      borderClass: 'border-amber-300',
+    });
+
+    ensureHintIfEmpty('hub-dialogue', {
+      key: 'dial-empty-hint',
+      w: LEAF_W,
+      h: 56,
+      defaultParentKey: 'hub-dialogue',
+      edgeColor: '#0284C7',
+      kind: 'ADD_HINT',
+      title: L('+ 대화·진행 추가', '+ 対話・進捗を追加', '+ Add dialogue log'),
+      subtitle: L('클릭해서 대화/완료를 기록하세요', 'クリックして対話を追加', 'Click to log dialogue'),
+      accentColor: '#0284C7',
+      bgClass: 'bg-sky-50/40 border-dashed',
+      borderClass: 'border-sky-300',
+    });
+
+    ensureHintIfEmpty('hub-ideas', {
+      key: 'idea-add-hint',
+      w: LEAF_W,
+      h: 56,
+      defaultParentKey: 'hub-ideas',
+      edgeColor: '#D97706',
+      kind: 'ADD_HINT',
+      title: L('+ 첫 아이디어 가지 추가', '+ 最初のアイデアを追加', '+ Add first idea branch'),
+      subtitle: L('클릭해서 가지를 뻗어보세요', 'クリックして分岐を追加', 'Click to start branching'),
+      accentColor: '#D97706',
+      bgClass: 'bg-amber-50/50 border-dashed',
+      borderClass: 'border-amber-400',
+    });
+
+    let maxCanvasX = 850;
+    const { calcSubtreeH, placeSubtree, subtreeHCache } = createSubtreePlacer(
+      childrenByParent,
+      effectiveParentMap,
+      (right) => {
+        maxCanvasX = Math.max(maxCanvasX, right);
+      }
+    );
+
+    const hubOrder = ['hub-intent', 'hub-dialogue', 'hub-ideas', 'hub-next'];
+    let cursorY = 24;
+    let firstHubY = cursorY;
+    let lastHubBottomY = cursorY + HUB_H;
+
+    const { descendantCountMap } = computeSubtreeCollapseState(
+      defs.map((d) => d.key),
+      effectiveParentMap,
+      collapsedKeys
+    );
+
+    hubOrder.forEach((hubKey, idx) => {
+      const hubDef = defMap.get(hubKey)!;
+      const directKids = collapsedKeys.has(hubKey) ? [] : childrenByParent.get(hubKey) || [];
+
+      let sumH = 0;
+      directKids.forEach((kid, kIdx) => {
+        sumH += calcSubtreeH(kid, new Set());
+        if (kIdx < directKids.length - 1) sumH += V_GAP;
+      });
+
+      const spanH = Math.max(HUB_H, sumH);
+      const hubY = cursorY + (spanH - HUB_H) / 2;
+      if (idx === 0) firstHubY = hubY;
+      if (idx === hubOrder.length - 1) lastHubBottomY = hubY + HUB_H;
+
+      nodes.push({
+        ...hubDef,
+        x: HUB_X,
+        y: hubY,
+        parentKey: 'proj-root',
+      });
+
+      let kidTop = cursorY;
+      for (const kid of directKids) {
+        const kidH = subtreeHCache.get(kid.key) || kid.h;
+        placeSubtree(kid, LEAF_X, kidTop, new Set());
+        kidTop += kidH + V_GAP;
+      }
+
+      cursorY += spanH + SECTION_GAP;
+    });
+
+    // Place any Root-Level Independent Subtopics (nodes with parentOverrides[key] === 'root-subtopic')
+    const rootSubtopics = (childrenByParent.get('proj-root') || []).filter((k) => k.kind !== 'HUB');
+    for (const sub of rootSubtopics) {
+      const subSpanH = calcSubtreeH(sub, new Set());
+      placeSubtree(sub, HUB_X, cursorY, new Set());
+      lastHubBottomY = cursorY + subSpanH;
+      cursorY += subSpanH + SECTION_GAP;
+    }
+
     const rootH = 74;
-    const rootY = (intentHubY + nextHubY + HUB_H) / 2 - rootH / 2;
-    nodes.push({
+    const rootY = (firstHubY + lastHubBottomY) / 2 - rootH / 2;
+    const rootNode: PositionedNode = {
       key: 'proj-root',
       x: 24,
       y: rootY,
@@ -576,86 +1088,844 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
       accentColor: project.color || '#1B4D3E',
       bgClass: 'bg-forest-800 text-white',
       borderClass: 'border-forest-900',
-    });
+    };
+    nodes.push(rootNode);
 
-    // Cross-branch Idea <-> Idea links (deduplicated idA < idB)
-    const seenPairs = new Set<string>();
+    const nodeMap = new Map<string, PositionedNode>();
+    for (const n of nodes) nodeMap.set(n.key, n);
+
     for (const idea of ideas) {
-      for (const targetId of idea.related_idea_ids || []) {
-        if (targetId === idea.id || !ideaNodePosMap.has(targetId)) continue;
-        const a = Math.min(idea.id, targetId);
-        const b = Math.max(idea.id, targetId);
-        const pairKey = `${a}-${b}`;
-        if (!seenPairs.has(pairKey)) {
-          seenPairs.add(pairKey);
-          crossLinks.push({
-            fromKey: `idea-${a}`,
-            toKey: `idea-${b}`,
-            fromId: a,
-            toId: b,
-          });
-        }
-      }
-      if (idea.status === 'PROMOTED') {
+      if (idea.status === 'PROMOTED' && nodeMap.has(`idea-${idea.id}`) && nodeMap.has('next-step')) {
         promotedLinks.push({
           fromKey: `idea-${idea.id}`,
-          toKey: 'next-step-target',
+          toKey: 'next-step',
         });
+      }
+    }
+
+    // Trailing dashed [+] buttons at every branch leaf node AND at the top-level Project Root node
+    const parentsWithChildren = new Set<string>();
+    for (const n of nodes) {
+      if (n.parentKey) parentsWithChildren.add(n.parentKey);
+    }
+    const leafAddButtons: Array<{
+      key: string;
+      parentNode: PositionedNode;
+      isRootSubtopicTrigger?: boolean;
+      portX: number;
+      portY: number;
+      x: number;
+      y: number;
+      size: number;
+    }> = [];
+    if (onAddIdea || onAddEntry) {
+      // 1) Root center node [+] button (creates a new independent subtopic branch off proj-root)
+      const rootBtnSize = 28;
+      const rootBtnX = rootNode.x + (rootNode.w - rootBtnSize) / 2;
+      const rootBtnY = rootNode.y + rootNode.h + 18;
+      leafAddButtons.push({
+        key: 'leaf-add::proj-root',
+        parentNode: rootNode,
+        isRootSubtopicTrigger: true,
+        portX: rootNode.x + rootNode.w / 2,
+        portY: rootNode.y + rootNode.h,
+        x: rootBtnX,
+        y: rootBtnY,
+        size: rootBtnSize,
+      });
+      cursorY = Math.max(cursorY, rootBtnY + rootBtnSize + 24);
+
+      // 2) Leaf node [+] buttons at the end of every branch (skip collapsed parents so [+N] badge never overlaps)
+      for (const n of nodes) {
+        if (
+          (n.kind === 'INTENT_PINNED' ||
+            n.kind === 'ENTRY' ||
+            n.kind === 'IDEA' ||
+            n.kind === 'NEXT_STEP') &&
+          !parentsWithChildren.has(n.key) &&
+          (descendantCountMap.get(n.key) || 0) === 0
+        ) {
+          const size = 28;
+          const btnX = n.x + n.w + 22;
+          leafAddButtons.push({
+            key: `leaf-add::${n.key}`,
+            parentNode: n,
+            portX: n.x + n.w,
+            portY: n.y + n.h / 2,
+            x: btnX,
+            y: n.y + (n.h - size) / 2,
+            size,
+          });
+          maxCanvasX = Math.max(maxCanvasX, btnX + size + 36);
+        }
       }
     }
 
     return {
       nodes,
-      crossLinks,
+      nodeMap,
+      effectiveParentMap,
+      descendantCountMap,
       promotedLinks,
-      width: Math.max(850, maxCanvasX),
-      height: Math.max(360, cursorY),
+      leafAddButtons,
+      width: maxCanvasX + 36,
+      height: Math.max(380, cursorY + 28),
     };
-  }, [project, allProjects, entries, ideas, L]);
+  }, [
+    project,
+    allProjects,
+    entries,
+    ideas,
+    parentOverrides,
+    referencedKeys,
+    duplicateInitialEntryId,
+    collapsedKeys,
+    onAddIdea,
+    onAddEntry,
+    L,
+  ]);
 
-  const nodeMap = useMemo(() => {
-    const m = new Map<string, PositionedNode>();
-    for (const n of layout.nodes) m.set(n.key, n);
-    return m;
-  }, [layout.nodes]);
-
-  const openComposerForParent = (parentId: number | null) => {
-    setComposerParentId(parentId);
-    setComposerTitle('');
-    setComposerNote('');
-    setComposerOpen(true);
-  };
-
-  const handleSubmitIdea = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!project || !onAddIdea || !composerTitle.trim()) return;
-    try {
-      setIsSubmitting(true);
-      await onAddIdea({
-        projectId: project.id,
-        title: composerTitle.trim(),
-        note: composerNote.trim() || null,
-        parent_idea_id: composerParentId,
-      });
-      setComposerTitle('');
-      setComposerNote('');
-      setComposerOpen(false);
-    } finally {
-      setIsSubmitting(false);
+  const obstacleBoxes = useMemo<ObstacleBox[]>(() => {
+    const list: ObstacleBox[] = layout.nodes.map((n) => ({
+      x: n.x,
+      y: n.y,
+      w: n.w,
+      h: n.h,
+    }));
+    if (!connectMode && !nestMode) {
+      for (const btn of layout.leafAddButtons) {
+        list.push({
+          x: btn.x,
+          y: btn.y,
+          w: btn.size,
+          h: btn.size,
+        });
+      }
     }
-  };
+    return list;
+  }, [layout.nodes, layout.leafAddButtons, connectMode, nestMode]);
 
-  const handleIdeaCardClick = async (idea: JournalIdea) => {
-    if (linkingSourceId !== null && project && onToggleRelatedIdea) {
-      if (linkingSourceId === idea.id) {
-        setLinkingSourceId(null);
+  const relatedIdeaWires = useMemo(
+    () => buildRelatedIdeaWires(ideas, customEdges, (k) => layout.nodeMap.has(k)),
+    [ideas, customEdges, layout.nodeMap]
+  );
+
+  // Node Role helpers
+  const isNodeMovable = useCallback(
+    (node: PositionedNode) =>
+      node.kind !== 'ROOT' && node.kind !== 'HUB' && node.kind !== 'ADD_HINT',
+    []
+  );
+
+  const isNodeConnectable = useCallback(
+    (node: PositionedNode) => node.kind !== 'HUB' && node.kind !== 'ADD_HINT',
+    []
+  );
+
+  const canNestTarget = useCallback(
+    (sourceKey: string, target: PositionedNode): 'NEST' | 'DETACH' | null => {
+      if (target.key === sourceKey || target.kind === 'ADD_HINT') return null;
+      if (target.kind === 'ROOT' || target.kind === 'HUB') {
+        return parentOverrides[sourceKey] ? 'DETACH' : null;
+      }
+      if (wouldCycleInParentMap(sourceKey, target.key, layout.effectiveParentMap)) {
+        return null;
+      }
+      return 'NEST';
+    },
+    [parentOverrides, layout.effectiveParentMap]
+  );
+
+  // Hovered target during drag-and-drop in Nest Mode
+  const hoveredNestTargetKey = useMemo(() => {
+    if (!nestMode || !draggingNest || !draggingNest.moved) return null;
+    const draggedNode = layout.nodeMap.get(draggingNest.key);
+    if (!draggedNode) return null;
+
+    const ghostX = draggingNest.pointerX - draggingNest.grabOffsetX;
+    const ghostY = draggingNest.pointerY - draggingNest.grabOffsetY;
+
+    // 1. Direct pointer-inside-card priority
+    for (const candidate of layout.nodes) {
+      if (!canNestTarget(draggedNode.key, candidate)) continue;
+      if (
+        draggingNest.pointerX >= candidate.x &&
+        draggingNest.pointerX <= candidate.x + candidate.w &&
+        draggingNest.pointerY >= candidate.y &&
+        draggingNest.pointerY <= candidate.y + candidate.h
+      ) {
+        return candidate.key;
+      }
+    }
+
+    // 2. Fallback: Ghost bounding-box overlap (> 300px^2)
+    let bestKey: string | null = null;
+    let bestArea = 0;
+    for (const candidate of layout.nodes) {
+      if (!canNestTarget(draggedNode.key, candidate)) continue;
+      const xOverlap = Math.max(
+        0,
+        Math.min(ghostX + draggedNode.w, candidate.x + candidate.w) - Math.max(ghostX, candidate.x)
+      );
+      const yOverlap = Math.max(
+        0,
+        Math.min(ghostY + draggedNode.h, candidate.y + candidate.h) - Math.max(ghostY, candidate.y)
+      );
+      const area = xOverlap * yOverlap;
+      if (area > 300 && area > bestArea) {
+        bestArea = area;
+        bestKey = candidate.key;
+      }
+    }
+    return bestKey;
+  }, [nestMode, draggingNest, layout.nodeMap, layout.nodes, canNestTarget]);
+
+  // Hovered target port/card while dragging a connection wire
+  const hoveredConnectTarget = useMemo(() => {
+    if (!connectingWire || !connectingWire.moved) return null;
+    const { fromKey, pointerX, pointerY } = connectingWire;
+    const fromNode = layout.nodeMap.get(fromKey);
+
+    let best: { key: string; side: PortSide; dist: number } | null = null;
+    for (const n of layout.nodes) {
+      if (n.key === fromKey || !isNodeConnectable(n)) continue;
+      for (const side of PORT_SIDES) {
+        const pt = getPortCoords(n.x, n.y, n.w, n.h, side);
+        const dist = Math.hypot(pointerX - pt.x, pointerY - pt.y);
+        if (dist <= 26 && (!best || dist < best.dist)) {
+          best = { key: n.key, side, dist };
+        }
+      }
+      if (pointerX >= n.x && pointerX <= n.x + n.w && pointerY >= n.y && pointerY <= n.y + n.h) {
+        if (fromNode) {
+          const smart = chooseSmartLeftRightPorts(fromNode, n);
+          return { key: n.key, side: smart.toSide };
+        }
+        return { key: n.key, side: 'left' as PortSide };
+      }
+    }
+
+    return best ? { key: best.key, side: best.side } : null;
+  }, [connectingWire, layout.nodes, layout.nodeMap, isNodeConnectable]);
+
+  // Refs for smooth global window pointer listeners
+  const customEdgesRef = useRef(customEdges);
+  customEdgesRef.current = customEdges;
+  const parentOverridesRef = useRef(parentOverrides);
+  parentOverridesRef.current = parentOverrides;
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
+  const hoveredConnectTargetRef = useRef(hoveredConnectTarget);
+  hoveredConnectTargetRef.current = hoveredConnectTarget;
+  const hoveredNestTargetKeyRef = useRef(hoveredNestTargetKey);
+  hoveredNestTargetKeyRef.current = hoveredNestTargetKey;
+  const nestSourceKeyRef = useRef(nestSourceKey);
+  nestSourceKeyRef.current = nestSourceKey;
+  const connectPendingSourceRef = useRef(connectPendingSource);
+  connectPendingSourceRef.current = connectPendingSource;
+
+  const pushUndoSnapshot = useCallback(() => {
+    setUndoStack((prev) => [
+      ...prev.slice(-19),
+      {
+        customEdges: [...customEdgesRef.current],
+        parentOverrides: { ...parentOverridesRef.current },
+      },
+    ]);
+  }, []);
+
+  const handleUndo = useCallback(() => {
+    setUndoStack((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      setCustomEdges(last.customEdges);
+      setParentOverrides(last.parentOverrides);
+      persistLayout(last.customEdges, last.parentOverrides);
+      return prev.slice(0, -1);
+    });
+  }, [persistLayout]);
+
+  const toggleCollapseNode = useCallback((nodeKey: string) => {
+    setCollapsedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeKey)) next.delete(nodeKey);
+      else next.add(nodeKey);
+      return next;
+    });
+  }, []);
+
+  const createEdge = useCallback(
+    (fromKey: string, fromSide: PortSide, toKey: string, toSide: PortSide) => {
+      if (fromKey === toKey) return;
+      const exists = customEdgesRef.current.some(
+        (ed) =>
+          (ed.fromKey === fromKey &&
+            ed.fromSide === fromSide &&
+            ed.toKey === toKey &&
+            ed.toSide === toSide) ||
+          (ed.toKey === fromKey &&
+            ed.toSide === fromSide &&
+            ed.fromKey === toKey &&
+            ed.fromSide === toSide)
+      );
+      if (exists) return;
+
+      pushUndoSnapshot();
+      const newEdge: FreeMapEdge = {
+        id: `e-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        fromKey,
+        fromSide,
+        toKey,
+        toSide,
+        color: '#7C3AED',
+      };
+      const nextEdges = [...customEdgesRef.current, newEdge];
+      setCustomEdges(nextEdges);
+      persistLayout(nextEdges, parentOverridesRef.current);
+    },
+    [persistLayout, pushUndoSnapshot]
+  );
+
+  const applyNestChoice = useCallback(
+    (sourceKey: string, targetKey: string) => {
+      const targetNode = layoutRef.current.nodeMap.get(targetKey);
+      if (!targetNode) return;
+      const mode = canNestTarget(sourceKey, targetNode);
+      if (!mode) return;
+
+      pushUndoSnapshot();
+      const nextParents = { ...parentOverridesRef.current };
+      if (mode === 'DETACH') {
+        delete nextParents[sourceKey];
+      } else {
+        nextParents[sourceKey] = targetKey;
+      }
+      setParentOverrides(nextParents);
+      persistLayout(customEdgesRef.current, nextParents);
+    },
+    [canNestTarget, persistLayout, pushUndoSnapshot]
+  );
+
+  // Global window pointer listeners for Nest Drag-and-Drop and Port Wire Drag/Click
+  useEffect(() => {
+    if (!draggingNest && !connectingWire) return;
+
+    const handlePointerMove = (e: PointerEvent) => {
+      if (!canvasRef.current) return;
+      const rect = canvasRef.current.getBoundingClientRect();
+      const px = (e.clientX - rect.left) / scale;
+      const py = (e.clientY - rect.top) / scale;
+
+      if (draggingNest) {
+        const moved =
+          draggingNest.moved ||
+          Math.hypot(e.clientX - draggingNest.startClientX, e.clientY - draggingNest.startClientY) > 5;
+        setDraggingNest((prev) =>
+          prev ? { ...prev, pointerX: px, pointerY: py, moved } : null
+        );
+      } else if (connectingWire) {
+        const moved =
+          connectingWire.moved ||
+          Math.hypot(e.clientX - connectingWire.startClientX, e.clientY - connectingWire.startClientY) > 5;
+        setConnectingWire((prev) =>
+          prev ? { ...prev, pointerX: px, pointerY: py, moved } : null
+        );
+      }
+    };
+
+    const handlePointerUp = () => {
+      if (draggingNest) {
+        if (draggingNest.moved) {
+          const dropKey = hoveredNestTargetKeyRef.current;
+          if (dropKey) {
+            applyNestChoice(draggingNest.key, dropKey);
+            setNestSourceKey(null);
+          }
+        } else {
+          // Pointer did not drag -> execute 2-Click Nesting interaction!
+          const clickedKey = draggingNest.key;
+          const currentSrc = nestSourceKeyRef.current;
+          if (!currentSrc) {
+            setNestSourceKey(clickedKey);
+          } else if (currentSrc === clickedKey) {
+            setNestSourceKey(null);
+          } else {
+            applyNestChoice(currentSrc, clickedKey);
+            setNestSourceKey(null);
+          }
+        }
+        setDraggingNest(null);
+      }
+
+      if (connectingWire) {
+        if (connectingWire.moved) {
+          const target = hoveredConnectTargetRef.current;
+          if (target && target.key !== connectingWire.fromKey) {
+            createEdge(connectingWire.fromKey, connectingWire.fromSide, target.key, target.side);
+          }
+          setConnectPendingSource(null);
+        } else {
+          // Pointer did not drag -> treat port click as 2-Click endpoint selection!
+          const pending = connectPendingSourceRef.current;
+          if (!pending) {
+            setConnectPendingSource({ key: connectingWire.fromKey, side: connectingWire.fromSide });
+          } else if (pending.key === connectingWire.fromKey) {
+            setConnectPendingSource(null);
+          } else {
+            const fromNode = layoutRef.current.nodeMap.get(pending.key);
+            const toNode = layoutRef.current.nodeMap.get(connectingWire.fromKey);
+            const auto =
+              fromNode && toNode
+                ? chooseSmartLeftRightPorts(fromNode, toNode)
+                : { fromSide: 'right' as PortSide, toSide: 'left' as PortSide };
+            createEdge(
+              pending.key,
+              pending.side || auto.fromSide,
+              connectingWire.fromKey,
+              connectingWire.fromSide
+            );
+            setConnectPendingSource(null);
+          }
+        }
+        setConnectingWire(null);
+      }
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+  }, [draggingNest, connectingWire, scale, applyNestChoice, createEdge]);
+
+  // Escape & Ctrl+Z / Cmd+Z keyboard shortcuts
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      const isEditingInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey && !isEditingInput) {
+        if (undoStack.length > 0) {
+          e.preventDefault();
+          handleUndo();
+        }
         return;
       }
-      await onToggleRelatedIdea(linkingSourceId, idea.id, project.id);
+
+      if (e.key !== 'Escape') return;
+      if (editingEntryInline) {
+        setEditingEntryInline(false);
+        return;
+      }
+      if (draggingNest || connectingWire) {
+        setDraggingNest(null);
+        setConnectingWire(null);
+        return;
+      }
+      if (nestSourceKey) {
+        setNestSourceKey(null);
+        return;
+      }
+      if (connectPendingSource) {
+        setConnectPendingSource(null);
+        return;
+      }
+      if (connectMode || nestMode) {
+        setConnectMode(false);
+        setNestMode(false);
+        return;
+      }
+      if (selectedEdgeId) setSelectedEdgeId(null);
+      if (selectedNodeKey) setSelectedNodeKey(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [
+    draggingNest,
+    connectingWire,
+    nestSourceKey,
+    connectPendingSource,
+    connectMode,
+    nestMode,
+    selectedEdgeId,
+    selectedNodeKey,
+    editingEntryInline,
+    undoStack.length,
+    handleUndo,
+  ]);
+
+  // Sync wireLabelDraft whenever selectedEdgeId changes
+  useEffect(() => {
+    if (!selectedEdgeId) {
+      setWireLabelDraft('');
       return;
     }
-    setSelectedIdeaId((prev) => (prev === idea.id ? null : idea.id));
+    const found = customEdges.find((e) => e.id === selectedEdgeId);
+    setWireLabelDraft(found?.label || '');
+  }, [selectedEdgeId, customEdges]);
+
+  // Reset inline entry editor when selected node changes
+  useEffect(() => {
+    setEditingEntryInline(false);
+    setEntryEditContent('');
+  }, [selectedNodeKey]);
+
+  // External focus jump from Timeline -> Mind Map
+  useEffect(() => {
+    if (!focusNodeKey) return;
+    const remapped = remapMindMapKey(focusNodeKey, duplicateInitialEntryId);
+
+    // Ensure all ancestors are expanded so the target node is visible
+    setCollapsedKeys((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set(prev);
+      let curr = layout.effectiveParentMap.get(remapped);
+      const visited = new Set<string>();
+      let changed = false;
+      while (curr && !visited.has(curr)) {
+        visited.add(curr);
+        if (next.has(curr)) {
+          next.delete(curr);
+          changed = true;
+        }
+        curr = layout.effectiveParentMap.get(curr);
+      }
+      return changed ? next : prev;
+    });
+
+    const node = layout.nodeMap.get(remapped);
+    if (node) {
+      setSelectedNodeKey(remapped);
+      setHighlightedNodeKey(remapped);
+      const vp = viewportRef.current;
+      if (vp) {
+        const targetLeft = Math.max(0, (node.x + node.w / 2) * scale - vp.clientWidth / 2);
+        const targetTop = Math.max(0, (node.y + node.h / 2) * scale - vp.clientHeight / 2);
+        vp.scrollTo({ left: targetLeft, top: targetTop, behavior: 'smooth' });
+      }
+      onConsumedFocusNode?.();
+      const timer = setTimeout(() => setHighlightedNodeKey(null), 2400);
+      return () => clearTimeout(timer);
+    }
+  }, [focusNodeKey, duplicateInitialEntryId, layout.nodeMap, layout.effectiveParentMap, scale, onConsumedFocusNode]);
+
+  const handleDetachNodeToRoot = (nodeKey: string) => {
+    pushUndoSnapshot();
+    const nextParents = { ...parentOverrides };
+    delete nextParents[nodeKey];
+    setParentOverrides(nextParents);
+    persistLayout(customEdges, nextParents);
   };
+
+  const handleUpdateCustomEdge = (edgeId: string, patch: { color?: string; label?: string }) => {
+    pushUndoSnapshot();
+    const nextEdges = customEdges.map((e) => {
+      if (e.id !== edgeId) return e;
+      const nextLabel =
+        patch.label !== undefined ? patch.label.trim().slice(0, 40) || undefined : e.label;
+      return {
+        ...e,
+        ...(patch.color !== undefined ? { color: patch.color } : {}),
+        label: nextLabel,
+      };
+    });
+    setCustomEdges(nextEdges);
+    persistLayout(nextEdges, parentOverrides);
+  };
+
+  const handleDeleteCustomEdge = (edgeId: string) => {
+    pushUndoSnapshot();
+    const nextEdges = customEdges.filter((e) => e.id !== edgeId);
+    setCustomEdges(nextEdges);
+    if (selectedEdgeId === edgeId) setSelectedEdgeId(null);
+    persistLayout(nextEdges, parentOverrides);
+  };
+
+  const openComposerForNode = (
+    targetNode: PositionedNode | null,
+    overrideKind?: EntryType | 'IDEA',
+    asRootSubtopic = false,
+    initialCompletedTarget = ''
+  ) => {
+    if (asRootSubtopic) {
+      setComposerState({
+        open: true,
+        initialKind: overrideKind || 'DIALOGUE_ME',
+        initialCompletedTarget: '',
+        parentNodeKey: ROOT_SUBTOPIC_KEY,
+        parentNodeTitle: L('프로젝트 루트 (새 서브토픽)', 'プロジェクトルート (新規サブトピック)', 'Project Root (New Subtopic)'),
+        parentIdeaId: null,
+      });
+      return;
+    }
+    if (
+      targetNode &&
+      (targetNode.kind === 'INTENT_PINNED' ||
+        targetNode.kind === 'ENTRY' ||
+        targetNode.kind === 'IDEA' ||
+        targetNode.kind === 'NEXT_STEP')
+    ) {
+      setComposerState({
+        open: true,
+        initialKind: overrideKind || getDefaultComposerKindForNode(targetNode.kind, targetNode.entry),
+        initialCompletedTarget,
+        parentNodeKey: targetNode.key,
+        parentNodeTitle: targetNode.title,
+        parentIdeaId: targetNode.idea ? targetNode.idea.id : null,
+      });
+    } else {
+      setComposerState({
+        open: true,
+        initialKind: overrideKind || (onAddIdea ? 'IDEA' : 'INTENT'),
+        initialCompletedTarget,
+        parentNodeKey: null,
+        parentNodeTitle: null,
+        parentIdeaId: null,
+      });
+    }
+  };
+
+  const handleComposerCreatedNode = useCallback(
+    (newKey: string, parentKey: string | null) => {
+      if (!parentKey) return;
+      pushUndoSnapshot();
+      const nextParents = {
+        ...parentOverridesRef.current,
+        [newKey]: parentKey,
+      };
+      setParentOverrides(nextParents);
+      persistLayout(customEdgesRef.current, nextParents);
+    },
+    [persistLayout, pushUndoSnapshot]
+  );
+
+  const handleCopyMarkdown = async () => {
+    const md = buildMindMapMarkdown(
+      project ? project.title : L('전체 프로젝트 저널 마인드맵', '全体プロジェクトマインドマップ', 'Project Journal Mind Map'),
+      layout.nodes,
+      layout.effectiveParentMap,
+      customEdges,
+      duplicateInitialEntryId
+    );
+    try {
+      await navigator.clipboard.writeText(md);
+      setCopiedMd(true);
+      setTimeout(() => setCopiedMd(false), 1800);
+    } catch {
+      prompt(L('마크다운 복사:', 'Markdownコピー:', 'Copy Markdown:'), md);
+    }
+  };
+
+  const handleExportPng = () => {
+    const pngNodes = layout.nodes.map((n) => ({
+      x: n.x,
+      y: n.y,
+      w: n.w,
+      h: n.h,
+      title: n.title,
+      subtitle: n.subtitle,
+      badge: n.badge,
+      isRoot: n.kind === 'ROOT',
+      accentColor: n.accentColor,
+      fillColor:
+        n.kind === 'ROOT'
+          ? '#1B4D3E'
+          : n.kind === 'HUB'
+          ? '#F8F7F2'
+          : n.kind === 'IDEA'
+          ? '#FFFBEB'
+          : n.kind === 'NEXT_STEP'
+          ? '#ECFDF5'
+          : '#FFFFFF',
+      borderColor: n.kind === 'ROOT' ? '#143B2F' : n.accentColor || '#D6D3C4',
+      textColor: n.kind === 'ROOT' ? '#FFFFFF' : '#1F2937',
+    }));
+
+    const pngEdges: Array<{
+      pathD: string;
+      color: string;
+      dashed?: boolean;
+      strokeWidth?: number;
+      label?: string;
+      midX?: number;
+      midY?: number;
+    }> = [];
+
+    for (const node of layout.nodes) {
+      if (!node.parentKey) continue;
+      const parent = layout.nodeMap.get(node.parentKey);
+      if (!parent) continue;
+      const x1 = parent.x + parent.w;
+      const y1 = parent.y + parent.h / 2;
+      const x2 = node.x;
+      const y2 = node.y + node.h / 2;
+      const cx = (x1 + x2) / 2;
+      pngEdges.push({
+        pathD: `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`,
+        color: parentOverrides[node.key] ? '#059669' : node.edgeColor,
+        dashed: node.kind === 'ADD_HINT',
+        strokeWidth: parentOverrides[node.key] ? 2.4 : 2,
+      });
+    }
+    for (const edge of customEdges) {
+      const fKey = remapMindMapKey(edge.fromKey, duplicateInitialEntryId);
+      const tKey = remapMindMapKey(edge.toKey, duplicateInitialEntryId);
+      const from = layout.nodeMap.get(fKey);
+      const to = layout.nodeMap.get(tKey);
+      if (!from || !to) continue;
+      const p1 = getPortCoords(from.x, from.y, from.w, from.h, edge.fromSide);
+      const p2 = getPortCoords(to.x, to.y, to.w, to.h, edge.toSide);
+      const { path, midX, midY } = buildObstacleAvoidingPath(
+        p1,
+        edge.fromSide,
+        p2,
+        edge.toSide,
+        obstacleBoxes
+      );
+      pngEdges.push({
+        pathD: path,
+        color: edge.color || '#7C3AED',
+        strokeWidth: 2.3,
+        label: edge.label,
+        midX,
+        midY,
+      });
+    }
+
+    const safeTitle = (project?.title || 'workspace-mindmap').replace(/[\\/:*?"<>|]/g, '_');
+    downloadMindMapAsPng(`${safeTitle}-mindmap.png`, pngNodes, pngEdges);
+  };
+
+  const handleNodeNormalOrModeClick = (node: PositionedNode) => {
+    // 1. Connect Mode (node card click for 2-Click smart port connection)
+    if (connectMode) {
+      if (!isNodeConnectable(node)) return;
+      if (!connectPendingSource) {
+        setConnectPendingSource({ key: node.key });
+      } else if (connectPendingSource.key === node.key) {
+        setConnectPendingSource(null);
+      } else {
+        const fromNode = layout.nodeMap.get(connectPendingSource.key);
+        const auto = fromNode
+          ? chooseSmartLeftRightPorts(fromNode, node)
+          : { fromSide: 'right' as PortSide, toSide: 'left' as PortSide };
+        createEdge(
+          connectPendingSource.key,
+          connectPendingSource.side || auto.fromSide,
+          node.key,
+          auto.toSide
+        );
+        setConnectPendingSource(null);
+      }
+      return;
+    }
+
+    // 2. Nest Mode fallback (for non-draggable targets like ROOT or HUB to detach a picked child)
+    if (nestMode) {
+      if (nestSourceKey) {
+        if (nestSourceKey === node.key) {
+          setNestSourceKey(null);
+        } else {
+          applyNestChoice(nestSourceKey, node.key);
+          setNestSourceKey(null);
+        }
+      }
+      return;
+    }
+
+    // 3. Normal Mode
+    if (onAddIdea || onAddEntry) {
+      if (node.key === 'intent-empty-hint' || (node.kind === 'HUB' && node.key === 'hub-intent')) {
+        openComposerForNode(null, 'INTENT');
+        return;
+      }
+      if (node.key === 'dial-empty-hint' || (node.kind === 'HUB' && node.key === 'hub-dialogue')) {
+        openComposerForNode(null, 'DIALOGUE_ME');
+        return;
+      }
+      if (node.key === 'idea-add-hint' || (node.kind === 'HUB' && node.key === 'hub-ideas')) {
+        openComposerForNode(null, 'IDEA');
+        return;
+      }
+    }
+    if (node.kind === 'PROJECT_LEAF' && node.projectItem) {
+      if (onFocusProject) {
+        onFocusProject(node.projectItem.id);
+      } else if (onOpenProjectDetail) {
+        onOpenProjectDetail(node.projectItem.id);
+      }
+      return;
+    }
+    if (node.kind !== 'HUB' && node.kind !== 'ADD_HINT') {
+      setSelectedNodeKey((prev) => (prev === node.key ? null : node.key));
+      setSelectedEdgeId(null);
+    }
+  };
+
+  const selectedNode = selectedNodeKey ? layout.nodeMap.get(selectedNodeKey) || null : null;
+  const selectedIdea = selectedNode?.idea || null;
+  const selectedEntry = selectedNode?.entry || null;
+  const selectedEdge = selectedEdgeId ? customEdges.find((e) => e.id === selectedEdgeId) || null : null;
+  const nestSourceNode = nestSourceKey ? layout.nodeMap.get(nestSourceKey) || null : null;
+  const connectSourceNode = connectPendingSource ? layout.nodeMap.get(connectPendingSource.key) || null : null;
+
+  const isSearchActive = searchQuery.trim().length > 0 || nodeKindFilter !== 'ALL';
+  const doesNodeMatchFilter = useCallback(
+    (node: PositionedNode): boolean => {
+      if (!isSearchActive) return true;
+      if (node.kind === 'ROOT') return true;
+      if (nodeKindFilter === 'DIALOGUE') {
+        if (
+          node.kind !== 'ENTRY' ||
+          !node.entry ||
+          (node.entry.entry_type !== 'DIALOGUE_ME' &&
+            node.entry.entry_type !== 'DIALOGUE_THEM' &&
+            node.entry.entry_type !== 'PROGRESS')
+        ) {
+          return false;
+        }
+      } else if (nodeKindFilter === 'IDEA') {
+        if (node.kind !== 'IDEA') return false;
+      } else if (nodeKindFilter === 'TOPIC') {
+        if (
+          node.kind !== 'NEXT_STEP' &&
+          !(node.entry && isTopicMilestoneEntry(node.entry)) &&
+          !(node.entry && isCurrentFocusIntentEntry(node.entry)) &&
+          node.kind !== 'INTENT_PINNED'
+        ) {
+          return false;
+        }
+      }
+      const q = searchQuery.trim().toLowerCase();
+      if (!q) return true;
+      const hay = `${node.title} ${node.subtitle || ''} ${node.badge || ''} ${node.entry?.speaker_name || ''}`.toLowerCase();
+      return hay.includes(q);
+    },
+    [isSearchActive, nodeKindFilter, searchQuery]
+  );
+
+  const handleSaveInlineEntryEdit = async () => {
+    if (!selectedEntry || !onEditEntry || !entryEditContent.trim()) return;
+    try {
+      setIsSavingEntryEdit(true);
+      await onEditEntry(selectedEntry, { content: entryEditContent.trim() });
+      setEditingEntryInline(false);
+    } finally {
+      setIsSavingEntryEdit(false);
+    }
+  };
+
+  const selectedNodeEdges = useMemo(() => {
+    if (!selectedNodeKey) return [];
+    return customEdges.filter((e) => {
+      const fKey = remapMindMapKey(e.fromKey, duplicateInitialEntryId);
+      const tKey = remapMindMapKey(e.toKey, duplicateInitialEntryId);
+      return fKey === selectedNodeKey || tKey === selectedNodeKey;
+    });
+  }, [customEdges, selectedNodeKey, duplicateInitialEntryId]);
+
+  const draggingGhostNode = draggingNest?.moved ? layout.nodeMap.get(draggingNest.key) || null : null;
 
   return (
     <div className="bg-white rounded-xl border border-ivory-300 shadow-2xs overflow-hidden">
@@ -671,14 +1941,14 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
             </span>
           </div>
 
-          <div className="hidden md:flex items-center gap-2 text-[11px] font-bold text-charcoal-600 pl-2 border-l border-ivory-300">
+          <div className="hidden lg:flex items-center gap-2 text-[11px] font-bold text-charcoal-600 pl-2 border-l border-ivory-300">
             <span className="inline-flex items-center gap-1">
               <span className="w-3 h-0.5 bg-amber-600 inline-block" />
               {L('가지 분기', '分岐', 'Branch')}
             </span>
             <span className="inline-flex items-center gap-1">
-              <span className="w-3 h-0.5 border-t-2 border-dashed border-violet-600 inline-block" />
-              {L('상호 연결 🔗', '相互リンク 🔗', 'Cross-Link')}
+              <span className="w-3 h-0.5 bg-violet-600 inline-block" />
+              {L('노드 연결', 'ノード接続', 'Wire')}
             </span>
             <span className="inline-flex items-center gap-1">
               <span className="w-3 h-0.5 border-t-2 border-dashed border-emerald-600 inline-block" />
@@ -688,14 +1958,14 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
         </div>
 
         <div className="flex items-center gap-1.5 flex-wrap">
-          {project && onAddIdea && (
+          {project && (onAddIdea || onAddEntry) && (
             <button
               type="button"
-              onClick={() => openComposerForParent(null)}
+              onClick={() => openComposerForNode(null)}
               className="px-2.5 py-1 rounded-lg bg-forest-800 text-white text-xs font-bold hover:bg-forest-900 inline-flex items-center gap-1"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>{L('새 아이디어', '新規アイデア', 'New Idea')}</span>
+              <span>{L('새 노드 / 기록', '新規追加', 'New Node')}</span>
             </button>
           )}
 
@@ -709,6 +1979,95 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
               <span>{L('상세 열기', '詳細を開く', 'Open Project')}</span>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => {
+              setConnectMode((prev) => {
+                const next = !prev;
+                if (next) {
+                  setNestMode(false);
+                  setNestSourceKey(null);
+                } else {
+                  setConnectPendingSource(null);
+                }
+                return next;
+              });
+            }}
+            className={`px-2.5 py-1 rounded-lg border text-xs font-bold inline-flex items-center gap-1 transition ${
+              connectMode
+                ? 'bg-violet-700 text-white border-violet-800 shadow-2xs'
+                : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
+            }`}
+            title={L(
+              '노드 연결 (클릭 또는 ● 포트 드래그 · 자유 마인드맵과 공유)',
+              'ノード接続 (クリックまたは●ドラッグ・自由マップと共有)',
+              'Connect nodes (2-click or port drag · synced with Free Mind Map)'
+            )}
+          >
+            <Link2 className="w-3.5 h-3.5" />
+            <span>{L('노드 연결', 'ノード接続', 'Connect')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setNestMode((prev) => {
+                const next = !prev;
+                if (next) {
+                  setConnectMode(false);
+                  setConnectPendingSource(null);
+                } else {
+                  setNestSourceKey(null);
+                }
+                return next;
+              });
+            }}
+            className={`px-2.5 py-1 rounded-lg border text-xs font-bold inline-flex items-center gap-1 transition ${
+              nestMode
+                ? 'bg-emerald-700 text-white border-emerald-800 shadow-2xs'
+                : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
+            }`}
+            title={L(
+              '노드 종속 (2클릭 또는 드래그 드롭 · 자유 마인드맵과 공유)',
+              'ノード従属 (2クリックまたはドラッグ・自由マップと共有)',
+              'Nest nodes (2-click or drag & drop · synced with Free Mind Map)'
+            )}
+          >
+            <CornerDownRight className="w-3.5 h-3.5" />
+            <span>{L('노드 종속', 'ノード従属', 'Nest')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleUndo}
+            disabled={undoStack.length === 0}
+            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 disabled:opacity-40 inline-flex items-center gap-1"
+            title={L('직전 연결/종속 작업 되돌리기 (Ctrl+Z)', '直前の操作を元に戻す (Ctrl+Z)', 'Undo last change (Ctrl+Z)')}
+          >
+            <Undo2 className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">{L('되돌리기', '戻す', 'Undo')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void handleCopyMarkdown()}
+            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
+            title={L('마인드맵 계층 구조를 마크다운으로 복사', 'Markdown形式でコピー', 'Copy mind map as Markdown')}
+          >
+            {copiedMd ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+            <span className="hidden md:inline">{copiedMd ? L('복사됨', 'コピー済', 'Copied') : 'MD'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExportPng}
+            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
+            title={L('현재 마인드맵을 PNG 이미지로 저장', 'PNG画像として保存', 'Download as PNG image')}
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">PNG</span>
+          </button>
 
           <div className="flex items-center gap-1 bg-white border border-ivory-300 rounded-lg p-0.5">
             <button
@@ -736,74 +2095,147 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
         </div>
       </div>
 
-      {/* Link Mode Banner */}
-      {linkingSourceIdea && (
-        <div className="px-3 py-2 bg-violet-50 border-b border-violet-200 flex items-center justify-between gap-2 text-xs">
-          <div className="flex items-center gap-2 font-bold text-violet-900">
-            <Link2 className="w-4 h-4 text-violet-700 shrink-0" />
-            <span>
-              {L(
-                `[${linkingSourceIdea.title}] 와 연결·해제할 다른 아이디어 노드를 클릭하세요.`,
-                `「${linkingSourceIdea.title}」と接続・解除する他のアイデアをクリックしてください。`,
-                `Click another idea node to link or unlink with "${linkingSourceIdea.title}".`
+      {/* Compact Search, Filter & Fold Controls Bar */}
+      {project && (
+        <div className="px-3 py-1.5 bg-white border-b border-ivory-200 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <div className="relative">
+              <Search className="w-3 h-3 text-charcoal-400 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={L('노드 검색·하이라이트...', 'ノード検索...', 'Search nodes...')}
+                className="pl-6 pr-6 py-1 rounded-lg bg-ivory-50 border border-ivory-300 text-[11px] font-medium text-charcoal-900 w-36 sm:w-44 focus:outline-none focus:ring-1 focus:ring-forest-500"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-charcoal-400 hover:text-charcoal-700"
+                >
+                  <X className="w-3 h-3" />
+                </button>
               )}
-            </span>
+            </div>
+            {(
+              [
+                { id: 'ALL', label: L('전체', 'すべて', 'All') },
+                { id: 'DIALOGUE', label: L('💬 대화·완료', '💬 対話', '💬 Dialogue') },
+                { id: 'IDEA', label: L('💡 아이디어', '💡 アイデア', '💡 Ideas') },
+                { id: 'TOPIC', label: L('🎯 토픽·의도', '🎯 トピック', '🎯 Topics') },
+              ] as const
+            ).map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                onClick={() => setNodeKindFilter(chip.id)}
+                className={`px-2 py-0.5 rounded-full border font-bold transition ${
+                  nodeKindFilter === chip.id
+                    ? 'bg-forest-800 text-white border-forest-900'
+                    : 'bg-ivory-50 text-charcoal-600 border-ivory-300 hover:bg-ivory-100'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
           </div>
-          <button
-            type="button"
-            onClick={() => setLinkingSourceId(null)}
-            className="px-2.5 py-1 rounded-lg bg-violet-700 text-white font-bold hover:bg-violet-800 shrink-0"
-          >
-            {L('연결 완료', '接続終了', 'Done')}
-          </button>
+          {collapsedKeys.size > 0 && (
+            <button
+              type="button"
+              onClick={() => setCollapsedKeys(new Set())}
+              className="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-900 font-bold hover:bg-amber-100"
+            >
+              {L(`접힌 가지 모두 펼치기 (${collapsedKeys.size})`, `折りたたみ全解除 (${collapsedKeys.size})`, `Expand All (${collapsedKeys.size})`)}
+            </button>
+          )}
         </div>
       )}
 
-      {/* Inline Sub-Idea / Root-Idea Composer */}
-      {composerOpen && project && onAddIdea && (
-        <form
-          onSubmit={handleSubmitIdea}
-          className="p-3 bg-amber-50/60 border-b border-amber-200 flex flex-col sm:flex-row items-stretch sm:items-center gap-2 text-xs"
+      {/* Mode Hint Banner (Connect Mode OR Nest Mode) */}
+      {(connectMode || nestMode) && (
+        <div
+          className={`px-3 py-2 border-b flex items-center justify-between gap-2 text-xs flex-wrap ${
+            connectMode
+              ? 'bg-violet-50 border-violet-200 text-violet-900'
+              : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+          }`}
         >
-          <div className="px-2 py-1 rounded bg-amber-100 border border-amber-300 text-amber-900 font-bold whitespace-nowrap shrink-0">
-            {composerParentId
-              ? `${L('하위 가지 →', '子ノード →', 'Child of:')} ${
-                  ideas.find((i) => i.id === composerParentId)?.title || ''
-                }`
-              : L('루트 아이디어', 'ルートアイデア', 'Root Idea')}
+          <div className="flex items-center gap-2 font-bold min-w-0">
+            {connectMode ? <Link2 className="w-4 h-4 shrink-0" /> : <CornerDownRight className="w-4 h-4 shrink-0" />}
+            <span className="truncate">
+              {connectMode
+                ? connectSourceNode
+                  ? L(
+                      `[${connectSourceNode.title}] 선택됨 → 연결할 대상 노드나 ● 포트를 클릭하세요. (자유 마인드맵과 공유)`,
+                      `「${connectSourceNode.title}」選択中 → 接続先のノードまたは●をクリックしてください。`,
+                      `[${connectSourceNode.title}] selected → Click target node or ● port to connect.`
+                    )
+                  : L(
+                      '노드 연결 활성화됨: 카드(또는 ● 포트)를 2번 클릭하거나, ● 점을 드래그해 연결하세요. (자유 마인드맵과 공유)',
+                      'ノード接続ON: カード(または●)を2クリック、または●をドラッグして接続してください。',
+                      'Connect mode: Click 2 nodes/ports or drag a ● dot to wire nodes (synced with Free Mind Map).'
+                    )
+                : nestSourceNode
+                ? L(
+                    `[${nestSourceNode.title}] 선택됨 → 상위로 삼을 부모 노드를 클릭하세요. (원래 위치 복귀는 루트/허브 클릭)`,
+                    `「${nestSourceNode.title}」選択中 → 親にするノードをクリックしてください。`,
+                    `[${nestSourceNode.title}] selected → Click a parent node to nest under (click Root/Hub to detach).`
+                  )
+                : L(
+                    '노드 종속 활성화됨: 종속시킬 [자식 → 부모] 노드를 차례로 클릭하거나, 노드를 끌어 부모 위에 놓으세요. (자유 마인드맵과 공유)',
+                    'ノード従属ON: [子→親]の順に2クリック、またはノードを親の上にドラッグ＆ドロップしてください。',
+                    'Nest mode: Click [Child → Parent] or drag & drop a node onto its parent (synced with Free Mind Map).'
+                  )}
+            </span>
           </div>
-          <input
-            type="text"
-            autoFocus
-            value={composerTitle}
-            onChange={(e) => setComposerTitle(e.target.value)}
-            placeholder={L('뻗어나갈 아이디어 제목...', 'アイデア名...', 'Idea title...')}
-            className="flex-1 p-1.5 bg-white border border-ivory-300 rounded-lg font-bold text-charcoal-900"
-          />
-          <input
-            type="text"
-            value={composerNote}
-            onChange={(e) => setComposerNote(e.target.value)}
-            placeholder={L('짧은 메모 (선택)', 'メモ (任意)', 'Note (optional)')}
-            className="flex-1 p-1.5 bg-white border border-ivory-300 rounded-lg text-charcoal-800"
-          />
           <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="submit"
-              disabled={isSubmitting || !composerTitle.trim()}
-              className="px-3 py-1.5 rounded-lg bg-forest-800 text-white font-bold disabled:opacity-50 hover:bg-forest-900"
-            >
-              {L('추가', '追加', 'Add')}
-            </button>
+            {(nestSourceKey || connectPendingSource) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setNestSourceKey(null);
+                  setConnectPendingSource(null);
+                }}
+                className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 font-bold hover:bg-ivory-100"
+              >
+                {L('선택 취소', '選択解除', 'Clear')}
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => setComposerOpen(false)}
-              className="p-1.5 rounded-lg bg-white border border-ivory-300 text-charcoal-600 hover:bg-ivory-100"
+              onClick={() => {
+                setConnectMode(false);
+                setNestMode(false);
+                setNestSourceKey(null);
+                setConnectPendingSource(null);
+              }}
+              className={`px-2.5 py-1 rounded-lg text-white font-bold ${
+                connectMode ? 'bg-violet-700 hover:bg-violet-800' : 'bg-emerald-700 hover:bg-emerald-800'
+              }`}
             >
-              <X className="w-4 h-4" />
+              {L('종료', '終了', 'Done')}
             </button>
           </div>
-        </form>
+        </div>
+      )}
+
+      {/* Unified Mind Map Node Composer (All Timeline Types + Ideas) */}
+      {composerState.open && project && (onAddIdea || onAddEntry) && (
+        <MindMapNodeComposer
+          project={project}
+          entries={entries}
+          ideas={ideas}
+          initialKind={composerState.initialKind}
+          initialCompletedTarget={composerState.initialCompletedTarget}
+          parentNodeKey={composerState.parentNodeKey}
+          parentNodeTitle={composerState.parentNodeTitle}
+          parentIdeaId={composerState.parentIdeaId}
+          onAddIdea={onAddIdea}
+          onAddEntry={onAddEntry}
+          onCreatedNode={handleComposerCreatedNode}
+          onClose={() => setComposerState((prev) => ({ ...prev, open: false }))}
+        />
       )}
 
       {/* Mind Map Canvas */}
@@ -812,7 +2244,7 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
           {L('마인드맵에 표시할 프로젝트가 없습니다.', 'マインドマップに表示するプロジェクトがありません。', 'No projects to display on mind map.')}
         </div>
       ) : (
-        <div className="overflow-auto bg-ivory-50/40 relative max-h-[680px]">
+        <div ref={viewportRef} className="overflow-auto bg-ivory-50/40 relative max-h-[680px]">
           <div
             style={{
               width: layout.width * scale,
@@ -821,13 +2253,20 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
             className="relative"
           >
             <div
+              ref={canvasRef}
+              onClick={(e) => {
+                if (e.target === canvasRef.current) {
+                  setSelectedNodeKey(null);
+                  setSelectedEdgeId(null);
+                }
+              }}
               style={{
                 width: layout.width,
                 height: layout.height,
                 transform: `scale(${scale})`,
                 transformOrigin: 'top left',
               }}
-              className="relative"
+              className="relative select-none"
             >
               {/* SVG Edges Layer */}
               <svg
@@ -835,74 +2274,107 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                 height={layout.height}
                 className="absolute inset-0 pointer-events-none"
               >
-                {/* Structural Parent -> Child Bezier Curves */}
+                {/* 1. Structural Parent -> Child Bezier Curves (left-to-right tree + overridden parent hierarchy) */}
                 {layout.nodes.map((node) => {
                   if (!node.parentKey) return null;
-                  const parent = nodeMap.get(node.parentKey);
+                  const parent = layout.nodeMap.get(node.parentKey);
                   if (!parent) return null;
                   const x1 = parent.x + parent.w;
                   const y1 = parent.y + parent.h / 2;
                   const x2 = node.x;
                   const y2 = node.y + node.h / 2;
                   const cx = (x1 + x2) / 2;
+                  const isOverridden = Boolean(parentOverrides[node.key]);
+                  const isAddHint = node.kind === 'ADD_HINT';
                   return (
                     <path
                       key={`edge-${node.key}`}
                       d={`M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`}
                       fill="none"
-                      stroke={node.edgeColor}
-                      strokeWidth={2}
-                      strokeOpacity={0.55}
+                      stroke={isOverridden ? '#059669' : node.edgeColor}
+                      strokeWidth={isOverridden ? 2.4 : 2}
+                      strokeDasharray={isAddHint ? '4 3' : undefined}
+                      strokeOpacity={isOverridden ? 0.78 : isAddHint ? 0.65 : 0.55}
                     />
                   );
                 })}
 
-                {/* Promoted Idea -> Next Step Curved Links */}
+                {/* 1b. Dashed Connectors to Trailing Leaf [+] Buttons & Root [+] Button */}
+                {!connectMode &&
+                  !nestMode &&
+                  layout.leafAddButtons.map((btn) => {
+                    const x2 = btn.isRootSubtopicTrigger ? btn.x + btn.size / 2 : btn.x;
+                    const y2 = btn.isRootSubtopicTrigger ? btn.y : btn.y + btn.size / 2;
+                    return (
+                      <line
+                        key={`edge-${btn.key}`}
+                        x1={btn.portX}
+                        y1={btn.portY}
+                        x2={x2}
+                        y2={y2}
+                        stroke={btn.parentNode.accentColor}
+                        strokeWidth={1.8}
+                        strokeDasharray="4 3"
+                        strokeOpacity={0.65}
+                      />
+                    );
+                  })}
+
+                {/* 2. Promoted Idea -> Next Step Curved Links (Obstacle-Avoiding) */}
                 {layout.promotedLinks.map((lnk, idx) => {
-                  const from = nodeMap.get(lnk.fromKey);
-                  const to = nodeMap.get(lnk.toKey);
+                  const from = layout.nodeMap.get(lnk.fromKey);
+                  const to = layout.nodeMap.get(lnk.toKey);
                   if (!from || !to) return null;
-                  const x1 = from.x + from.w;
-                  const y1 = from.y + from.h / 2;
-                  const x2 = to.x + to.w;
-                  const y2 = to.y + to.h / 2;
-                  const archX = Math.max(x1, x2) + 52;
+                  const { fromSide, toSide } = chooseSmartLeftRightPorts(from, to);
+                  const p1 = getPortCoords(from.x, from.y, from.w, from.h, fromSide);
+                  const p2 = getPortCoords(to.x, to.y, to.w, to.h, toSide);
+                  const { path } = buildObstacleAvoidingPath(p1, fromSide, p2, toSide, obstacleBoxes);
+                  const isDimmed =
+                    Boolean(selectedNodeKey) &&
+                    selectedNodeKey !== lnk.fromKey &&
+                    selectedNodeKey !== lnk.toKey;
                   return (
                     <path
                       key={`promo-${idx}`}
-                      d={`M ${x1} ${y1} C ${archX} ${y1}, ${archX} ${y2}, ${x2} ${y2}`}
+                      d={path}
                       fill="none"
                       stroke="#059669"
                       strokeWidth={2.2}
                       strokeDasharray="6 4"
-                      strokeOpacity={0.85}
+                      strokeOpacity={isDimmed ? 0.25 : 0.85}
                     />
                   );
                 })}
 
-                {/* Cross-Branch Idea <-> Idea Dashed Curves */}
-                {layout.crossLinks.map((lnk) => {
-                  const from = nodeMap.get(lnk.fromKey);
-                  const to = nodeMap.get(lnk.toKey);
+                {/* 3. Synced related_idea_ids Links (Obstacle-Avoiding, deduplicated against customEdges) */}
+                {relatedIdeaWires.map((w, idx) => {
+                  const from = layout.nodeMap.get(w.fromKey);
+                  const to = layout.nodeMap.get(w.toKey);
                   if (!from || !to) return null;
-                  const x1 = from.x + from.w;
-                  const y1 = from.y + from.h / 2;
-                  const x2 = to.x + to.w;
-                  const y2 = to.y + to.h / 2;
-                  const archX = Math.max(x1, x2) + 46;
-                  const midY = (y1 + y2) / 2;
-                  const midX = 0.125 * x1 + 0.75 * archX + 0.125 * x2;
+                  const { fromSide, toSide } = chooseSmartLeftRightPorts(from, to);
+                  const p1 = getPortCoords(from.x, from.y, from.w, from.h, fromSide);
+                  const p2 = getPortCoords(to.x, to.y, to.w, to.h, toSide);
+                  const { path, midX, midY } = buildObstacleAvoidingPath(
+                    p1,
+                    fromSide,
+                    p2,
+                    toSide,
+                    obstacleBoxes
+                  );
+                  const touchesSelected =
+                    selectedNodeKey === w.fromKey || selectedNodeKey === w.toKey;
+                  const isDimmed = Boolean(selectedNodeKey) && !touchesSelected;
                   return (
-                    <g key={`cross-${lnk.fromId}-${lnk.toId}`}>
+                    <g key={`relwire-${idx}`} opacity={isDimmed ? 0.25 : 1}>
                       <path
-                        d={`M ${x1} ${y1} C ${archX} ${y1}, ${archX} ${y2}, ${x2} ${y2}`}
+                        d={path}
                         fill="none"
                         stroke="#7C3AED"
-                        strokeWidth={2.2}
+                        strokeWidth={touchesSelected ? 2.6 : 2}
                         strokeDasharray="5 4"
                         strokeOpacity={0.85}
                       />
-                      <circle cx={midX} cy={midY} r={10} fill="#F5F3FF" stroke="#7C3AED" strokeWidth={1.5} />
+                      <circle cx={midX} cy={midY} r={9} fill="#F5F3FF" stroke="#7C3AED" strokeWidth={1.5} />
                       <text
                         x={midX}
                         y={midY + 3.5}
@@ -916,24 +2388,237 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                     </g>
                   );
                 })}
+
+                {/* 4. Shared User-Created Custom Port-to-Port Edges (Obstacle-Avoiding Corridors) */}
+                {customEdges.map((edge) => {
+                  const resolvedFromKey = remapMindMapKey(edge.fromKey, duplicateInitialEntryId);
+                  const resolvedToKey = remapMindMapKey(edge.toKey, duplicateInitialEntryId);
+                  const from = layout.nodeMap.get(resolvedFromKey);
+                  const to = layout.nodeMap.get(resolvedToKey);
+                  if (!from || !to) return null;
+                  const p1 = getPortCoords(from.x, from.y, from.w, from.h, edge.fromSide);
+                  const p2 = getPortCoords(to.x, to.y, to.w, to.h, edge.toSide);
+                  const { path, midX, midY } = buildObstacleAvoidingPath(
+                    p1,
+                    edge.fromSide,
+                    p2,
+                    edge.toSide,
+                    obstacleBoxes
+                  );
+                  const isEdgeSelected = selectedEdgeId === edge.id;
+                  const touchesSelectedNode =
+                    Boolean(selectedNodeKey) &&
+                    (resolvedFromKey === selectedNodeKey || resolvedToKey === selectedNodeKey);
+                  const isDimmed =
+                    (Boolean(selectedNodeKey) && !touchesSelectedNode && !isEdgeSelected) ||
+                    (Boolean(selectedEdgeId) && !isEdgeSelected);
+
+                  return (
+                    <g
+                      key={edge.id}
+                      className="pointer-events-auto cursor-pointer"
+                      opacity={isDimmed ? 0.22 : 1}
+                    >
+                      <path
+                        d={path}
+                        fill="none"
+                        stroke="transparent"
+                        strokeWidth={14}
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          setSelectedEdgeId((prev) => (prev === edge.id ? null : edge.id));
+                        }}
+                      />
+                      <path
+                        d={path}
+                        fill="none"
+                        stroke={isEdgeSelected ? '#E11D48' : edge.color || '#7C3AED'}
+                        strokeWidth={isEdgeSelected || touchesSelectedNode ? 3.2 : 2.3}
+                        strokeOpacity={0.9}
+                      />
+                      {edge.label ? (
+                        <g
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            setSelectedEdgeId((prev) => (prev === edge.id ? null : edge.id));
+                          }}
+                        >
+                          <rect
+                            x={midX - Math.max(24, edge.label.length * 5.2 + 12)}
+                            y={midY - 10}
+                            width={Math.max(48, edge.label.length * 10.4 + 24)}
+                            height={20}
+                            rx={10}
+                            fill={isEdgeSelected ? '#E11D48' : '#FFFFFF'}
+                            stroke={isEdgeSelected ? '#9F1239' : edge.color || '#7C3AED'}
+                            strokeWidth={1.6}
+                          />
+                          <text
+                            x={midX}
+                            y={midY + 3.5}
+                            textAnchor="middle"
+                            fontSize={10}
+                            fontWeight="bold"
+                            fill={isEdgeSelected ? '#FFFFFF' : '#1F2937'}
+                          >
+                            {edge.label}
+                          </text>
+                        </g>
+                      ) : (
+                        <>
+                          <circle
+                            cx={midX}
+                            cy={midY}
+                            r={isEdgeSelected ? 10 : 7}
+                            fill={isEdgeSelected ? '#E11D48' : '#FFFFFF'}
+                            stroke={isEdgeSelected ? '#9F1239' : edge.color || '#7C3AED'}
+                            strokeWidth={1.8}
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              setSelectedEdgeId((prev) => (prev === edge.id ? null : edge.id));
+                            }}
+                          />
+                          {isEdgeSelected && (
+                            <text
+                              x={midX}
+                              y={midY + 3.5}
+                              textAnchor="middle"
+                              fontSize={10}
+                              fontWeight="bold"
+                              fill="#FFFFFF"
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                setSelectedEdgeId(null);
+                              }}
+                            >
+                              ✎
+                            </text>
+                          )}
+                        </>
+                      )}
+                    </g>
+                  );
+                })}
+
+                {/* 5. Live Temporary Wire While Dragging from a Port Dot */}
+                {connectingWire &&
+                  connectingWire.moved &&
+                  (() => {
+                    const from = layout.nodeMap.get(connectingWire.fromKey);
+                    if (!from) return null;
+                    const p1 = getPortCoords(from.x, from.y, from.w, from.h, connectingWire.fromSide);
+                    let p2 = { x: connectingWire.pointerX, y: connectingWire.pointerY };
+                    let endSide: PortSide =
+                      connectingWire.fromSide === 'right'
+                        ? 'left'
+                        : connectingWire.fromSide === 'left'
+                        ? 'right'
+                        : connectingWire.fromSide === 'bottom'
+                        ? 'top'
+                        : 'bottom';
+                    if (hoveredConnectTarget) {
+                      const targetNode = layout.nodeMap.get(hoveredConnectTarget.key);
+                      if (targetNode) {
+                        p2 = getPortCoords(
+                          targetNode.x,
+                          targetNode.y,
+                          targetNode.w,
+                          targetNode.h,
+                          hoveredConnectTarget.side
+                        );
+                        endSide = hoveredConnectTarget.side;
+                      }
+                    }
+                    const { path } = hoveredConnectTarget
+                      ? buildObstacleAvoidingPath(p1, connectingWire.fromSide, p2, endSide, obstacleBoxes)
+                      : buildDirectionalBezier(p1, connectingWire.fromSide, p2, endSide);
+                    return (
+                      <path
+                        d={path}
+                        fill="none"
+                        stroke="#7C3AED"
+                        strokeWidth={2.8}
+                        strokeDasharray="6 4"
+                      />
+                    );
+                  })()}
+
+                {/* 6. Live Nesting Drop Preview Line */}
+                {draggingNest?.moved &&
+                  hoveredNestTargetKey &&
+                  (() => {
+                    const from = layout.nodeMap.get(draggingNest.key);
+                    const to = layout.nodeMap.get(hoveredNestTargetKey);
+                    if (!from || !to) return null;
+                    const p1 = { x: draggingNest.pointerX, y: draggingNest.pointerY };
+                    const p2 = getPortCoords(to.x, to.y, to.w, to.h, 'right');
+                    const { path } = buildDirectionalBezier(p1, 'left', p2, 'right');
+                    return (
+                      <path
+                        d={path}
+                        fill="none"
+                        stroke="#059669"
+                        strokeWidth={2.6}
+                        strokeDasharray="5 4"
+                      />
+                    );
+                  })()}
               </svg>
 
               {/* Interactive Nodes Layer */}
               {layout.nodes.map((node) => {
-                const isSelectedIdea = node.kind === 'IDEA' && node.idea?.id === selectedIdeaId;
-                const isLinkingSource = node.kind === 'IDEA' && node.idea?.id === linkingSourceId;
-                const isLinkedToSource =
-                  Boolean(
-                    linkingSourceIdea &&
-                      node.kind === 'IDEA' &&
-                      node.idea &&
-                      linkingSourceIdea.related_idea_ids?.includes(node.idea.id)
-                  );
+                const movable = isNodeMovable(node);
+                const connectable = isNodeConnectable(node);
+                const isSelected = selectedNodeKey === node.key;
+                const isNestSource = nestMode && nestSourceKey === node.key;
+                const isConnectSource = connectMode && connectPendingSource?.key === node.key;
+                const isWireTargetNode = hoveredConnectTarget?.key === node.key;
+                const isNestHoverTarget = hoveredNestTargetKey === node.key;
+                const isDraggingThis = draggingNest?.moved && draggingNest.key === node.key;
+
+                // Visual hint for valid/invalid parent targets when a source is picked in Nest Mode
+                const nestTargetAbility =
+                  nestMode && nestSourceKey && nestSourceKey !== node.key
+                    ? canNestTarget(nestSourceKey, node)
+                    : null;
+                const isInvalidNestChoice =
+                  nestMode &&
+                  Boolean(nestSourceKey) &&
+                  nestSourceKey !== node.key &&
+                  !nestTargetAbility &&
+                  node.kind !== 'ADD_HINT';
+
+                const isConnectedToSelected =
+                  Boolean(selectedNodeKey) &&
+                  (customEdges.some(
+                    (e) =>
+                      (e.fromKey === selectedNodeKey && e.toKey === node.key) ||
+                      (e.toKey === selectedNodeKey && e.fromKey === node.key)
+                  ) ||
+                    relatedIdeaWires.some(
+                      (w) =>
+                        (w.fromKey === selectedNodeKey && w.toKey === node.key) ||
+                        (w.toKey === selectedNodeKey && w.fromKey === node.key)
+                    ));
+
+                const hasParentOverride = Boolean(parentOverrides[node.key]);
+                const descendantCount = layout.descendantCountMap.get(node.key) || 0;
+                const isCollapsed = collapsedKeys.has(node.key);
+                const matchesFilter = doesNodeMatchFilter(node);
+                const isHighlighted = highlightedNodeKey === node.key;
+
                 const isClickable =
-                  node.kind === 'IDEA' ||
-                  node.kind === 'ADD_HINT' ||
-                  node.kind === 'PROJECT_LEAF' ||
-                  (node.kind === 'HUB' && node.key === 'hub-ideas' && Boolean(onAddIdea));
+                  connectMode
+                    ? connectable
+                    : nestMode
+                    ? movable || (Boolean(nestSourceKey) && Boolean(nestTargetAbility))
+                    : node.kind === 'IDEA' ||
+                      node.kind === 'ENTRY' ||
+                      node.kind === 'INTENT_PINNED' ||
+                      node.kind === 'NEXT_STEP' ||
+                      node.kind === 'ADD_HINT' ||
+                      node.kind === 'PROJECT_LEAF' ||
+                      (node.kind === 'HUB' && Boolean(onAddIdea || onAddEntry) && node.key !== 'hub-next');
 
                 return (
                   <div
@@ -944,39 +2629,159 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                       width: node.w,
                       height: node.h,
                     }}
-                    onClick={() => {
-                      if (node.kind === 'IDEA' && node.idea) {
-                        void handleIdeaCardClick(node.idea);
-                      } else if (
-                        (node.kind === 'ADD_HINT' || (node.kind === 'HUB' && node.key === 'hub-ideas')) &&
-                        onAddIdea
-                      ) {
-                        openComposerForParent(null);
-                      } else if (node.kind === 'PROJECT_LEAF' && node.projectItem) {
-                        if (onFocusProject) {
-                          onFocusProject(node.projectItem.id);
-                        } else if (onOpenProjectDetail) {
-                          onOpenProjectDetail(node.projectItem.id);
-                        }
-                      }
+                    onPointerDown={(e) => {
+                      if (!nestMode || !movable || e.button !== 0) return;
+                      e.stopPropagation();
+                      if (!canvasRef.current) return;
+                      const rect = canvasRef.current.getBoundingClientRect();
+                      const px = (e.clientX - rect.left) / scale;
+                      const py = (e.clientY - rect.top) / scale;
+                      setDraggingNest({
+                        key: node.key,
+                        startClientX: e.clientX,
+                        startClientY: e.clientY,
+                        origX: node.x,
+                        origY: node.y,
+                        grabOffsetX: Math.max(12, Math.min(node.w - 12, px - node.x)),
+                        grabOffsetY: Math.max(10, Math.min(node.h - 10, py - node.y)),
+                        pointerX: px,
+                        pointerY: py,
+                        moved: false,
+                      });
                     }}
-                    className={`absolute rounded-xl border px-2.5 py-1.5 shadow-2xs flex flex-col justify-center transition ${
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      // When nestMode + movable, pointerup already handles both click and drag!
+                      if (nestMode && movable) return;
+                      handleNodeNormalOrModeClick(node);
+                    }}
+                    className={`group absolute rounded-xl border px-2.5 py-1.5 shadow-2xs flex flex-col justify-center transition ${
                       node.bgClass
                     } ${node.borderClass} ${
-                      isClickable ? 'cursor-pointer hover:shadow-md hover:border-forest-500' : ''
-                    } ${isSelectedIdea ? 'ring-2 ring-gold-500 shadow-md' : ''} ${
-                      isLinkingSource ? 'ring-2 ring-violet-600 bg-violet-50' : ''
-                    } ${isLinkedToSource ? 'ring-2 ring-violet-400' : ''}`}
+                      nestMode && movable
+                        ? 'cursor-grab active:cursor-grabbing hover:border-emerald-500 hover:shadow-md'
+                        : isClickable
+                        ? 'cursor-pointer hover:shadow-md hover:border-forest-500'
+                        : ''
+                    } ${isSelected ? 'ring-2 ring-gold-500 shadow-md z-30' : 'z-20'} ${
+                      isConnectedToSelected ? 'ring-2 ring-violet-400' : ''
+                    } ${isNestSource ? 'ring-2 ring-emerald-600 bg-emerald-50 shadow-md z-30' : ''} ${
+                      isConnectSource ? 'ring-2 ring-violet-600 bg-violet-50 shadow-md z-30' : ''
+                    } ${isWireTargetNode ? 'ring-2 ring-violet-500 bg-violet-50/40 z-30' : ''} ${
+                      isNestHoverTarget ? 'ring-2 ring-emerald-500 bg-emerald-50/70 scale-[1.03] z-30' : ''
+                    } ${nestTargetAbility ? 'hover:ring-2 hover:ring-emerald-400' : ''} ${
+                      isInvalidNestChoice ? 'opacity-40 cursor-not-allowed' : ''
+                    } ${isDraggingThis ? 'opacity-45 border-dashed' : ''} ${
+                      hasParentOverride && !isNestSource ? 'border-l-4 border-l-emerald-600' : ''
+                    } ${isSearchActive && !matchesFilter ? 'opacity-25' : ''} ${
+                      isSearchActive && matchesFilter && node.kind !== 'ROOT' ? 'ring-2 ring-amber-400' : ''
+                    } ${isHighlighted ? 'ring-4 ring-amber-500 shadow-lg animate-pulse z-40' : ''}`}
                   >
+                    {/* Subtree Collapse / Expand Toggle Badge ([-] / [+N]) */}
+                    {!connectMode &&
+                      !nestMode &&
+                      node.kind !== 'ROOT' &&
+                      node.kind !== 'ADD_HINT' &&
+                      descendantCount > 0 && (
+                        <button
+                          type="button"
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleCollapseNode(node.key);
+                          }}
+                          title={
+                            isCollapsed
+                              ? L(`접힌 하위 노드 ${descendantCount}개 펼치기`, `子ノード ${descendantCount}件を展開`, `Expand ${descendantCount} hidden nodes`)
+                              : L('하위 가지 접기', '子分岐を折りたたむ', 'Collapse branch')
+                          }
+                          className={`absolute -right-2.5 top-1/2 -translate-y-1/2 z-30 h-5 px-1.5 rounded-full border text-[10px] font-mono font-bold shadow-xs transition flex items-center justify-center ${
+                            isCollapsed
+                              ? 'bg-amber-500 text-white border-amber-700 hover:bg-amber-600 scale-105'
+                              : 'bg-white text-charcoal-600 border-ivory-400 opacity-0 group-hover:opacity-100 hover:bg-ivory-100'
+                          }`}
+                        >
+                          {isCollapsed ? `+${descendantCount}` : '−'}
+                        </button>
+                      )}
+                    {/* Hover / Pick Badges for Nest & Connect modes */}
+                    {isNestSource && (
+                      <span className="absolute -top-5 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-emerald-700 text-white text-[10px] font-bold whitespace-nowrap shadow-xs pointer-events-none">
+                        {L('↳ 이동할 자식', '↳ 移動する子', '↳ Selected Child')}
+                      </span>
+                    )}
+                    {isNestHoverTarget && draggingNest && (
+                      <span className="absolute -top-5 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-emerald-700 text-white text-[10px] font-bold whitespace-nowrap shadow-xs pointer-events-none">
+                        {canNestTarget(draggingNest.key, node) === 'DETACH'
+                          ? L('↳ 기본 위치로 분리', '↳ 元の位置へ戻す', '↳ Detach to Default')
+                          : L('↳ 여기에 종속', '↳ ここに従属', '↳ Nest here')}
+                      </span>
+                    )}
+                    {isConnectSource && (
+                      <span className="absolute -top-5 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-violet-700 text-white text-[10px] font-bold whitespace-nowrap shadow-xs pointer-events-none">
+                        {L('🔗 연결 시작점', '🔗 接続元', '🔗 Wire Source')}
+                      </span>
+                    )}
+
+                    {/* 4-Way Port Handle Dots — shown when Connect Mode is active */}
+                    {connectMode &&
+                      connectable &&
+                      PORT_SIDES.map((side) => {
+                        const isHoveredPort =
+                          hoveredConnectTarget?.key === node.key && hoveredConnectTarget?.side === side;
+                        const isWireSourcePort =
+                          connectingWire?.fromKey === node.key && connectingWire?.fromSide === side;
+                        const isPendingPort =
+                          connectPendingSource?.key === node.key && connectPendingSource?.side === side;
+                        const posCls =
+                          side === 'top'
+                            ? 'left-1/2 -top-2 -translate-x-1/2'
+                            : side === 'bottom'
+                            ? 'left-1/2 -bottom-2 -translate-x-1/2'
+                            : side === 'left'
+                            ? '-left-2 top-1/2 -translate-y-1/2'
+                            : '-right-2 top-1/2 -translate-y-1/2';
+
+                        return (
+                          <div
+                            key={`${node.key}-port-${side}`}
+                            title={L('클릭 또는 드래그하여 연결', 'クリックまたはドラッグで接続', 'Click or drag to connect')}
+                            onPointerDown={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              const pt = getPortCoords(node.x, node.y, node.w, node.h, side);
+                              setConnectingWire({
+                                fromKey: node.key,
+                                fromSide: side,
+                                startClientX: e.clientX,
+                                startClientY: e.clientY,
+                                pointerX: pt.x,
+                                pointerY: pt.y,
+                                moved: false,
+                              });
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            className={`absolute ${posCls} w-3.5 h-3.5 rounded-full border-2 cursor-crosshair transition-all z-30 ${
+                              isHoveredPort || isWireSourcePort || isPendingPort
+                                ? 'bg-violet-600 border-white scale-125 opacity-100 ring-2 ring-violet-400'
+                                : connectingWire || connectPendingSource
+                                ? 'bg-white border-violet-500 opacity-100 scale-105'
+                                : 'bg-white border-violet-700 opacity-90 hover:bg-violet-600 hover:border-white hover:scale-125'
+                            }`}
+                          />
+                        );
+                      })}
+
+                    {/* Card Content */}
                     {node.kind === 'ROOT' ? (
-                      <div className="space-y-0.5 min-w-0">
+                      <div className="space-y-0.5 min-w-0 pointer-events-none">
                         <div className="font-bold text-xs leading-snug line-clamp-2">{node.title}</div>
                         {node.subtitle && (
                           <div className="text-[10px] opacity-85 truncate">{node.subtitle}</div>
                         )}
                       </div>
                     ) : node.kind === 'PROJECT_LEAF' && node.projectItem ? (
-                      <div className="space-y-0.5 min-w-0">
+                      <div className="space-y-0.5 min-w-0 pointer-events-none">
                         <div className="flex items-center justify-between gap-1">
                           <div className="flex items-center gap-1 min-w-0">
                             <span
@@ -1003,16 +2808,26 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                         )}
                       </div>
                     ) : (
-                      <div className="space-y-0.5 min-w-0">
+                      <div className="space-y-0.5 min-w-0 pointer-events-none">
                         <div className="flex items-center justify-between gap-1 min-w-0">
                           <span className="font-bold text-xs text-charcoal-900 truncate">
                             {node.title}
                           </span>
-                          {node.badge && (
-                            <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-white/90 border border-ivory-300 text-charcoal-800 whitespace-nowrap shrink-0">
-                              {node.badge}
-                            </span>
-                          )}
+                          <div className="flex items-center gap-1 shrink-0">
+                            {hasParentOverride && (
+                              <span
+                                title={L('다른 노드에 종속됨', '他ノードに従属', 'Nested under another node')}
+                                className="text-[9px] font-bold px-1 rounded bg-emerald-100 text-emerald-800 border border-emerald-300"
+                              >
+                                ↳
+                              </span>
+                            )}
+                            {node.badge && (
+                              <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-white/90 border border-ivory-300 text-charcoal-800 whitespace-nowrap">
+                                {node.badge}
+                              </span>
+                            )}
+                          </div>
                         </div>
                         {node.subtitle && (
                           <p className="text-[10px] text-charcoal-600 line-clamp-2 leading-tight">
@@ -1024,32 +2839,279 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                   </div>
                 );
               })}
+
+              {/* Trailing Dashed [+] Add Buttons on Each Branch's Last Node & Project Root */}
+              {!connectMode &&
+                !nestMode &&
+                layout.leafAddButtons.map((btn) => (
+                  <button
+                    key={btn.key}
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (btn.isRootSubtopicTrigger) {
+                        openComposerForNode(null, 'DIALOGUE_ME', true);
+                      } else {
+                        openComposerForNode(btn.parentNode);
+                      }
+                    }}
+                    style={{
+                      left: btn.x,
+                      top: btn.y,
+                      width: btn.size,
+                      height: btn.size,
+                    }}
+                    title={
+                      btn.isRootSubtopicTrigger
+                        ? L(
+                            '프로젝트 루트에서 새 독립 서브토픽 가지 추가',
+                            'プロジェクトルートから新規サブトピック分岐を追加',
+                            'Add new independent subtopic branch from Project Root'
+                          )
+                        : L(
+                            `[${btn.parentNode.title}] 끝에 새 노드 추가`,
+                            `「${btn.parentNode.title}」の先に新規追加`,
+                            `Add node after "${btn.parentNode.title}"`
+                          )
+                    }
+                    className={`absolute rounded-full border border-dashed bg-white/95 hover:text-white hover:border-solid hover:scale-110 shadow-xs flex items-center justify-center transition z-20 ${
+                      btn.isRootSubtopicTrigger
+                        ? 'border-purple-600 text-purple-800 hover:bg-purple-700'
+                        : 'border-forest-500 text-forest-800 hover:bg-forest-800'
+                    }`}
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                  </button>
+                ))}
+
+              {/* Floating Ghost Preview Card during Drag-and-Drop Nesting */}
+              {draggingNest?.moved && draggingGhostNode && (
+                <div
+                  style={{
+                    left: draggingNest.pointerX - draggingNest.grabOffsetX,
+                    top: draggingNest.pointerY - draggingNest.grabOffsetY,
+                    width: draggingGhostNode.w,
+                    height: draggingGhostNode.h,
+                  }}
+                  className={`fixed-ghost absolute rounded-xl border-2 border-emerald-500 px-2.5 py-1.5 shadow-xl opacity-85 pointer-events-none z-50 flex flex-col justify-center ${draggingGhostNode.bgClass}`}
+                >
+                  <div className="font-bold text-xs text-charcoal-900 truncate">
+                    {draggingGhostNode.title}
+                  </div>
+                  {draggingGhostNode.subtitle && (
+                    <p className="text-[10px] text-charcoal-600 truncate">
+                      {draggingGhostNode.subtitle}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
+
+          {/* Selected Custom Edge Label, Color & Delete Inspector Pill */}
+          {selectedEdge && (
+            <div className="sticky bottom-3 left-1/2 -translate-x-1/2 w-fit max-w-[95%] mx-auto z-40 px-3 py-2 rounded-2xl bg-charcoal-900 text-white text-xs font-bold shadow-xl flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-1">
+                {WIRE_COLOR_PRESETS.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => handleUpdateCustomEdge(selectedEdge.id, { color: c })}
+                    className={`w-4 h-4 rounded-full border-2 transition ${
+                      (selectedEdge.color || '#7C3AED') === c
+                        ? 'border-white scale-115'
+                        : 'border-transparent opacity-75 hover:opacity-100'
+                    }`}
+                    style={{ backgroundColor: c }}
+                    title={L('연결선 색상 변경', '接続線の色を変更', 'Change wire color')}
+                  />
+                ))}
+              </div>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleUpdateCustomEdge(selectedEdge.id, { label: wireLabelDraft });
+                }}
+                className="flex items-center gap-1"
+              >
+                <input
+                  type="text"
+                  value={wireLabelDraft}
+                  onChange={(e) => setWireLabelDraft(e.target.value)}
+                  placeholder={L('관계 메모 (예: 원인, 참고)', '関係メモ (例: 原因, 参考)', 'Label (e.g. cause, ref)')}
+                  className="px-2 py-0.5 rounded bg-white text-charcoal-900 text-[11px] font-medium w-36 focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  className="px-2 py-0.5 rounded bg-emerald-600 text-white text-[11px] font-bold hover:bg-emerald-500"
+                >
+                  {L('저장', '保存', 'Save')}
+                </button>
+              </form>
+              <div className="hidden sm:flex items-center gap-1">
+                {[
+                  L('원인', '原因', 'Cause'),
+                  L('참고', '参考', 'Ref'),
+                  L('블로커', '課題', 'Blocker'),
+                  L('파생', '派生', 'Derived'),
+                ].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => {
+                      setWireLabelDraft(preset);
+                      handleUpdateCustomEdge(selectedEdge.id, { label: preset });
+                    }}
+                    className="px-1.5 py-0.5 rounded bg-white/15 hover:bg-white/25 text-[10px] font-bold"
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => handleDeleteCustomEdge(selectedEdge.id)}
+                className="px-2 py-0.5 rounded bg-rose-600 text-white font-bold hover:bg-rose-500"
+              >
+                {L('삭제', '削除', 'Delete')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedEdgeId(null)}
+                className="opacity-80 hover:opacity-100"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Selected Idea Inspector & Graph Action Bar */}
-      {project && selectedIdea && (
+      {/* Selected Node Inspector & Graph Action Bar */}
+      {selectedNode && (
         <div className="p-3.5 bg-ivory-50 border-t border-ivory-300 space-y-2.5 text-xs">
           <div className="flex items-start justify-between gap-2 flex-wrap">
             <div className="space-y-1 min-w-0 flex-1">
               <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
-                  {L('선택된 아이디어', '選択中アイデア', 'Selected Idea')}
+                <span className="px-1.5 py-0.5 rounded bg-forest-100 text-forest-900 text-[10px] font-bold">
+                  {selectedNode.kind === 'IDEA'
+                    ? L('아이디어', 'アイデア', 'Idea')
+                    : selectedNode.kind === 'ENTRY'
+                    ? L('기록 로그', 'ログ', 'Log')
+                    : selectedNode.kind === 'INTENT_PINNED'
+                    ? L('최초 의도', '当初の目的', 'Intent')
+                    : selectedNode.kind === 'NEXT_STEP'
+                    ? L('Next Step', 'Next Step', 'Next Step')
+                    : L('노드 상세', 'ノード詳細', 'Node')}
                 </span>
-                <span className="font-bold text-sm text-charcoal-900">{selectedIdea.title}</span>
+                <span className="font-bold text-sm text-charcoal-900">{selectedNode.title}</span>
               </div>
-              {selectedIdea.note && (
-                <p className="text-charcoal-700 whitespace-pre-wrap">{selectedIdea.note}</p>
+              {editingEntryInline && selectedEntry ? (
+                <div className="space-y-1.5 pt-1">
+                  <textarea
+                    rows={3}
+                    autoFocus
+                    value={entryEditContent}
+                    onChange={(e) => setEntryEditContent(e.target.value)}
+                    onKeyDown={(e) => {
+                      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                        e.preventDefault();
+                        void handleSaveInlineEntryEdit();
+                      }
+                    }}
+                    className="w-full p-2 bg-white border border-forest-400 rounded-lg text-xs text-charcoal-900 focus:outline-none focus:ring-2 focus:ring-forest-500/40"
+                  />
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={isSavingEntryEdit || !entryEditContent.trim()}
+                      onClick={() => void handleSaveInlineEntryEdit()}
+                      className="px-2.5 py-1 rounded-lg bg-forest-800 text-white font-bold hover:bg-forest-900 disabled:opacity-50"
+                    >
+                      {L('수정 저장 (Ctrl+Enter)', '変更を保存', 'Save (Ctrl+Enter)')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingEntryInline(false)}
+                      className="px-2.5 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 font-bold hover:bg-ivory-100"
+                    >
+                      {L('취소', 'キャンセル', 'Cancel')}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                selectedNode.subtitle && (
+                  <p className="text-charcoal-700 whitespace-pre-wrap">{selectedNode.subtitle}</p>
+                )
               )}
 
-              {/* Connected Sibling Idea Chips */}
-              {(selectedIdea.related_idea_ids || []).length > 0 && (
+              {/* Active Nest Override Badge + Detach Button */}
+              {parentOverrides[selectedNode.key] && (
+                <div className="flex items-center gap-2 pt-1 flex-wrap">
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300 text-[11px] font-bold">
+                    <CornerDownRight className="w-3 h-3" />
+                    {parentOverrides[selectedNode.key] === ROOT_SUBTOPIC_KEY
+                      ? L('🌿 루트 직결 독립 서브토픽', '🌿 ルート直結サブトピック', '🌿 Root Subtopic')
+                      : `${L('종속 상위:', '従属親:', 'Nested under:')} ${
+                          layout.nodeMap.get(
+                            remapMindMapKey(parentOverrides[selectedNode.key], duplicateInitialEntryId)
+                          )?.title || ''
+                        }`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleDetachNodeToRoot(selectedNode.key)}
+                    className="px-2 py-0.5 rounded-lg bg-white border border-ivory-300 text-charcoal-700 font-bold text-[11px] hover:bg-ivory-100"
+                  >
+                    {L('원래 위치로 분리', '元の位置へ戻す', 'Detach to Default')}
+                  </button>
+                </div>
+              )}
+
+              {/* Shared Custom Edges connected to this Node */}
+              {selectedNodeEdges.length > 0 && (
                 <div className="flex items-center gap-1.5 flex-wrap pt-1">
                   <span className="text-[11px] font-bold text-violet-800 inline-flex items-center gap-1">
                     <Link2 className="w-3 h-3" />
-                    {L('연결된 아이디어:', '接続アイデア:', 'Linked:')}
+                    {L('연결선:', '接続線:', 'Wires:')}
+                  </span>
+                  {selectedNodeEdges.map((edge) => {
+                    const fKey = remapMindMapKey(edge.fromKey, duplicateInitialEntryId);
+                    const tKey = remapMindMapKey(edge.toKey, duplicateInitialEntryId);
+                    const otherKey = fKey === selectedNode.key ? tKey : fKey;
+                    const otherNode = layout.nodeMap.get(otherKey);
+                    return (
+                      <span
+                        key={edge.id}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-violet-100 text-violet-900 border border-violet-300 text-[11px] font-bold"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => setSelectedNodeKey(otherKey)}
+                          className="hover:underline"
+                        >
+                          {otherNode?.title || otherKey}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteCustomEdge(edge.id)}
+                          title={L('연결선 삭제', '接続線を削除', 'Remove wire')}
+                          className="hover:text-rose-700"
+                        >
+                          <Unlink className="w-3 h-3" />
+                        </button>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Legacy Idea <-> Idea Sibling Links (if any) */}
+              {selectedIdea && (selectedIdea.related_idea_ids || []).length > 0 && (
+                <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                  <span className="text-[11px] font-bold text-violet-800 inline-flex items-center gap-1">
+                    <Link2 className="w-3 h-3" />
+                    {L('상호 연결 아이디어:', '相互アイデア:', 'Linked Ideas:')}
                   </span>
                   {(selectedIdea.related_idea_ids || []).map((relId) => {
                     const rel = ideas.find((i) => i.id === relId);
@@ -1061,12 +3123,12 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                       >
                         <button
                           type="button"
-                          onClick={() => setSelectedIdeaId(rel.id)}
+                          onClick={() => setSelectedNodeKey(`idea-${rel.id}`)}
                           className="hover:underline"
                         >
                           {rel.title}
                         </button>
-                        {onToggleRelatedIdea && (
+                        {project && onToggleRelatedIdea && (
                           <button
                             type="button"
                             onClick={() => void onToggleRelatedIdea(selectedIdea.id, rel.id, project.id)}
@@ -1085,104 +3147,221 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
 
             <button
               type="button"
-              onClick={() => setSelectedIdeaId(null)}
+              onClick={() => setSelectedNodeKey(null)}
               className="p-1 rounded-lg hover:bg-ivory-200 text-charcoal-500"
             >
               <X className="w-4 h-4" />
             </button>
           </div>
 
+          {/* Quick Actions Footer */}
           <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-ivory-200">
-            {onAddIdea && (
-              <button
-                type="button"
-                onClick={() => openComposerForParent(selectedIdea.id)}
-                className="px-2.5 py-1 rounded-lg bg-forest-800 text-white font-bold hover:bg-forest-900 inline-flex items-center gap-1"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>{L('하위 아이디어 뻗기', '子アイデア追加', 'Add Sub-Idea')}</span>
-              </button>
-            )}
-
-            {onToggleRelatedIdea && (
-              <button
-                type="button"
-                onClick={() =>
-                  setLinkingSourceId((prev) => (prev === selectedIdea.id ? null : selectedIdea.id))
-                }
-                className={`px-2.5 py-1 rounded-lg border font-bold inline-flex items-center gap-1 ${
-                  linkingSourceId === selectedIdea.id
-                    ? 'bg-violet-700 text-white border-violet-800'
-                    : 'bg-white text-violet-800 border-violet-300 hover:bg-violet-50'
-                }`}
-              >
-                <Link2 className="w-3.5 h-3.5" />
-                <span>
-                  {linkingSourceId === selectedIdea.id
-                    ? L('연결 대상 선택 중...', '対象を選択中...', 'Selecting target...')
-                    : L('다른 아이디어와 연결', '他アイデアと接続', 'Link to Idea')}
-                </span>
-              </button>
-            )}
-
-            {onPromoteIdea && selectedIdea.status !== 'PROMOTED' && (
-              <button
-                type="button"
-                onClick={() => void onPromoteIdea(selectedIdea)}
-                className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 inline-flex items-center gap-1"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>{L('Next Step 승격', 'Next Stepへ昇格', 'Promote to Next Step')}</span>
-              </button>
-            )}
-
-            {onUpdateIdeaStatus && (
-              <button
-                type="button"
-                onClick={() =>
-                  void onUpdateIdeaStatus(
-                    selectedIdea,
-                    selectedIdea.status === 'ARCHIVED' ? 'OPEN' : 'ARCHIVED'
-                  )
-                }
-                className="px-2.5 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
-              >
-                {selectedIdea.status === 'ARCHIVED' ? (
-                  <>
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>{L('다시 열기', '再開', 'Reopen')}</span>
-                  </>
-                ) : (
-                  <>
-                    <Archive className="w-3.5 h-3.5" />
-                    <span>{L('보관', '保管', 'Archive')}</span>
-                  </>
-                )}
-              </button>
-            )}
-
-            {onDeleteIdea && (
+            {isNodeConnectable(selectedNode) && (
               <button
                 type="button"
                 onClick={() => {
-                  const hasChildren = ideas.some((i) => i.parent_idea_id === selectedIdea.id);
-                  const msg = hasChildren
-                    ? L(
-                        '이 아이디어와 연결된 하위 아이디어들도 함께 삭제됩니다. 삭제하시겠습니까?',
-                        'このアイデアに紐づく子アイデアも同時に削除されます。削除しますか？',
-                        'Sub-ideas under this node will also be deleted. Delete?'
-                      )
-                    : L('이 아이디어를 삭제하시겠습니까?', 'このアイデアを削除しますか？', 'Delete this idea?');
-                  if (!confirm(msg)) return;
-                  void onDeleteIdea(selectedIdea);
-                  setSelectedIdeaId(null);
-                  if (linkingSourceId === selectedIdea.id) setLinkingSourceId(null);
+                  setNestMode(false);
+                  setNestSourceKey(null);
+                  setConnectMode(true);
+                  setConnectPendingSource({ key: selectedNode.key });
                 }}
-                className="px-2.5 py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center gap-1"
+                className="px-2.5 py-1 rounded-lg bg-white border border-violet-300 text-violet-800 font-bold hover:bg-violet-50 inline-flex items-center gap-1"
               >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>{L('삭제', '削除', 'Delete')}</span>
+                <Link2 className="w-3.5 h-3.5" />
+                <span>{L('이 노드에서 연결 시작', 'ここから接続開始', 'Connect From Here')}</span>
               </button>
+            )}
+
+            {isNodeMovable(selectedNode) && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConnectMode(false);
+                    setConnectPendingSource(null);
+                    setNestMode(true);
+                    setNestSourceKey(selectedNode.key);
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-white border border-emerald-300 text-emerald-800 font-bold hover:bg-emerald-50 inline-flex items-center gap-1"
+                >
+                  <CornerDownRight className="w-3.5 h-3.5" />
+                  <span>{L('다른 노드 아래로 종속', '他ノードへ従属', 'Nest Under Another')}</span>
+                </button>
+                {project && parentOverrides[selectedNode.key] !== ROOT_SUBTOPIC_KEY && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      pushUndoSnapshot();
+                      const nextParents = {
+                        ...parentOverrides,
+                        [selectedNode.key]: ROOT_SUBTOPIC_KEY,
+                      };
+                      setParentOverrides(nextParents);
+                      persistLayout(customEdges, nextParents);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-white border border-purple-300 text-purple-800 font-bold hover:bg-purple-50 inline-flex items-center gap-1"
+                  >
+                    <GitBranch className="w-3.5 h-3.5" />
+                    <span>{L('🌿 루트 서브토픽으로 분리', '🌿 ルートサブトピック化', '🌿 Make Root Subtopic')}</span>
+                  </button>
+                )}
+              </>
+            )}
+
+            {project && (onAddIdea || onAddEntry) && isNodeMovable(selectedNode) && (
+              <button
+                type="button"
+                onClick={() => openComposerForNode(selectedNode)}
+                className="px-2.5 py-1 rounded-lg bg-forest-800 text-white font-bold hover:bg-forest-900 inline-flex items-center gap-1"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>{L('이 노드에서 가지 뻗기', 'ここから分岐を追加', 'Add Child Node')}</span>
+              </button>
+            )}
+
+            {project && onJumpToTimeline && (selectedEntry || selectedIdea) && (
+              <button
+                type="button"
+                onClick={() => onJumpToTimeline(selectedNode.key)}
+                className="px-2.5 py-1 rounded-lg bg-white border border-sky-300 text-sky-900 font-bold hover:bg-sky-50 inline-flex items-center gap-1"
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+                <span>{L('타임라인에서 보기', 'タイムラインで見る', 'View in Timeline')}</span>
+              </button>
+            )}
+
+            {project && selectedEntry && (
+              <>
+                {onEditEntry && Number(selectedEntry.author_id) === Number(currentUserId) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEntryEditContent(selectedEntry.content);
+                      setEditingEntryInline((prev) => !prev);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-800 font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
+                  >
+                    <Edit2 className="w-3.5 h-3.5" />
+                    <span>{L('내용 수정', '内容を編集', 'Edit')}</span>
+                  </button>
+                )}
+
+                {onAddEntry && selectedEntry.entry_type !== 'PROGRESS' && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openComposerForNode(selectedNode, 'PROGRESS', false, `ENTRY:${selectedEntry.id}`)
+                    }
+                    className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 inline-flex items-center gap-1"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>{L('완료 기록', '完了記録', 'Mark Done')}</span>
+                  </button>
+                )}
+
+                {onPromoteEntryToNextStep &&
+                  !isTopicMilestoneEntry(selectedEntry) &&
+                  !isCurrentFocusIntentEntry(selectedEntry) && (
+                    <button
+                      type="button"
+                      onClick={() => void onPromoteEntryToNextStep(selectedEntry)}
+                      className="px-2.5 py-1 rounded-lg bg-amber-500 text-white font-bold hover:bg-amber-600 inline-flex items-center gap-1"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>{L('다음 할 일(토픽) 승격', 'Next Step昇格', 'Promote to Topic')}</span>
+                    </button>
+                  )}
+
+                {onDeleteEntry &&
+                  (Number(selectedEntry.author_id) === Number(currentUserId) ||
+                    Number(project.created_by) === Number(currentUserId)) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (
+                          !confirm(
+                            L(
+                              '이 기록을 삭제하시겠습니까? 하위 노드는 자동으로 상위 가지에 이어집니다.',
+                              'この記録を削除しますか？（子ノードは自動的に親へ引き継がれます）',
+                              'Delete this log? Child nodes will automatically re-attach to its parent.'
+                            )
+                          )
+                        ) {
+                          return;
+                        }
+                        void onDeleteEntry(selectedEntry.id);
+                        setSelectedNodeKey(null);
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>{L('삭제', '削除', 'Delete')}</span>
+                    </button>
+                  )}
+              </>
+            )}
+
+            {project && selectedIdea && (
+              <>
+                {onPromoteIdea && selectedIdea.status !== 'PROMOTED' && (
+                  <button
+                    type="button"
+                    onClick={() => void onPromoteIdea(selectedIdea)}
+                    className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 inline-flex items-center gap-1"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>{L('Next Step 승격', 'Next Stepへ昇格', 'Promote to Next Step')}</span>
+                  </button>
+                )}
+
+                {onUpdateIdeaStatus && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void onUpdateIdeaStatus(
+                        selectedIdea,
+                        selectedIdea.status === 'ARCHIVED' ? 'OPEN' : 'ARCHIVED'
+                      )
+                    }
+                    className="px-2.5 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
+                  >
+                    {selectedIdea.status === 'ARCHIVED' ? (
+                      <>
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>{L('다시 열기', '再開', 'Reopen')}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Archive className="w-3.5 h-3.5" />
+                        <span>{L('보관', '保管', 'Archive')}</span>
+                      </>
+                    )}
+                  </button>
+                )}
+
+                {onDeleteIdea && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const hasChildren = ideas.some((i) => i.parent_idea_id === selectedIdea.id);
+                      const msg = hasChildren
+                        ? L(
+                            '이 아이디어와 연결된 하위 아이디어들도 함께 삭제됩니다. 삭제하시겠습니까?',
+                            'このアイデアに紐づく子アイデアも同時に削除されます。削除しますか？',
+                            'Sub-ideas under this node will also be deleted. Delete?'
+                          )
+                        : L('이 아이디어를 삭제하시겠습니까?', 'このアイデアを削除しますか？', 'Delete this idea?');
+                      if (!confirm(msg)) return;
+                      void onDeleteIdea(selectedIdea);
+                      setSelectedNodeKey(null);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center gap-1"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>{L('삭제', '削除', 'Delete')}</span>
+                  </button>
+                )}
+              </>
             )}
           </div>
         </div>

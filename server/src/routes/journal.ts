@@ -294,9 +294,9 @@ function sanitizeMindMapPositions(raw: unknown): Record<string, { x: number; y: 
 
 function sanitizeMindMapEdges(
   raw: unknown
-): Array<{ id: string; fromKey: string; fromSide: string; toKey: string; toSide: string; color?: string }> {
+): Array<{ id: string; fromKey: string; fromSide: string; toKey: string; toSide: string; color?: string; label?: string }> {
   if (!Array.isArray(raw)) return [];
-  const edges: Array<{ id: string; fromKey: string; fromSide: string; toKey: string; toSide: string; color?: string }> = [];
+  const edges: Array<{ id: string; fromKey: string; fromSide: string; toKey: string; toSide: string; color?: string; label?: string }> = [];
   const seen = new Set<string>();
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue;
@@ -313,7 +313,11 @@ function sanitizeMindMapEdges(
       typeof item.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(item.color.trim())
         ? item.color.trim()
         : undefined;
-    edges.push({ id, fromKey, fromSide, toKey, toSide, ...(color ? { color } : {}) });
+    const label =
+      typeof item.label === 'string' && item.label.trim()
+        ? item.label.trim().slice(0, 40)
+        : undefined;
+    edges.push({ id, fromKey, fromSide, toKey, toSide, ...(color ? { color } : {}), ...(label ? { label } : {}) });
   }
   return edges;
 }
@@ -358,6 +362,219 @@ function formatMindMapLayoutRow(row: any) {
     parent_overrides = {};
   }
   return { positions, custom_edges, parent_overrides };
+}
+
+const NEXT_STEP_TOPIC_MARKER = '__NEXT_STEP_TOPIC__';
+const CURRENT_FOCUS_INTENT_MARKER = '__CURRENT_FOCUS_INTENT__';
+
+function cleanTopicTitle(raw: string): string {
+  return String(raw || '')
+    .replace(/^💡\s*→\s*Next Step:\s*/i, '')
+    .replace(/^🎯\s*(?:\[[^\]]+\]\s*)?/, '')
+    .trim();
+}
+
+function setProjectParentOverride(
+  projectId: number,
+  userId: number,
+  childKey: string,
+  parentKey: string
+) {
+  const ck = String(childKey || '').trim();
+  const pk = String(parentKey || '').trim();
+  if (!ck || !pk || ck === pk) return;
+  const row = db
+    .prepare('SELECT positions_json, edges_json, parent_overrides_json FROM journal_mindmap_layouts WHERE project_id = ?')
+    .get(projectId);
+  const layout = formatMindMapLayoutRow(row);
+  layout.parent_overrides[ck] = pk;
+  db.prepare(`
+    INSERT INTO journal_mindmap_layouts (project_id, positions_json, edges_json, parent_overrides_json, updated_by, updated_at)
+    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(project_id) DO UPDATE SET
+      parent_overrides_json = excluded.parent_overrides_json,
+      updated_by = excluded.updated_by,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(
+    projectId,
+    JSON.stringify(layout.positions),
+    JSON.stringify(layout.custom_edges),
+    JSON.stringify(layout.parent_overrides),
+    userId
+  );
+}
+
+/**
+ * When a node (entry or idea) is deleted, splice it out of parent_overrides
+ * (re-parenting its children to its own parent so branches never snap),
+ * and purge orphaned positions and custom_edges referencing the deleted key.
+ */
+function cleanupDeletedNodeFromMindMapLayout(
+  projectId: number,
+  deletedKey: string,
+  userId: number
+) {
+  const row = db
+    .prepare('SELECT positions_json, edges_json, parent_overrides_json FROM journal_mindmap_layouts WHERE project_id = ?')
+    .get(projectId);
+  if (!row) return;
+  const layout = formatMindMapLayoutRow(row) as {
+    positions: Record<string, { x: number; y: number }>;
+    custom_edges: Array<{ id: string; fromKey: string; fromSide: string; toKey: string; toSide: string; color?: string; label?: string }>;
+    parent_overrides: Record<string, string>;
+  };
+
+  let changed = false;
+  const grandParent = layout.parent_overrides[deletedKey];
+  if (deletedKey in layout.parent_overrides) {
+    delete layout.parent_overrides[deletedKey];
+    changed = true;
+  }
+  for (const [childKey, parentKey] of Object.entries(layout.parent_overrides)) {
+    if (parentKey === deletedKey) {
+      if (grandParent && grandParent !== childKey) {
+        layout.parent_overrides[childKey] = grandParent;
+      } else {
+        delete layout.parent_overrides[childKey];
+      }
+      changed = true;
+    }
+  }
+  if (deletedKey in layout.positions) {
+    delete layout.positions[deletedKey];
+    changed = true;
+  }
+  const nextEdges = layout.custom_edges.filter(
+    (e) => e.fromKey !== deletedKey && e.toKey !== deletedKey
+  );
+  if (nextEdges.length !== layout.custom_edges.length) {
+    layout.custom_edges = nextEdges;
+    changed = true;
+  }
+
+  if (!changed) return;
+  db.prepare(`
+    UPDATE journal_mindmap_layouts
+    SET positions_json = ?, edges_json = ?, parent_overrides_json = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE project_id = ?
+  `).run(
+    JSON.stringify(layout.positions),
+    JSON.stringify(layout.custom_edges),
+    JSON.stringify(layout.parent_overrides),
+    userId,
+    projectId
+  );
+}
+
+function ensureAndChainNextActionTopic(
+  projectId: number,
+  prevNextAction: string | null | undefined,
+  newNextAction: string | null | undefined,
+  newNextActionDate: string | null | undefined,
+  userId: number
+): number | null {
+  const topicRows = db
+    .prepare(
+      `SELECT id, content, speaker_name FROM journal_entries
+       WHERE project_id = ? AND (speaker_name = ? OR content LIKE '💡 → Next Step:%')
+       ORDER BY id ASC`
+    )
+    .all(projectId, NEXT_STEP_TOPIC_MARKER) as Array<{
+    id: number;
+    content: string;
+    speaker_name: string | null;
+  }>;
+
+  const todayJst = getJstDateStr();
+  const timeJst = getJstTimeStr();
+  const prevTrimmed = prevNextAction ? String(prevNextAction).trim() : '';
+  const newTrimmed = newNextAction ? String(newNextAction).trim() : '';
+
+  if (topicRows.length === 0 && prevTrimmed && newTrimmed && prevTrimmed !== newTrimmed) {
+    const prevInfo = db
+      .prepare(
+        `INSERT INTO journal_entries (project_id, entry_type, speaker_name, content, entry_date, entry_time, author_id)
+         VALUES (?, 'INTENT', ?, ?, ?, ?, ?)`
+      )
+      .run(projectId, NEXT_STEP_TOPIC_MARKER, prevTrimmed, todayJst, timeJst, userId);
+    topicRows.push({
+      id: Number(prevInfo.lastInsertRowid),
+      content: prevTrimmed,
+      speaker_name: NEXT_STEP_TOPIC_MARKER,
+    });
+  }
+
+  if (newTrimmed) {
+    const lastTopic = topicRows.length > 0 ? topicRows[topicRows.length - 1] : null;
+    if (!lastTopic || cleanTopicTitle(lastTopic.content) !== newTrimmed) {
+      const dueDate =
+        newNextActionDate && /^\d{4}-\d{2}-\d{2}$/.test(String(newNextActionDate).trim())
+          ? String(newNextActionDate).trim()
+          : null;
+      const info = db
+        .prepare(
+          `INSERT INTO journal_entries (project_id, entry_type, speaker_name, content, entry_date, entry_time, due_date, author_id)
+           VALUES (?, 'INTENT', ?, ?, ?, ?, ?, ?)`
+        )
+        .run(projectId, NEXT_STEP_TOPIC_MARKER, newTrimmed, todayJst, timeJst, dueDate, userId);
+      const newTopicId = Number(info.lastInsertRowid);
+      if (lastTopic) {
+        setProjectParentOverride(projectId, userId, `entry-${newTopicId}`, `entry-${lastTopic.id}`);
+      }
+      return newTopicId;
+    }
+    return lastTopic.id;
+  }
+
+  return topicRows.length > 0 ? topicRows[topicRows.length - 1].id : null;
+}
+
+function ensureAndChainIntentFocus(
+  projectId: number,
+  initialIntent: string | null | undefined,
+  currentIntent: string | null | undefined,
+  intentModified: number | boolean | null | undefined,
+  userId: number
+): number | null {
+  const curTrimmed = currentIntent ? String(currentIntent).trim() : '';
+  const initTrimmed = initialIntent ? String(initialIntent).trim() : '';
+  const isMod =
+    Number(intentModified) === 1 ||
+    (initTrimmed !== '' && curTrimmed !== '' && initTrimmed !== curTrimmed);
+  if (!curTrimmed || !isMod) return null;
+
+  const focusRows = db
+    .prepare(
+      `SELECT id, content FROM journal_entries
+       WHERE project_id = ? AND entry_type = 'INTENT' AND speaker_name = ?
+       ORDER BY id ASC`
+    )
+    .all(projectId, CURRENT_FOCUS_INTENT_MARKER) as Array<{
+    id: number;
+    content: string;
+  }>;
+
+  const lastFocus = focusRows.length > 0 ? focusRows[focusRows.length - 1] : null;
+  if (!lastFocus || String(lastFocus.content || '').trim() !== curTrimmed) {
+    const todayJst = getJstDateStr();
+    const timeJst = getJstTimeStr();
+    const info = db
+      .prepare(
+        `INSERT INTO journal_entries (project_id, entry_type, speaker_name, content, entry_date, entry_time, author_id)
+         VALUES (?, 'INTENT', ?, ?, ?, ?, ?)`
+      )
+      .run(projectId, CURRENT_FOCUS_INTENT_MARKER, curTrimmed, todayJst, timeJst, userId);
+    const newFocusId = Number(info.lastInsertRowid);
+    const parentKey = lastFocus
+      ? `entry-${lastFocus.id}`
+      : initTrimmed
+      ? 'intent-pinned'
+      : 'proj-root';
+    setProjectParentOverride(projectId, userId, `entry-${newFocusId}`, parentKey);
+    return newFocusId;
+  }
+
+  return lastFocus.id;
 }
 
 /**
@@ -519,6 +736,83 @@ router.get('/overview', authenticateToken, (req: Request, res: Response) => {
       }
     }
 
+    const fetchOverviewEntries = () =>
+      db.prepare(`
+        SELECT e.id, e.project_id, e.entry_type, e.speaker_name, e.content, e.entry_date, e.entry_time, e.due_date, e.due_time, e.completed_target_type, e.completed_target_id, e.author_id, e.created_at, u.name as author_name
+        FROM journal_entries e
+        INNER JOIN journal_projects p ON p.id = e.project_id
+        LEFT JOIN users u ON e.author_id = u.id
+        WHERE (
+          p.created_by = ?
+          OR (
+            p.mode != 'SOLO'
+            AND EXISTS (SELECT 1 FROM journal_project_members m WHERE m.project_id = p.id AND m.user_id = ?)
+          )
+        )
+        ORDER BY e.id ASC
+      `).all(userId, userId) as any[];
+
+    let allEntryRows = fetchOverviewEntries();
+
+    // Check in-memory first to avoid N+1 SQLite queries on every /overview load
+    const rawEntriesByProjForCheck = new Map<number, any[]>();
+    for (const row of allEntryRows) {
+      const pid = Number(row.project_id);
+      const arr = rawEntriesByProjForCheck.get(pid) || [];
+      arr.push(row);
+      rawEntriesByProjForCheck.set(pid, arr);
+    }
+    let didBackfill = false;
+    for (const rp of rawProjects) {
+      const pid = Number(rp.id);
+      const pEntries = rawEntriesByProjForCheck.get(pid) || [];
+      const nextAct = rp.next_action ? String(rp.next_action).trim() : '';
+      if (nextAct) {
+        const topicEntries = pEntries.filter(
+          (e) =>
+            e.speaker_name === NEXT_STEP_TOPIC_MARKER ||
+            String(e.content || '').startsWith('💡 → Next Step:')
+        );
+        const lastTopic = topicEntries.length > 0 ? topicEntries[topicEntries.length - 1] : null;
+        if (!lastTopic || cleanTopicTitle(lastTopic.content) !== nextAct) {
+          ensureAndChainNextActionTopic(
+            pid,
+            null,
+            nextAct,
+            rp.next_action_date || null,
+            Number(rp.created_by) || userId
+          );
+          didBackfill = true;
+        }
+      }
+      const curIntent = rp.intent_summary ? String(rp.intent_summary).trim() : '';
+      const initIntent = (rp.initial_intent_summary ?? rp.intent_summary)
+        ? String(rp.initial_intent_summary ?? rp.intent_summary).trim()
+        : '';
+      const isModIntent =
+        Number(rp.intent_modified) === 1 ||
+        (initIntent !== '' && curIntent !== '' && initIntent !== curIntent);
+      if (curIntent && isModIntent) {
+        const focusEntries = pEntries.filter(
+          (e) => e.entry_type === 'INTENT' && e.speaker_name === CURRENT_FOCUS_INTENT_MARKER
+        );
+        const lastFocus = focusEntries.length > 0 ? focusEntries[focusEntries.length - 1] : null;
+        if (!lastFocus || String(lastFocus.content || '').trim() !== curIntent) {
+          ensureAndChainIntentFocus(
+            pid,
+            initIntent,
+            curIntent,
+            rp.intent_modified,
+            Number(rp.created_by) || userId
+          );
+          didBackfill = true;
+        }
+      }
+    }
+    if (didBackfill) {
+      allEntryRows = fetchOverviewEntries();
+    }
+
     const recentActivityRows = db.prepare(`
       SELECT e.project_id, e.entry_date, COUNT(*) as cnt
       FROM journal_entries e
@@ -543,21 +837,6 @@ router.get('/overview', authenticateToken, (req: Request, res: Response) => {
       }
       byDate[row.entry_date] = row.cnt;
     }
-
-    const allEntryRows = db.prepare(`
-      SELECT e.id, e.project_id, e.entry_type, e.speaker_name, e.content, e.entry_date, e.entry_time, e.due_date, e.due_time, e.completed_target_type, e.completed_target_id, e.author_id, e.created_at, u.name as author_name
-      FROM journal_entries e
-      INNER JOIN journal_projects p ON p.id = e.project_id
-      LEFT JOIN users u ON e.author_id = u.id
-      WHERE (
-        p.created_by = ?
-        OR (
-          p.mode != 'SOLO'
-          AND EXISTS (SELECT 1 FROM journal_project_members m WHERE m.project_id = p.id AND m.user_id = ?)
-        )
-      )
-      ORDER BY e.id ASC
-    `).all(userId, userId) as any[];
 
     const openRevisionRows = db.prepare(`
       SELECT r.*, u.name as requester_name
@@ -780,6 +1059,15 @@ router.post('/projects', authenticateToken, (req: Request, res: Response) => {
           VALUES (?, 'INTENT', ?, ?, ?, ?)
         `).run(newId, trimmedIntent, todayJst, timeJst, userId);
       }
+      if (next_action && String(next_action).trim()) {
+        ensureAndChainNextActionTopic(
+          newId,
+          null,
+          String(next_action).trim(),
+          next_action_date ? String(next_action_date).trim() : null,
+          userId
+        );
+      }
 
       return newId;
     });
@@ -834,6 +1122,22 @@ router.get('/projects/:id', authenticateToken, (req: Request, res: Response) => 
     }
 
     const members = getProjectMembers(projectId);
+    if (project.next_action && String(project.next_action).trim()) {
+      ensureAndChainNextActionTopic(
+        projectId,
+        null,
+        String(project.next_action).trim(),
+        project.next_action_date || null,
+        Number(project.created_by) || userId
+      );
+    }
+    ensureAndChainIntentFocus(
+      projectId,
+      project.initial_intent_summary ?? project.intent_summary,
+      project.intent_summary,
+      project.intent_modified,
+      Number(project.created_by) || userId
+    );
     const { turn_state, resolved_partner_name, active_turn_user_name } = resolveViewerTurnPerspective(
       project,
       userId,
@@ -1054,6 +1358,13 @@ router.patch('/projects/:id', authenticateToken, (req: Request, res: Response) =
       nowJst,
       projectId
     );
+
+    if (nextAction && nextAction !== existing.next_action) {
+      ensureAndChainNextActionTopic(projectId, existing.next_action, nextAction, nextActionDate, userId);
+    }
+    if (body.intent_summary !== undefined && nextIntent && nextIntent !== existing.intent_summary) {
+      ensureAndChainIntentFocus(projectId, nextInitialIntent, nextIntent, nextIntentModified, userId);
+    }
 
     const updated = db.prepare('SELECT * FROM journal_projects WHERE id = ?').get(projectId) as any;
 
@@ -1470,6 +1781,17 @@ router.post('/projects/:id/entries', authenticateToken, (req: Request, res: Resp
     const members = getProjectMembers(projectId);
 
     const tx = db.transaction(() => {
+      const updatedNextAction = next_action !== undefined ? (next_action ? String(next_action).trim() : null) : existing.next_action;
+      if (updatedNextAction) {
+        ensureAndChainNextActionTopic(
+          projectId,
+          existing.next_action,
+          updatedNextAction,
+          existing.next_action_date || null,
+          userId
+        );
+      }
+
       const info = db.prepare(`
         INSERT INTO journal_entries (project_id, entry_type, speaker_name, content, entry_date, entry_time, due_date, due_time, completed_target_type, completed_target_id, author_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1486,6 +1808,15 @@ router.post('/projects/:id/entries', authenticateToken, (req: Request, res: Resp
         validTargetId,
         userId
       );
+      const insertedEntryId = Number(info.lastInsertRowid);
+      if (req.body?.parent_node_key && String(req.body.parent_node_key).trim()) {
+        setProjectParentOverride(
+          projectId,
+          userId,
+          `entry-${insertedEntryId}`,
+          String(req.body.parent_node_key).trim()
+        );
+      }
 
       const updatedTurn = next_turn_state && VALID_TURN_STATES.has(next_turn_state) ? next_turn_state : existing.turn_state;
       const updatedActiveTurnUserId = next_turn_state
@@ -1493,8 +1824,6 @@ router.post('/projects/:id/entries', authenticateToken, (req: Request, res: Resp
         : existing.active_turn_user_id
         ? Number(existing.active_turn_user_id)
         : null;
-
-      const updatedNextAction = next_action !== undefined ? (next_action ? String(next_action).trim() : null) : existing.next_action;
 
       db.prepare(`
         UPDATE journal_projects
@@ -1506,7 +1835,7 @@ router.post('/projects/:id/entries', authenticateToken, (req: Request, res: Resp
         WHERE id = ?
       `).run(updatedTurn, updatedActiveTurnUserId, updatedNextAction, nowJst, projectId);
 
-      return Number(info.lastInsertRowid);
+      return insertedEntryId;
     });
 
     const entryId = tx();
@@ -1884,7 +2213,10 @@ router.delete('/entries/:entryId', authenticateToken, (req: Request, res: Respon
       return;
     }
 
-    db.prepare('DELETE FROM journal_entries WHERE id = ?').run(entryId);
+    db.transaction(() => {
+      db.prepare('DELETE FROM journal_entries WHERE id = ?').run(entryId);
+      cleanupDeletedNodeFromMindMapLayout(Number(entry.project_id), `entry-${entryId}`, userId);
+    })();
     notifyProjectPeers(
       {
         id: Number(entry.project_id),
@@ -1955,6 +2287,14 @@ router.post('/projects/:id/ideas', authenticateToken, (req: Request, res: Respon
       );
 
       const newIdeaId = Number(info.lastInsertRowid);
+      if (!validParentId && req.body?.parent_node_key && String(req.body.parent_node_key).trim()) {
+        setProjectParentOverride(
+          projectId,
+          userId,
+          `idea-${newIdeaId}`,
+          String(req.body.parent_node_key).trim()
+        );
+      }
       for (const targetId of validRelatedIds) {
         const targetRow = db
           .prepare('SELECT related_idea_ids FROM journal_ideas WHERE id = ? AND project_id = ?')
@@ -2099,6 +2439,9 @@ router.patch('/ideas/:ideaId', authenticateToken, (req: Request, res: Response) 
       }
 
       if (promoteToNextStep) {
+        const prevProj = db.prepare('SELECT next_action FROM journal_projects WHERE id = ?').get(projectId) as
+          | { next_action?: string | null }
+          | undefined;
         db.prepare(`
           UPDATE journal_projects
           SET next_action = ?, turn_state = CASE WHEN turn_state = 'DONE' THEN 'MY_TURN' ELSE turn_state END,
@@ -2106,10 +2449,7 @@ router.patch('/ideas/:ideaId', authenticateToken, (req: Request, res: Response) 
           WHERE id = ?
         `).run(nextTitle, nowJst, projectId);
 
-        db.prepare(`
-          INSERT INTO journal_entries (project_id, entry_type, content, entry_date, entry_time, author_id)
-          VALUES (?, 'INTENT', ?, ?, ?, ?)
-        `).run(projectId, `💡 → Next Step: ${nextTitle}`, todayJst, timeJst, userId);
+        ensureAndChainNextActionTopic(projectId, prevProj?.next_action || null, nextTitle, null, userId);
       } else {
         db.prepare('UPDATE journal_projects SET last_activity_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(nowJst, projectId);
       }
@@ -2180,6 +2520,7 @@ router.delete('/ideas/:ideaId', authenticateToken, (req: Request, res: Response)
     const projectId = Number(existing.project_id);
     db.transaction(() => {
       db.prepare('DELETE FROM journal_ideas WHERE id = ?').run(ideaId);
+      cleanupDeletedNodeFromMindMapLayout(projectId, `idea-${ideaId}`, userId);
       const remaining = db
         .prepare('SELECT id, related_idea_ids FROM journal_ideas WHERE project_id = ?')
         .all(projectId) as Array<{ id: number; related_idea_ids?: string }>;

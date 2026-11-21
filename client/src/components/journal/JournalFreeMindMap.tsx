@@ -2,17 +2,26 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLanguage } from '../../context/LanguageContext';
 import {
   Archive,
+  Check,
+  CheckCircle2,
+  Copy,
   CornerDownRight,
   Crosshair,
+  Download,
+  Edit2,
   ExternalLink,
   GitBranch,
   Link2,
   Lock,
+  Maximize2,
+  MessageSquare,
   Move,
   Plus,
   RotateCcw,
+  Search,
   Sparkles,
   Trash2,
+  Undo2,
   Users,
   X,
   ZoomIn,
@@ -29,6 +38,34 @@ import {
   PortSide,
   TurnState,
 } from './types';
+import {
+  CreateJournalEntryPayload,
+  CreateJournalIdeaPayload,
+  ObstacleBox,
+  PORT_SIDES,
+  ROOT_SUBTOPIC_KEY,
+  WIRE_COLOR_PRESETS,
+  buildDirectionalBezier,
+  buildMindMapMarkdown,
+  buildRelatedIdeaWires,
+  buildSmartFreeMapPath,
+  chooseFacingPorts,
+  cleanTopicMilestoneTitle,
+  computeSubtreeCollapseState,
+  computeTopicAndDialogueDefaultParents,
+  downloadMindMapAsPng,
+  findDuplicateInitialIntentEntryId,
+  getDefaultComposerKindForNode,
+  getPortCoords,
+  getPortOutVector,
+  getWsFreeMindMapStorageKey,
+  isCurrentFocusIntentEntry,
+  isDescendantInParentMap,
+  isTopicMilestoneEntry,
+  remapMindMapKey,
+  wouldCycleInParentMap,
+} from './mindmapUtils';
+import { MindMapNodeComposer } from './MindMapNodeComposer';
 
 interface JournalFreeMindMapProps {
   /** Single-project mode when provided; workspace overview mode when null */
@@ -40,15 +77,17 @@ interface JournalFreeMindMapProps {
   onFocusProject?: (projectId: number | null) => void;
   onOpenProjectDetail?: (projectId: number) => void;
   onSaveLayout?: (projectId: number, layout: MindMapLayoutData) => Promise<void>;
-  onAddIdea?: (payload: {
-    projectId: number;
-    title: string;
-    note: string | null;
-    parent_idea_id: number | null;
-  }) => Promise<void>;
+  onAddIdea?: (payload: CreateJournalIdeaPayload) => Promise<JournalIdea | null | void>;
+  onAddEntry?: (payload: CreateJournalEntryPayload) => Promise<JournalEntry | null | void>;
+  onEditEntry?: (entry: JournalEntry, updates: { content: string; speaker_name?: string | null }) => Promise<void>;
+  onDeleteEntry?: (entryId: number) => Promise<void>;
+  onPromoteEntryToNextStep?: (entry: JournalEntry) => Promise<void>;
   onPromoteIdea?: (idea: JournalIdea) => Promise<void>;
   onUpdateIdeaStatus?: (idea: JournalIdea, status: IdeaStatus) => Promise<void>;
   onDeleteIdea?: (idea: JournalIdea) => Promise<void>;
+  onJumpToTimeline?: (targetKey: string) => void;
+  focusNodeKey?: string | null;
+  onConsumedFocusNode?: () => void;
 }
 
 interface FreeNodeDef {
@@ -74,73 +113,76 @@ const CANVAS_W = 2400;
 const CANVAS_H = 1600;
 const CENTER_X = CANVAS_W / 2;
 const CENTER_Y = CANVAS_H / 2;
-const ZOOM_STEPS = [0.6, 0.75, 0.9, 1, 1.15, 1.3];
-const PORT_SIDES: PortSide[] = ['top', 'right', 'bottom', 'left'];
+const WORLD_MIN_X = -2400;
+const WORLD_MAX_X = 6000;
+const WORLD_MIN_Y = -1800;
+const WORLD_MAX_Y = 4800;
+const ZOOM_STEPS = [0.45, 0.6, 0.75, 0.9, 1, 1.15, 1.3];
 
-function getPortCoords(x: number, y: number, w: number, h: number, side: PortSide): { x: number; y: number } {
-  switch (side) {
-    case 'top':
-      return { x: x + w / 2, y };
-    case 'bottom':
-      return { x: x + w / 2, y: y + h };
-    case 'left':
-      return { x, y: y + h / 2 };
-    case 'right':
-    default:
-      return { x: x + w, y: y + h / 2 };
-  }
+interface BoxRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
-function getPortOutVector(side: PortSide): { dx: number; dy: number } {
-  switch (side) {
-    case 'top':
-      return { dx: 0, dy: -1 };
-    case 'bottom':
-      return { dx: 0, dy: 1 };
-    case 'left':
-      return { dx: -1, dy: 0 };
-    case 'right':
-    default:
-      return { dx: 1, dy: 0 };
+/**
+ * Computes the unit outward ray direction from the Project Root node (`rootBox`)
+ * through `parentBox` (using each node's actual current coordinates, including user drag placement).
+ */
+function computeBranchOutwardUnitVector(
+  parentBox: BoxRect,
+  rootBox?: BoxRect | null,
+  fallbackAngle = -Math.PI / 2
+): { ux: number; uy: number; angle: number } {
+  const pCx = parentBox.x + parentBox.w / 2;
+  const pCy = parentBox.y + parentBox.h / 2;
+  const rCx = rootBox ? rootBox.x + rootBox.w / 2 : CENTER_X;
+  const rCy = rootBox ? rootBox.y + rootBox.h / 2 : CENTER_Y;
+  const dx = pCx - rCx;
+  const dy = pCy - rCy;
+  const len = Math.hypot(dx, dy);
+  if (len < 10) {
+    return {
+      ux: Math.cos(fallbackAngle),
+      uy: Math.sin(fallbackAngle),
+      angle: fallbackAngle,
+    };
   }
-}
-
-function chooseFacingPorts(
-  from: { x: number; y: number; w: number; h: number },
-  to: { x: number; y: number; w: number; h: number }
-): { fromSide: PortSide; toSide: PortSide } {
-  const fcx = from.x + from.w / 2;
-  const fcy = from.y + from.h / 2;
-  const tcx = to.x + to.w / 2;
-  const tcy = to.y + to.h / 2;
-  const dx = tcx - fcx;
-  const dy = tcy - fcy;
-  if (Math.abs(dx) >= Math.abs(dy)) {
-    return dx >= 0 ? { fromSide: 'right', toSide: 'left' } : { fromSide: 'left', toSide: 'right' };
-  }
-  return dy >= 0 ? { fromSide: 'bottom', toSide: 'top' } : { fromSide: 'top', toSide: 'bottom' };
-}
-
-function buildDirectionalBezier(
-  p1: { x: number; y: number },
-  side1: PortSide,
-  p2: { x: number; y: number },
-  side2: PortSide
-): { path: string; midX: number; midY: number } {
-  const v1 = getPortOutVector(side1);
-  const v2 = getPortOutVector(side2);
-  const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-  const offset = Math.max(46, Math.min(160, dist * 0.42));
-  const c1x = p1.x + v1.dx * offset;
-  const c1y = p1.y + v1.dy * offset;
-  const c2x = p2.x + v2.dx * offset;
-  const c2y = p2.y + v2.dy * offset;
-  const midX = 0.125 * p1.x + 0.375 * c1x + 0.375 * c2x + 0.125 * p2.x;
-  const midY = 0.125 * p1.y + 0.375 * c1y + 0.375 * c2y + 0.125 * p2.y;
+  const ux = dx / len;
+  const uy = dy / len;
   return {
-    path: `M ${p1.x} ${p1.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2.x} ${p2.y}`,
-    midX,
-    midY,
+    ux,
+    uy,
+    angle: Math.atan2(uy, ux),
+  };
+}
+
+/**
+ * Places a child box closely adjacent to `parentBox` (~24-28px edge gap)
+ * along the exact straight ray `angle` without elliptical angle distortion.
+ */
+function computeCloseAdjacentPosAlongAngle(
+  parentBox: BoxRect,
+  childW: number,
+  childH: number,
+  angle: number,
+  distanceMult = 1
+): { x: number; y: number } {
+  const ux = Math.cos(angle);
+  const uy = Math.sin(angle);
+  const pCx = parentBox.x + parentBox.w / 2;
+  const pCy = parentBox.y + parentBox.h / 2;
+  const reqHalfW = (parentBox.w + childW) / 2 + 28;
+  const reqHalfH = (parentBox.h + childH) / 2 + 24;
+  const distToExitX = Math.abs(ux) > 0.04 ? reqHalfW / Math.abs(ux) : Infinity;
+  const distToExitY = Math.abs(uy) > 0.04 ? reqHalfH / Math.abs(uy) : Infinity;
+  const stepDist = Math.min(distToExitX, distToExitY) * distanceMult;
+  const cCx = pCx + ux * stepDist;
+  const cCy = pCy + uy * stepDist;
+  return {
+    x: Math.max(WORLD_MIN_X, Math.min(WORLD_MAX_X - childW, Math.round(cCx - childW / 2))),
+    y: Math.max(WORLD_MIN_Y, Math.min(WORLD_MAX_Y - childH, Math.round(cCy - childH / 2))),
   };
 }
 
@@ -149,27 +191,52 @@ function resolveCollisionFreePos(
   desiredY: number,
   w: number,
   h: number,
-  occupied: Array<{ x: number; y: number; w: number; h: number }>
+  occupied: BoxRect[],
+  parentBox?: BoxRect | null,
+  preferredAngle?: number
 ): { x: number; y: number } {
   const overlaps = (tx: number, ty: number) =>
     occupied.some(
       (o) =>
-        tx < o.x + o.w + 22 &&
-        tx + w + 22 > o.x &&
-        ty < o.y + o.h + 18 &&
-        ty + h + 18 > o.y
+        tx < o.x + o.w + 16 &&
+        tx + w + 16 > o.x &&
+        ty < o.y + o.h + 14 &&
+        ty + h + 14 > o.y
     );
 
-  let cx = Math.max(24, Math.min(CANVAS_W - w - 24, Math.round(desiredX)));
-  let cy = Math.max(24, Math.min(CANVAS_H - h - 24, Math.round(desiredY)));
+  const cx = Math.max(WORLD_MIN_X, Math.min(WORLD_MAX_X - w, Math.round(desiredX)));
+  const cy = Math.max(WORLD_MIN_Y, Math.min(WORLD_MAX_Y - h, Math.round(desiredY)));
   if (!overlaps(cx, cy)) return { x: cx, y: cy };
 
+  // 1) If parentBox and outward branch angle are known, fan tightly around preferredAngle right next to parentBox
+  if (parentBox && typeof preferredAngle === 'number') {
+    const angleOffsets = [0, 0.28, -0.28, 0.54, -0.54, 0.82, -0.82, 1.1, -1.1];
+    const distMults = [1.0, 1.22, 1.45, 1.7, 2.0, 2.35, 2.7];
+    for (const mult of distMults) {
+      for (const off of angleOffsets) {
+        const candidate = computeCloseAdjacentPosAlongAngle(
+          parentBox,
+          w,
+          h,
+          preferredAngle + off,
+          mult
+        );
+        if (!overlaps(candidate.x, candidate.y)) {
+          return candidate;
+        }
+      }
+    }
+  }
+
+  // 2) Fallback: search outward from (desiredX, desiredY) biased along preferredAngle
+  const baseAng = typeof preferredAngle === 'number' ? preferredAngle : 0;
+  const fanSteps = [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6];
   for (let ring = 1; ring <= 14; ring++) {
-    const r = ring * 68;
-    for (let step = 0; step < 12; step++) {
-      const ang = (step / 12) * Math.PI * 2;
-      const nx = Math.max(24, Math.min(CANVAS_W - w - 24, Math.round(desiredX + Math.cos(ang) * r)));
-      const ny = Math.max(24, Math.min(CANVAS_H - h - 24, Math.round(desiredY + Math.sin(ang) * r)));
+    const r = ring * 58;
+    for (const step of fanSteps) {
+      const ang = baseAng + (step / 12) * Math.PI * 2;
+      const nx = Math.max(WORLD_MIN_X, Math.min(WORLD_MAX_X - w, Math.round(desiredX + Math.cos(ang) * r)));
+      const ny = Math.max(WORLD_MIN_Y, Math.min(WORLD_MAX_Y - h, Math.round(desiredY + Math.sin(ang) * r)));
       if (!overlaps(nx, ny)) return { x: nx, y: ny };
     }
   }
@@ -186,35 +253,74 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
   onOpenProjectDetail,
   onSaveLayout,
   onAddIdea,
+  onAddEntry,
+  onEditEntry,
+  onDeleteEntry,
+  onPromoteEntryToNextStep,
   onPromoteIdea,
   onUpdateIdeaStatus,
   onDeleteIdea,
+  onJumpToTimeline,
+  focusNodeKey,
+  onConsumedFocusNode,
 }) => {
   const { L } = useLanguage();
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
 
-  const [zoomIdx, setZoomIdx] = useState(3); // 100%
+  const [zoomIdx, setZoomIdx] = useState(4); // 100%
   const scale = ZOOM_STEPS[zoomIdx] || 1;
 
   // Workspace overview ("ALL") local persistence key
-  const wsStorageKey = `nygc_journal_free_ws_${currentUserId || 'guest'}`;
+  const wsStorageKey = getWsFreeMindMapStorageKey(currentUserId);
 
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
   const [customEdges, setCustomEdges] = useState<FreeMapEdge[]>([]);
   const [parentOverrides, setParentOverrides] = useState<Record<string, string>>({});
+  const [undoStack, setUndoStack] = useState<
+    Array<{
+      positions: Record<string, { x: number; y: number }>;
+      customEdges: FreeMapEdge[];
+      parentOverrides: Record<string, string>;
+    }>
+  >([]);
+  const [collapsedKeys, setCollapsedKeys] = useState<Set<string>>(() => new Set());
+  const [moveSubtreeWithParent, setMoveSubtreeWithParent] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [nodeKindFilter, setNodeKindFilter] = useState<'ALL' | 'DIALOGUE' | 'IDEA' | 'TOPIC'>('ALL');
+  const [copiedMd, setCopiedMd] = useState(false);
+
   const [connectMode, setConnectMode] = useState(false);
   const [nestMode, setNestMode] = useState(false);
   const [selectedNodeKey, setSelectedNodeKey] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [highlightedNodeKey, setHighlightedNodeKey] = useState<string | null>(null);
+  const [wireLabelDraft, setWireLabelDraft] = useState('');
 
-  // Composer state for adding root / child ideas directly in Free Mind Map
-  const [composerOpen, setComposerOpen] = useState(false);
-  const [composerParentId, setComposerParentId] = useState<number | null>(null);
-  const [composerTitle, setComposerTitle] = useState('');
-  const [composerNote, setComposerNote] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  // Inline entry editing in Inspector bar
+  const [editingEntryInline, setEditingEntryInline] = useState(false);
+  const [entryEditContent, setEntryEditContent] = useState('');
+  const [isSavingEntryEdit, setIsSavingEntryEdit] = useState(false);
+
+  // Composer state for adding root / child timeline nodes directly in Free Mind Map
+  const [composerState, setComposerState] = useState<{
+    open: boolean;
+    initialKind: EntryType | 'IDEA';
+    initialCompletedTarget: string;
+    parentNodeKey: string | null;
+    parentNodeTitle: string | null;
+    parentIdeaId: number | null;
+    spawnPos: { x: number; y: number } | null;
+  }>({
+    open: false,
+    initialKind: 'IDEA',
+    initialCompletedTarget: '',
+    parentNodeKey: null,
+    parentNodeTitle: null,
+    parentIdeaId: null,
+    spawnPos: null,
+  });
 
   // Dragging node / panning canvas / connecting wire state
   const [draggingNode, setDraggingNode] = useState<{
@@ -224,6 +330,8 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
     origX: number;
     origY: number;
     moved: boolean;
+    descendantOrigPositions: Record<string, { x: number; y: number }>;
+    preDragPositions: Record<string, { x: number; y: number }>;
   } | null>(null);
 
   const [panning, setPanning] = useState<{
@@ -241,9 +349,19 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
   } | null>(null);
 
   // Hydrate layout from project.mindmap_layout or localStorage (ALL mode)
+  const prevProjectIdRef = useRef<number | null>(project?.id ?? null);
   useEffect(() => {
-    setSelectedNodeKey(null);
-    setSelectedEdgeId(null);
+    const currPid = project?.id ?? null;
+    if (prevProjectIdRef.current !== currPid) {
+      prevProjectIdRef.current = currPid;
+      setSelectedNodeKey(null);
+      setSelectedEdgeId(null);
+      setCollapsedKeys(new Set());
+      setUndoStack([]);
+      setEditingEntryInline(false);
+      setSearchQuery('');
+      setNodeKindFilter('ALL');
+    }
     setConnectingWire(null);
     if (project) {
       setPositions(project.mindmap_layout?.positions || {});
@@ -272,11 +390,16 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
     (behavior: ScrollBehavior = 'auto') => {
       const vp = viewportRef.current;
       if (!vp) return;
-      const targetLeft = Math.max(0, CENTER_X * scale - vp.clientWidth / 2);
-      const targetTop = Math.max(0, CENTER_Y * scale - vp.clientHeight / 2);
+      const bounds = resolvedNodesRef.current?.canvasBounds || { offsetX: 0, offsetY: 0 };
+      const rootKey = project ? 'proj-root' : 'ws-root';
+      const rootNode = resolvedNodesRef.current?.allMap?.get(rootKey);
+      const cx = (rootNode ? rootNode.x + rootNode.w / 2 : CENTER_X) + bounds.offsetX;
+      const cy = (rootNode ? rootNode.y + rootNode.h / 2 : CENTER_Y) + bounds.offsetY;
+      const targetLeft = Math.max(0, cx * scale - vp.clientWidth / 2);
+      const targetTop = Math.max(0, cy * scale - vp.clientHeight / 2);
       vp.scrollTo({ left: targetLeft, top: targetTop, behavior });
     },
-    [scale]
+    [scale, project]
   );
 
   // Center canvas when switching project or mounting
@@ -298,6 +421,11 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
     if (type === 'PROGRESS') return L('✅ 완료', '✅ 完了', '✅ Done');
     return L('🧭 의도·결정', '🧭 意図・決定', '🧭 Intent');
   };
+
+  const duplicateInitialEntryId = useMemo(
+    () => findDuplicateInitialIntentEntryId(project, entries),
+    [project, entries]
+  );
 
   // Build radial default node definitions (auto-updated whenever project/entries/ideas change!)
   const nodeDefs = useMemo<FreeNodeDef[]>(() => {
@@ -359,8 +487,9 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
       borderClass: 'border-forest-900',
     });
 
-    // 1. Pinned Intent (Top-Left / North)
-    if (project.intent_summary) {
+    // 1. Pinned Intent (Top-Left / North) + Chained Current Focus / Core Memo Updates
+    const initialIntentText = (project.initial_intent_summary || project.intent_summary || '').trim();
+    if (initialIntentText) {
       list.push({
         key: 'intent-pinned',
         w: 224,
@@ -371,11 +500,44 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
         autoEdgeColor: '#D97706',
         kind: 'INTENT_PINNED',
         title: L('🧭 최초 의도 (Pinned)', '🧭 当初の目的', '🧭 Pinned Intent'),
-        subtitle: project.intent_summary,
+        subtitle: initialIntentText,
         bgClass: 'bg-amber-50',
         borderClass: 'border-amber-300',
       });
     }
+
+    const focusIntentEntries = [...entries]
+      .filter((en) => en.id !== duplicateInitialEntryId && isCurrentFocusIntentEntry(en))
+      .sort((a, b) => a.id - b.id);
+
+    focusIntentEntries.forEach((en, fIdx) => {
+      const eKey = `entry-${en.id}`;
+      const isLatestFocus = fIdx === focusIntentEntries.length - 1;
+      const defaultParentKey =
+        fIdx === 0
+          ? initialIntentText
+            ? 'intent-pinned'
+            : 'proj-root'
+          : `entry-${focusIntentEntries[fIdx - 1].id}`;
+      list.push({
+        key: eKey,
+        w: 224,
+        h: 72,
+        defaultX: CENTER_X - 310 - (fIdx + 1) * 235,
+        defaultY: CENTER_Y - 230 - (fIdx + 1) * 45,
+        parentKey: defaultParentKey,
+        autoEdgeColor: '#D97706',
+        kind: 'ENTRY',
+        title: isLatestFocus
+          ? L('🧭 현재 방향 · 핵심 메모', '🧭 現在の方向・核心メモ', '🧭 Current Focus · Memo')
+          : L('🧭 이전 방향 · 메모', '🧭 以前の方向・メモ', '🧭 Previous Focus'),
+        subtitle: en.content,
+        badge: en.entry_date ? en.entry_date.slice(5) : undefined,
+        bgClass: isLatestFocus ? 'bg-amber-50/95' : 'bg-amber-50/60',
+        borderClass: isLatestFocus ? 'border-amber-400' : 'border-amber-300',
+        entry: en,
+      });
+    });
 
     // 2. Next Step (Bottom)
     list.push({
@@ -393,53 +555,119 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
       borderClass: project.next_action ? 'border-emerald-400' : 'border-rose-300',
     });
 
-    // 3. Entries (recent 18 entries radiating in Left / Top-Left / Bottom-Left arc)
-    const visibleEntries = entries.slice(-18);
+    // 3. Entries (Full unbroken chains; users fold past branches via [-]/[+N])
+    const visibleEntries = entries.filter(
+      (en) => en.id !== duplicateInitialEntryId && !isCurrentFocusIntentEntry(en)
+    );
+
+    const { topicEntries, defaultParents: topicDialogueParents } =
+      computeTopicAndDialogueDefaultParents(visibleEntries, parentOverrides, 'proj-root');
+    const topicIdSet = new Set(topicEntries.map((t) => t.id));
+
+    // Only count direct root-attached entries when assigning initial root angles around proj-root
+    const rootLevelEntries = visibleEntries.filter((en) => {
+      const eKey = `entry-${en.id}`;
+      if (parentOverrides[eKey] === ROOT_SUBTOPIC_KEY) return false;
+      const pKey = parentOverrides[eKey] || topicDialogueParents.get(eKey) || 'proj-root';
+      return pKey === 'proj-root';
+    });
+    const rootSubtopicEntries = visibleEntries.filter(
+      (en) => parentOverrides[`entry-${en.id}`] === ROOT_SUBTOPIC_KEY
+    );
+
     visibleEntries.forEach((en, idx) => {
-      const total = Math.max(1, visibleEntries.length);
-      // Fan from Top-North-West (215 deg) down through Left (180 deg) to Bottom-Left (125 deg)
-      // Wait: more entries spiral slightly further out
-      const arcSpan = Math.PI * 0.95; // ~170 degrees on the left side
-      const t = total === 1 ? 0.5 : idx / (total - 1);
-      const angle = Math.PI * 0.62 + t * arcSpan; // Left/Top-Left/Bottom-Left sector
-      const ring = Math.floor(idx / 6);
-      const radius = 290 + ring * 185;
-      const edgeColor =
-        en.entry_type === 'DIALOGUE_ME'
-          ? '#1B4D3E'
-          : en.entry_type === 'DIALOGUE_THEM'
-          ? '#0284C7'
-          : en.entry_type === 'PROGRESS'
+      const eKey = `entry-${en.id}`;
+      const isTopic = topicIdSet.has(en.id);
+      const topicIdx = isTopic ? topicEntries.findIndex((x) => x.id === en.id) : -1;
+      const isCurrentTopic = isTopic && topicIdx === topicEntries.length - 1;
+      const isRootSub = parentOverrides[eKey] === ROOT_SUBTOPIC_KEY;
+
+      let angle = Math.PI; // Default straight left (180 deg)
+      if (isRootSub) {
+        const subIdx = Math.max(0, rootSubtopicEntries.findIndex((x) => x.id === en.id));
+        const subTotal = Math.max(1, rootSubtopicEntries.length);
+        const subT = subTotal === 1 ? 0.5 : subIdx / (subTotal - 1);
+        angle = -Math.PI * 0.62 + subT * (Math.PI * 0.36); // Top sector
+      } else {
+        const rootIdx = rootLevelEntries.findIndex((x) => x.id === en.id);
+        if (rootIdx >= 0) {
+          const rTotal = Math.max(1, rootLevelEntries.length);
+          const rT = rTotal === 1 ? 0.5 : rootIdx / (rTotal - 1);
+          angle = Math.PI * 0.78 + rT * (Math.PI * 0.44); // Left sector centered at 180 deg
+        } else {
+          const total = Math.max(1, visibleEntries.length);
+          const t = total === 1 ? 0.5 : idx / (total - 1);
+          angle = Math.PI * 0.75 + t * (Math.PI * 0.5);
+        }
+      }
+      const radius = 260;
+
+      const edgeColor = isTopic
+        ? isCurrentTopic
           ? '#059669'
-          : '#D97706';
-      const bgClass =
-        en.entry_type === 'DIALOGUE_ME'
-          ? 'bg-emerald-50/50'
-          : en.entry_type === 'DIALOGUE_THEM'
-          ? 'bg-sky-50/70'
-          : en.entry_type === 'PROGRESS'
-          ? 'bg-emerald-50/80'
-          : 'bg-amber-50/70';
-      const borderClass =
-        en.entry_type === 'DIALOGUE_ME'
-          ? 'border-forest-300'
-          : en.entry_type === 'DIALOGUE_THEM'
-          ? 'border-sky-300'
-          : en.entry_type === 'PROGRESS'
-          ? 'border-emerald-300'
-          : 'border-amber-300';
+          : '#D97706'
+        : isRootSub
+        ? '#7C3AED'
+        : en.entry_type === 'DIALOGUE_ME'
+        ? '#1B4D3E'
+        : en.entry_type === 'DIALOGUE_THEM'
+        ? '#0284C7'
+        : en.entry_type === 'PROGRESS'
+        ? '#059669'
+        : '#D97706';
+      const bgClass = isTopic
+        ? isCurrentTopic
+          ? 'bg-emerald-50/90'
+          : 'bg-amber-50/90'
+        : isRootSub
+        ? 'bg-purple-50/75'
+        : en.entry_type === 'DIALOGUE_ME'
+        ? 'bg-emerald-50/50'
+        : en.entry_type === 'DIALOGUE_THEM'
+        ? 'bg-sky-50/70'
+        : en.entry_type === 'PROGRESS'
+        ? 'bg-emerald-50/80'
+        : 'bg-amber-50/70';
+      const borderClass = isTopic
+        ? isCurrentTopic
+          ? 'border-emerald-400'
+          : 'border-amber-300'
+        : isRootSub
+        ? 'border-purple-300'
+        : en.entry_type === 'DIALOGUE_ME'
+        ? 'border-forest-300'
+        : en.entry_type === 'DIALOGUE_THEM'
+        ? 'border-sky-300'
+        : en.entry_type === 'PROGRESS'
+        ? 'border-emerald-300'
+        : 'border-amber-300';
 
       list.push({
-        key: `entry-${en.id}`,
+        key: eKey,
         w: 215,
         h: 66,
         defaultX: CENTER_X + Math.cos(angle) * radius - 107,
         defaultY: CENTER_Y + Math.sin(angle) * radius - 33,
-        parentKey: 'proj-root',
+        parentKey: topicDialogueParents.get(eKey) || 'proj-root',
         autoEdgeColor: edgeColor,
         kind: 'ENTRY',
-        title: `${en.entry_date ? `${en.entry_date.slice(5)} · ` : ''}${getEntryLabel(en.entry_type, en.speaker_name)}`,
-        subtitle: en.content,
+        title: isTopic
+          ? `🎯 ${cleanTopicMilestoneTitle(en.content)}`
+          : `${en.entry_date ? `${en.entry_date.slice(5)} · ` : ''}${getEntryLabel(en.entry_type, en.speaker_name)}`,
+        subtitle: isTopic
+          ? en.due_date
+            ? `📅 ${en.due_date}`
+            : isCurrentTopic
+            ? L('현재 진행 토픽 (다음 할 일)', '現在の進行トピック', 'Active Topic (Next Step)')
+            : L(`토픽 ${topicIdx + 1} (이전 할 일)`, `トピック ${topicIdx + 1} (前の行動)`, `Topic ${topicIdx + 1} (Previous)`)
+          : en.content,
+        badge: isRootSub
+          ? L('🌿 서브토픽', '🌿 サブ', '🌿 Subtopic')
+          : isTopic
+          ? isCurrentTopic
+            ? L('현재 토픽', '現在', 'Current')
+            : L(`토픽 ${topicIdx + 1}`, `T${topicIdx + 1}`, `T${topicIdx + 1}`)
+          : undefined,
         bgClass,
         borderClass,
         entry: en,
@@ -558,25 +786,12 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
     }
 
     return list;
-  }, [project, entries, ideas, allProjects, L]);
+  }, [project, entries, ideas, allProjects, customEdges, parentOverrides, duplicateInitialEntryId, L]);
 
-  // Compute resolved screen coordinates + effective parentKey for every node
+    // Compute resolved screen coordinates + effective parentKey for every node
   const resolvedNodes = useMemo(() => {
     const defMap = new Map<string, FreeNodeDef>();
     for (const d of nodeDefs) defMap.set(d.key, d);
-
-    const wouldCycle = (nodeKey: string, candidateParent: string, currentParents: Map<string, string | undefined>) => {
-      if (candidateParent === nodeKey) return true;
-      let curr: string | undefined = candidateParent;
-      const visited = new Set<string>();
-      while (curr) {
-        if (curr === nodeKey) return true;
-        if (visited.has(curr)) return true;
-        visited.add(curr);
-        curr = currentParents.get(curr);
-      }
-      return false;
-    };
 
     const effectiveParentMap = new Map<string, string | undefined>();
     for (const d of nodeDefs) {
@@ -584,60 +799,153 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
     }
     for (const d of nodeDefs) {
       if (d.kind === 'ROOT') continue;
-      const ov = parentOverrides[d.key];
-      if (ov && defMap.has(ov) && !wouldCycle(d.key, ov, effectiveParentMap)) {
+      const rawOv = parentOverrides[d.key];
+      if (!rawOv) continue;
+      const ov = remapMindMapKey(rawOv, duplicateInitialEntryId);
+      if (ov === ROOT_SUBTOPIC_KEY) {
+        effectiveParentMap.set(d.key, project ? 'proj-root' : 'ws-root');
+        continue;
+      }
+      if (ov && defMap.has(ov) && ov !== d.key && !wouldCycleInParentMap(d.key, ov, effectiveParentMap)) {
         effectiveParentMap.set(d.key, ov);
       }
     }
 
-    const occupied: Array<{ x: number; y: number; w: number; h: number }> = [];
+    // Topological order: always resolve parents before children so every child knows its parent's live coordinates
+    const topoDefs: FreeNodeDef[] = [];
+    const visitedKeys = new Set<string>();
+    for (const d of nodeDefs) {
+      if (d.kind === 'ROOT') {
+        topoDefs.push(d);
+        visitedKeys.add(d.key);
+      }
+    }
+    let remainingDefs = nodeDefs.filter((d) => !visitedKeys.has(d.key));
+    let safetyPass = 0;
+    while (remainingDefs.length > 0 && safetyPass < 30) {
+      const nextRemaining: FreeNodeDef[] = [];
+      let progressed = false;
+      for (const d of remainingDefs) {
+        const pKey = effectiveParentMap.get(d.key);
+        if (!pKey || !defMap.has(pKey) || visitedKeys.has(pKey)) {
+          topoDefs.push(d);
+          visitedKeys.add(d.key);
+          progressed = true;
+        } else {
+          nextRemaining.push(d);
+        }
+      }
+      remainingDefs = nextRemaining;
+      if (!progressed) break;
+      safetyPass += 1;
+    }
+    for (const d of remainingDefs) {
+      topoDefs.push(d);
+      visitedKeys.add(d.key);
+    }
+
+    const occupied: BoxRect[] = [];
     // Reserve saved positions first so newly added nodes never collide with user-placed nodes
-    for (const def of nodeDefs) {
+    for (const def of topoDefs) {
       const saved = positions[def.key];
       if (saved) {
         occupied.push({ x: saved.x, y: saved.y, w: def.w, h: def.h });
       }
     }
 
+    const rootKey = project ? 'proj-root' : 'ws-root';
     const resultMap = new Map<string, FreeNodeDef & { x: number; y: number }>();
-    const ordered: Array<FreeNodeDef & { x: number; y: number }> = [];
 
-    for (const def of nodeDefs) {
+    for (const def of topoDefs) {
       const resolvedParentKey = effectiveParentMap.get(def.key);
       const saved = positions[def.key];
       if (saved) {
         const node = { ...def, parentKey: resolvedParentKey, x: saved.x, y: saved.y };
         resultMap.set(def.key, node);
-        ordered.push(node);
       } else {
+        const rootNode = resultMap.get(rootKey);
+        const parentNode = resolvedParentKey ? resultMap.get(resolvedParentKey) : undefined;
         let desiredX = def.defaultX;
         let desiredY = def.defaultY;
-        const pSaved = resolvedParentKey
-          ? positions[resolvedParentKey] || resultMap.get(resolvedParentKey)
-          : undefined;
-        if (resolvedParentKey && pSaved) {
-          const pDef = defMap.get(resolvedParentKey);
-          if (pDef) {
-            if (def.kind === 'IDEA' && def.idea?.parent_idea_id) {
-              desiredX = pSaved.x + (def.defaultX - pDef.defaultX);
-              desiredY = pSaved.y + (def.defaultY - pDef.defaultY);
-            } else if (parentOverrides[def.key]) {
-              const ang = Math.atan2(pSaved.y - CENTER_Y, pSaved.x - CENTER_X);
-              desiredX = pSaved.x + Math.cos(ang) * 250;
-              desiredY = pSaved.y + Math.sin(ang) * 140;
-            }
-          }
+        let preferredAngle: number | undefined;
+        let anchorParentBox: BoxRect | null = null;
+
+        if (parentNode && resolvedParentKey !== rootKey) {
+          // Child of a branch node: extend in a straight line outward along the ray from rootNode -> parentNode
+          const { angle } = computeBranchOutwardUnitVector(parentNode, rootNode);
+          preferredAngle = angle;
+          anchorParentBox = parentNode;
+          const adj = computeCloseAdjacentPosAlongAngle(parentNode, def.w, def.h, angle, 1.0);
+          desiredX = adj.x;
+          desiredY = adj.y;
+        } else if (parentNode && resolvedParentKey === rootKey) {
+          // Direct child of rootNode: anchor closely around rootNode's current position along its default sector angle
+          const defaultAngle = Math.atan2(
+            def.defaultY + def.h / 2 - CENTER_Y,
+            def.defaultX + def.w / 2 - CENTER_X
+          );
+          preferredAngle = defaultAngle;
+          anchorParentBox = parentNode;
+          const distMult = def.kind === 'PROJECT_CARD' ? 1.25 : 1.12;
+          const adj = computeCloseAdjacentPosAlongAngle(parentNode, def.w, def.h, defaultAngle, distMult);
+          desiredX = adj.x;
+          desiredY = adj.y;
         }
-        const pos = resolveCollisionFreePos(desiredX, desiredY, def.w, def.h, occupied);
+
+        const pos = resolveCollisionFreePos(
+          desiredX,
+          desiredY,
+          def.w,
+          def.h,
+          occupied,
+          anchorParentBox,
+          preferredAngle
+        );
         occupied.push({ x: pos.x, y: pos.y, w: def.w, h: def.h });
         const node = { ...def, parentKey: resolvedParentKey, x: pos.x, y: pos.y };
         resultMap.set(def.key, node);
-        ordered.push(node);
       }
     }
 
-    return { ordered, map: resultMap, effectiveParentMap };
-  }, [nodeDefs, positions, parentOverrides]);
+    const ordered = nodeDefs
+      .map((d) => resultMap.get(d.key))
+      .filter((n): n is FreeNodeDef & { x: number; y: number } => Boolean(n));
+
+    const { hiddenKeys, descendantCountMap } = computeSubtreeCollapseState(
+      ordered.map((n) => n.key),
+      effectiveParentMap,
+      collapsedKeys
+    );
+    const visibleOrdered = ordered.filter((n) => !hiddenKeys.has(n.key));
+    const visibleMap = new Map<string, FreeNodeDef & { x: number; y: number }>();
+    for (const n of visibleOrdered) visibleMap.set(n.key, n);
+
+    // Auto-expanding canvas bounds around all visible nodes (keeps saved coordinates intact)
+    let minX = 0;
+    let minY = 0;
+    let maxX = CANVAS_W;
+    let maxY = CANVAS_H;
+    for (const n of visibleOrdered) {
+      minX = Math.min(minX, n.x - 240);
+      minY = Math.min(minY, n.y - 200);
+      maxX = Math.max(maxX, n.x + n.w + 260);
+      maxY = Math.max(maxY, n.y + n.h + 220);
+    }
+    const offsetX = Math.max(0, Math.ceil(-minX));
+    const offsetY = Math.max(0, Math.ceil(-minY));
+    const canvasWidth = Math.max(CANVAS_W, Math.ceil(maxX + offsetX));
+    const canvasHeight = Math.max(CANVAS_H, Math.ceil(maxY + offsetY));
+
+    return {
+      ordered: visibleOrdered,
+      allOrdered: ordered,
+      map: visibleMap,
+      allMap: resultMap,
+      effectiveParentMap,
+      descendantCountMap,
+      canvasBounds: { offsetX, offsetY, width: canvasWidth, height: canvasHeight },
+    };
+  }, [nodeDefs, positions, parentOverrides, duplicateInitialEntryId, collapsedKeys, project]);
 
   const persistLayout = useCallback(
     (
@@ -671,18 +979,8 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
 
   // Cycle check helper for nesting drop
   const isDescendantOrSelf = useCallback(
-    (potentialParentKey: string, draggedKey: string): boolean => {
-      if (potentialParentKey === draggedKey) return true;
-      let curr: string | undefined = potentialParentKey;
-      const visited = new Set<string>();
-      while (curr) {
-        if (curr === draggedKey) return true;
-        if (visited.has(curr)) return true;
-        visited.add(curr);
-        curr = resolvedNodes.effectiveParentMap.get(curr);
-      }
-      return false;
-    },
+    (potentialParentKey: string, draggedKey: string): boolean =>
+      isDescendantInParentMap(potentialParentKey, draggedKey, resolvedNodes.effectiveParentMap),
     [resolvedNodes.effectiveParentMap]
   );
 
@@ -772,6 +1070,81 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
   const hoveredNestTargetRef = useRef(hoveredNestTargetKey);
   hoveredNestTargetRef.current = hoveredNestTargetKey;
 
+  const pushUndoSnapshot = useCallback(
+    (overridePos?: Record<string, { x: number; y: number }>) => {
+      setUndoStack((prev) => [
+        ...prev.slice(-19),
+        {
+          positions: { ...(overridePos || positionsRef.current) },
+          customEdges: [...customEdgesRef.current],
+          parentOverrides: { ...parentOverridesRef.current },
+        },
+      ]);
+    },
+    []
+  );
+
+  const handleUndo = useCallback(() => {
+    setUndoStack((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      setPositions(last.positions);
+      setCustomEdges(last.customEdges);
+      setParentOverrides(last.parentOverrides);
+      persistLayout(last.positions, last.customEdges, last.parentOverrides);
+      return prev.slice(0, -1);
+    });
+  }, [persistLayout]);
+
+  const toggleCollapseNode = useCallback((nodeKey: string) => {
+    setCollapsedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeKey)) next.delete(nodeKey);
+      else next.add(nodeKey);
+      return next;
+    });
+  }, []);
+
+  const fitAllNodesInViewport = useCallback(
+    (behavior: ScrollBehavior = 'smooth') => {
+      const vp = viewportRef.current;
+      const list = resolvedNodesRef.current.ordered;
+      if (!vp || list.length === 0) return;
+      const bounds = resolvedNodesRef.current.canvasBounds;
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const n of list) {
+        minX = Math.min(minX, n.x);
+        minY = Math.min(minY, n.y);
+        maxX = Math.max(maxX, n.x + n.w);
+        maxY = Math.max(maxY, n.y + n.h);
+      }
+      const spanW = Math.max(320, maxX - minX + 140);
+      const spanH = Math.max(240, maxY - minY + 120);
+      const desiredScale = Math.min(vp.clientWidth / spanW, vp.clientHeight / spanH, 1.0);
+      let bestIdx = 0;
+      for (let i = 0; i < ZOOM_STEPS.length; i++) {
+        if (ZOOM_STEPS[i] <= desiredScale + 0.03) bestIdx = i;
+      }
+      const nextScale = ZOOM_STEPS[bestIdx] || 0.75;
+      setZoomIdx(bestIdx);
+      const centerX = (minX + maxX) / 2 + bounds.offsetX;
+      const centerY = (minY + maxY) / 2 + bounds.offsetY;
+      setTimeout(() => {
+        const curVp = viewportRef.current;
+        if (!curVp) return;
+        curVp.scrollTo({
+          left: Math.max(0, centerX * nextScale - curVp.clientWidth / 2),
+          top: Math.max(0, centerY * nextScale - curVp.clientHeight / 2),
+          behavior,
+        });
+      }, 30);
+    },
+    []
+  );
+
   // Global window pointer listeners for smooth dragging / panning / connecting
   useEffect(() => {
     if (!draggingNode && !panning && !connectingWire) return;
@@ -784,12 +1157,33 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
         if (moved !== draggingNode.moved) {
           setDraggingNode((prev) => (prev ? { ...prev, moved: true } : null));
         }
-        const def = resolvedNodesRef.current.map.get(draggingNode.key);
+        const def = resolvedNodesRef.current.allMap.get(draggingNode.key);
         const w = def?.w || 215;
         const h = def?.h || 68;
-        const nx = Math.max(12, Math.min(CANVAS_W - w - 12, Math.round(draggingNode.origX + dx)));
-        const ny = Math.max(12, Math.min(CANVAS_H - h - 12, Math.round(draggingNode.origY + dy)));
-        setPositions((prev) => ({ ...prev, [draggingNode.key]: { x: nx, y: ny } }));
+        const nx = Math.max(WORLD_MIN_X, Math.min(WORLD_MAX_X - w, Math.round(draggingNode.origX + dx)));
+        const ny = Math.max(WORLD_MIN_Y, Math.min(WORLD_MAX_Y - h, Math.round(draggingNode.origY + dy)));
+        const actualDx = nx - draggingNode.origX;
+        const actualDy = ny - draggingNode.origY;
+        const shouldMoveSubtree = !nestMode && (e.shiftKey ? !moveSubtreeWithParent : moveSubtreeWithParent);
+
+        setPositions((prev) => {
+          const next: Record<string, { x: number; y: number }> = {
+            ...prev,
+            [draggingNode.key]: { x: nx, y: ny },
+          };
+          if (shouldMoveSubtree) {
+            for (const [descKey, origPos] of Object.entries(draggingNode.descendantOrigPositions)) {
+              const dDef = resolvedNodesRef.current.allMap.get(descKey);
+              const dw = dDef?.w || 215;
+              const dh = dDef?.h || 68;
+              next[descKey] = {
+                x: Math.max(WORLD_MIN_X, Math.min(WORLD_MAX_X - dw, Math.round(origPos.x + actualDx))),
+                y: Math.max(WORLD_MIN_Y, Math.min(WORLD_MAX_Y - dh, Math.round(origPos.y + actualDy))),
+              };
+            }
+          }
+          return next;
+        });
       } else if (panning && viewportRef.current) {
         const dx = e.clientX - panning.startClientX;
         const dy = e.clientY - panning.startClientY;
@@ -797,8 +1191,9 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
         viewportRef.current.scrollTop = panning.scrollTop - dy;
       } else if (connectingWire && canvasRef.current) {
         const rect = canvasRef.current.getBoundingClientRect();
-        const px = (e.clientX - rect.left) / scale;
-        const py = (e.clientY - rect.top) / scale;
+        const bounds = resolvedNodesRef.current.canvasBounds;
+        const px = (e.clientX - rect.left) / scale - bounds.offsetX;
+        const py = (e.clientY - rect.top) / scale - bounds.offsetY;
         setConnectingWire((prev) => (prev ? { ...prev, pointerX: px, pointerY: py } : null));
       }
     };
@@ -806,33 +1201,54 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
     const handlePointerUp = () => {
       if (draggingNode) {
         if (draggingNode.moved) {
+          pushUndoSnapshot(draggingNode.preDragPositions);
           const nestTargetKey = hoveredNestTargetRef.current;
           if (nestMode && nestTargetKey) {
             const targetNode = resolvedNodesRef.current.map.get(nestTargetKey);
             const draggedNode = resolvedNodesRef.current.map.get(draggingNode.key);
+            const rootNode = resolvedNodesRef.current.allMap.get(project ? 'proj-root' : 'ws-root');
             const nextParents = {
               ...parentOverridesRef.current,
               [draggingNode.key]: nestTargetKey,
             };
             let nextPositions = { ...positionsRef.current };
             if (targetNode && draggedNode) {
-              const occupied = resolvedNodesRef.current.ordered
-                .filter((n) => n.key !== draggingNode.key)
-                .map((n) => ({ x: n.x, y: n.y, w: n.w, h: n.h }));
-              const dirAngle = Math.atan2(
-                targetNode.y + targetNode.h / 2 - CENTER_Y,
-                targetNode.x + targetNode.w / 2 - CENTER_X
+              const subtreeNodes = resolvedNodesRef.current.allOrdered.filter(
+                (n) =>
+                  n.key === draggingNode.key ||
+                  isDescendantInParentMap(
+                    n.key,
+                    draggingNode.key,
+                    resolvedNodesRef.current.effectiveParentMap
+                  )
               );
-              const desiredX = targetNode.x + Math.cos(dirAngle) * 255;
-              const desiredY = targetNode.y + Math.sin(dirAngle) * 125;
+              const subtreeKeySet = new Set(subtreeNodes.map((n) => n.key));
+              const occupied = resolvedNodesRef.current.ordered
+                .filter((n) => !subtreeKeySet.has(n.key))
+                .map((n) => ({ x: n.x, y: n.y, w: n.w, h: n.h }));
+              const { angle } = computeBranchOutwardUnitVector(targetNode, rootNode);
+              const desired = computeCloseAdjacentPosAlongAngle(targetNode, draggedNode.w, draggedNode.h, angle, 1.0);
               const placed = resolveCollisionFreePos(
-                desiredX,
-                desiredY,
+                desired.x,
+                desired.y,
                 draggedNode.w,
                 draggedNode.h,
-                occupied
+                occupied,
+                targetNode,
+                angle
               );
+              const deltaX = placed.x - draggingNode.origX;
+              const deltaY = placed.y - draggingNode.origY;
+
               nextPositions = { ...nextPositions, [draggingNode.key]: placed };
+              for (const desc of subtreeNodes) {
+                if (desc.key === draggingNode.key) continue;
+                const origDesc = draggingNode.descendantOrigPositions[desc.key] || { x: desc.x, y: desc.y };
+                nextPositions[desc.key] = {
+                  x: Math.max(WORLD_MIN_X, Math.min(WORLD_MAX_X - desc.w, Math.round(origDesc.x + deltaX))),
+                  y: Math.max(WORLD_MIN_Y, Math.min(WORLD_MAX_Y - desc.h, Math.round(origDesc.y + deltaY))),
+                };
+              }
               setPositions(nextPositions);
             }
             setParentOverrides(nextParents);
@@ -866,6 +1282,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                 ed.fromSide === target.side)
           );
           if (!exists) {
+            pushUndoSnapshot();
             const newEdge: FreeMapEdge = {
               id: `e-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
               fromKey: connectingWire.fromKey,
@@ -889,73 +1306,518 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
-  }, [draggingNode, panning, connectingWire, nestMode, scale, persistLayout]);
+  }, [draggingNode, panning, connectingWire, nestMode, moveSubtreeWithParent, scale, project, persistLayout, pushUndoSnapshot]);
+
+  // Escape & Ctrl+Z keyboard shortcuts
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      const isEditingInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey && !isEditingInput) {
+        if (undoStack.length > 0) {
+          e.preventDefault();
+          handleUndo();
+        }
+        return;
+      }
+      if (e.key !== 'Escape') return;
+      if (editingEntryInline) {
+        setEditingEntryInline(false);
+        return;
+      }
+      if (connectMode || nestMode) {
+        setConnectMode(false);
+        setNestMode(false);
+        return;
+      }
+      if (selectedEdgeId) setSelectedEdgeId(null);
+      if (selectedNodeKey) setSelectedNodeKey(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [connectMode, nestMode, selectedEdgeId, selectedNodeKey, editingEntryInline, undoStack.length, handleUndo]);
+
+  useEffect(() => {
+    if (!selectedEdgeId) {
+      setWireLabelDraft('');
+      return;
+    }
+    const found = customEdges.find((e) => e.id === selectedEdgeId);
+    setWireLabelDraft(found?.label || '');
+  }, [selectedEdgeId, customEdges]);
+
+  useEffect(() => {
+    setEditingEntryInline(false);
+    setEntryEditContent('');
+  }, [selectedNodeKey]);
+
+  // External focus jump from Timeline -> Free Mind Map
+  useEffect(() => {
+    if (!focusNodeKey) return;
+    const remapped = remapMindMapKey(focusNodeKey, duplicateInitialEntryId);
+
+    setCollapsedKeys((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set(prev);
+      let curr = resolvedNodes.effectiveParentMap.get(remapped);
+      const visited = new Set<string>();
+      let changed = false;
+      while (curr && !visited.has(curr)) {
+        visited.add(curr);
+        if (next.has(curr)) {
+          next.delete(curr);
+          changed = true;
+        }
+        curr = resolvedNodes.effectiveParentMap.get(curr);
+      }
+      return changed ? next : prev;
+    });
+
+    const node = resolvedNodes.allMap.get(remapped);
+    if (node) {
+      setSelectedNodeKey(remapped);
+      setHighlightedNodeKey(remapped);
+      const vp = viewportRef.current;
+      if (vp) {
+        const bounds = resolvedNodes.canvasBounds;
+        const targetLeft = Math.max(0, (node.x + node.w / 2 + bounds.offsetX) * scale - vp.clientWidth / 2);
+        const targetTop = Math.max(0, (node.y + node.h / 2 + bounds.offsetY) * scale - vp.clientHeight / 2);
+        vp.scrollTo({ left: targetLeft, top: targetTop, behavior: 'smooth' });
+      }
+      onConsumedFocusNode?.();
+      const timer = setTimeout(() => setHighlightedNodeKey(null), 2400);
+      return () => clearTimeout(timer);
+    }
+  }, [focusNodeKey, duplicateInitialEntryId, resolvedNodes.allMap, resolvedNodes.effectiveParentMap, resolvedNodes.canvasBounds, scale, onConsumedFocusNode]);
 
   const handleResetRadialPositions = () => {
+    pushUndoSnapshot();
     setPositions({});
     persistLayout({}, customEdges, parentOverrides);
     setTimeout(() => centerViewport('smooth'), 40);
   };
 
   const handleDetachNodeToRoot = (nodeKey: string) => {
+    pushUndoSnapshot();
     const nextParents = { ...parentOverrides };
     delete nextParents[nodeKey];
     setParentOverrides(nextParents);
     persistLayout(positions, customEdges, nextParents);
   };
 
+  const handleUpdateCustomEdge = (edgeId: string, patch: { color?: string; label?: string }) => {
+    pushUndoSnapshot();
+    const nextEdges = customEdges.map((e) => {
+      if (e.id !== edgeId) return e;
+      const nextLabel =
+        patch.label !== undefined ? patch.label.trim().slice(0, 40) || undefined : e.label;
+      return {
+        ...e,
+        ...(patch.color !== undefined ? { color: patch.color } : {}),
+        label: nextLabel,
+      };
+    });
+    setCustomEdges(nextEdges);
+    persistLayout(positions, nextEdges, parentOverrides);
+  };
+
   const handleDeleteCustomEdge = (edgeId: string) => {
+    pushUndoSnapshot();
     const nextEdges = customEdges.filter((e) => e.id !== edgeId);
     setCustomEdges(nextEdges);
     if (selectedEdgeId === edgeId) setSelectedEdgeId(null);
     persistLayout(positions, nextEdges, parentOverrides);
   };
 
-  const handleSubmitIdea = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!project || !onAddIdea || !composerTitle.trim()) return;
-    try {
-      setIsSubmitting(true);
-      await onAddIdea({
-        projectId: project.id,
-        title: composerTitle.trim(),
-        note: composerNote.trim() || null,
-        parent_idea_id: composerParentId,
+  const openComposerForNode = useCallback(
+    (
+      targetNode: (typeof resolvedNodes.ordered)[number] | null,
+      spawnPos: { x: number; y: number } | null = null,
+      asRootSubtopic = false,
+      overrideKind?: EntryType | 'IDEA',
+      initialCompletedTarget = ''
+    ) => {
+      const rootNode = resolvedNodes.map.get('proj-root');
+      if (asRootSubtopic) {
+        const defaultRootSpawn = rootNode
+          ? computeCloseAdjacentPosAlongAngle(rootNode, 215, 68, -Math.PI / 2, 1.12)
+          : { x: CENTER_X - 110, y: CENTER_Y - 180 };
+        setComposerState({
+          open: true,
+          initialKind: overrideKind || 'DIALOGUE_ME',
+          initialCompletedTarget: '',
+          parentNodeKey: ROOT_SUBTOPIC_KEY,
+          parentNodeTitle: L('프로젝트 루트 (새 서브토픽)', 'プロジェクトルート (新規サブトピック)', 'Project Root (New Subtopic)'),
+          parentIdeaId: null,
+          spawnPos: spawnPos || defaultRootSpawn,
+        });
+        return;
+      }
+      if (targetNode && targetNode.kind !== 'ROOT' && targetNode.kind !== 'PROJECT_CARD') {
+        const { angle } = computeBranchOutwardUnitVector(targetNode, rootNode);
+        const fallbackSpawn = computeCloseAdjacentPosAlongAngle(targetNode, 215, 68, angle, 1.0);
+        setComposerState({
+          open: true,
+          initialKind: overrideKind || getDefaultComposerKindForNode(targetNode.kind, targetNode.entry),
+          initialCompletedTarget,
+          parentNodeKey: targetNode.key,
+          parentNodeTitle: targetNode.title,
+          parentIdeaId: targetNode.idea ? targetNode.idea.id : null,
+          spawnPos: spawnPos || fallbackSpawn,
+        });
+      } else {
+        setComposerState({
+          open: true,
+          initialKind: overrideKind || (onAddIdea ? 'IDEA' : 'INTENT'),
+          initialCompletedTarget,
+          parentNodeKey: null,
+          parentNodeTitle: null,
+          parentIdeaId: null,
+          spawnPos: null,
+        });
+      }
+    },
+    [onAddIdea, resolvedNodes.map, L]
+  );
+
+  const handleComposerCreatedNode = useCallback(
+    (newKey: string, parentKey: string | null) => {
+      pushUndoSnapshot();
+      const nextParents = parentKey
+        ? { ...parentOverridesRef.current, [newKey]: parentKey }
+        : parentOverridesRef.current;
+      let nextPositions = positionsRef.current;
+
+      const rootNode = resolvedNodesRef.current.map.get('proj-root');
+      const effectiveParentKey =
+        parentKey === ROOT_SUBTOPIC_KEY
+          ? 'proj-root'
+          : parentKey
+          ? remapMindMapKey(parentKey, duplicateInitialEntryId)
+          : null;
+      const parentNode = effectiveParentKey
+        ? resolvedNodesRef.current.map.get(effectiveParentKey)
+        : undefined;
+
+      const occupied = resolvedNodesRef.current.ordered
+        .filter((n) => n.key !== newKey)
+        .map((n) => ({ x: n.x, y: n.y, w: n.w, h: n.h }));
+
+      let placedPos: { x: number; y: number } | null = null;
+      if (parentNode && effectiveParentKey !== 'proj-root') {
+        const { angle } = computeBranchOutwardUnitVector(parentNode, rootNode);
+        const desired = computeCloseAdjacentPosAlongAngle(parentNode, 215, 68, angle, 1.0);
+        placedPos = resolveCollisionFreePos(
+          desired.x,
+          desired.y,
+          215,
+          68,
+          occupied,
+          parentNode,
+          angle
+        );
+        nextPositions = { ...nextPositions, [newKey]: placedPos };
+        setPositions(nextPositions);
+      } else if (parentNode && effectiveParentKey === 'proj-root') {
+        const subAngle = -Math.PI / 2;
+        const desired = computeCloseAdjacentPosAlongAngle(parentNode, 215, 68, subAngle, 1.12);
+        placedPos = resolveCollisionFreePos(
+          desired.x,
+          desired.y,
+          215,
+          68,
+          occupied,
+          parentNode,
+          subAngle
+        );
+        nextPositions = { ...nextPositions, [newKey]: placedPos };
+        setPositions(nextPositions);
+      } else if (composerState.spawnPos) {
+        placedPos = resolveCollisionFreePos(
+          composerState.spawnPos.x,
+          composerState.spawnPos.y,
+          215,
+          68,
+          occupied
+        );
+        nextPositions = { ...nextPositions, [newKey]: placedPos };
+        setPositions(nextPositions);
+      }
+
+      if (parentKey) {
+        setParentOverrides(nextParents);
+      }
+      if (parentKey || nextPositions !== positionsRef.current) {
+        persistLayout(nextPositions, customEdgesRef.current, nextParents);
+      }
+      if (placedPos && viewportRef.current) {
+        const vp = viewportRef.current;
+        const bounds = resolvedNodesRef.current.canvasBounds;
+        const targetLeft = Math.max(0, (placedPos.x + 110 + bounds.offsetX) * scale - vp.clientWidth / 2);
+        const targetTop = Math.max(0, (placedPos.y + 34 + bounds.offsetY) * scale - vp.clientHeight / 2);
+        setTimeout(() => {
+          vp.scrollTo({ left: targetLeft, top: targetTop, behavior: 'smooth' });
+        }, 50);
+      }
+    },
+    [composerState.spawnPos, duplicateInitialEntryId, persistLayout, pushUndoSnapshot, scale]
+  );
+
+  // Trailing dashed [+] buttons at every branch's leaf node (0 children)
+  const leafAddButtons = useMemo(() => {
+    if (!project || (!onAddIdea && !onAddEntry)) return [];
+    const parentsWithChildren = new Set<string>();
+    for (const n of resolvedNodes.ordered) {
+      if (n.parentKey) parentsWithChildren.add(n.parentKey);
+    }
+    const btns: Array<{
+      key: string;
+      parentNode: (typeof resolvedNodes.ordered)[number];
+      isRootSubtopicTrigger?: boolean;
+      portX: number;
+      portY: number;
+      btnX: number;
+      btnY: number;
+      spawnX: number;
+      spawnY: number;
+      size: number;
+      edgeColor: string;
+    }> = [];
+
+    // 1) Root center node [+] button (creates a new independent subtopic branch off proj-root)
+    const rootNode = resolvedNodes.map.get('proj-root');
+    if (rootNode) {
+      const rootSize = 28;
+      const rootPort = getPortCoords(rootNode.x, rootNode.y, rootNode.w, rootNode.h, 'top');
+      const rcx = rootPort.x;
+      const rcy = rootPort.y - 30;
+      const rootSpawn = computeCloseAdjacentPosAlongAngle(rootNode, 215, 68, -Math.PI / 2, 1.12);
+      btns.push({
+        key: 'free-leaf-add::proj-root',
+        parentNode: rootNode,
+        isRootSubtopicTrigger: true,
+        portX: rootPort.x,
+        portY: rootPort.y,
+        btnX: rcx - rootSize / 2,
+        btnY: rcy - rootSize / 2,
+        spawnX: rootSpawn.x,
+        spawnY: rootSpawn.y,
+        size: rootSize,
+        edgeColor: '#7C3AED',
       });
-      setComposerTitle('');
-      setComposerNote('');
-      setComposerOpen(false);
+    }
+
+    // 2) Leaf node [+] buttons at the end of every branch (skip collapsed parents)
+    for (const n of resolvedNodes.ordered) {
+      if (
+        n.kind === 'ROOT' ||
+        n.kind === 'PROJECT_CARD' ||
+        parentsWithChildren.has(n.key) ||
+        (resolvedNodes.descendantCountMap.get(n.key) || 0) > 0
+      ) {
+        continue;
+      }
+      const { ux, uy, angle } = computeBranchOutwardUnitVector(n, rootNode);
+      const side: PortSide =
+        Math.abs(ux) >= Math.abs(uy)
+          ? ux >= 0
+            ? 'right'
+            : 'left'
+          : uy >= 0
+          ? 'bottom'
+          : 'top';
+      const port = getPortCoords(n.x, n.y, n.w, n.h, side);
+      const out = getPortOutVector(side);
+      const size = 28;
+      const cx = port.x + out.dx * 30;
+      const cy = port.y + out.dy * 30;
+      const spawn = computeCloseAdjacentPosAlongAngle(n, n.w, n.h, angle, 1.0);
+      btns.push({
+        key: `free-leaf-add::${n.key}`,
+        parentNode: n,
+        portX: port.x,
+        portY: port.y,
+        btnX: cx - size / 2,
+        btnY: cy - size / 2,
+        spawnX: spawn.x,
+        spawnY: spawn.y,
+        size,
+        edgeColor: n.autoEdgeColor,
+      });
+    }
+    return btns;
+  }, [project, onAddIdea, onAddEntry, resolvedNodes.ordered, resolvedNodes.map, resolvedNodes.descendantCountMap]);
+
+  const selectedNode = selectedNodeKey ? resolvedNodes.allMap.get(selectedNodeKey) || null : null;
+  const selectedIdea = selectedNode?.idea || null;
+  const selectedEntry = selectedNode?.entry || null;
+  const selectedEdge = selectedEdgeId ? customEdges.find((e) => e.id === selectedEdgeId) || null : null;
+
+  const isSearchActive = searchQuery.trim().length > 0 || nodeKindFilter !== 'ALL';
+  const doesNodeMatchFilter = useCallback(
+    (node: (typeof resolvedNodes.ordered)[number]): boolean => {
+      if (!isSearchActive) return true;
+      if (node.kind === 'ROOT') return true;
+      if (nodeKindFilter === 'DIALOGUE') {
+        if (
+          node.kind !== 'ENTRY' ||
+          !node.entry ||
+          (node.entry.entry_type !== 'DIALOGUE_ME' &&
+            node.entry.entry_type !== 'DIALOGUE_THEM' &&
+            node.entry.entry_type !== 'PROGRESS')
+        ) {
+          return false;
+        }
+      } else if (nodeKindFilter === 'IDEA') {
+        if (node.kind !== 'IDEA') return false;
+      } else if (nodeKindFilter === 'TOPIC') {
+        if (
+          node.kind !== 'NEXT_STEP' &&
+          !(node.entry && isTopicMilestoneEntry(node.entry)) &&
+          !(node.entry && isCurrentFocusIntentEntry(node.entry)) &&
+          node.kind !== 'INTENT_PINNED'
+        ) {
+          return false;
+        }
+      }
+      const q = searchQuery.trim().toLowerCase();
+      if (!q) return true;
+      const hay = `${node.title} ${node.subtitle || ''} ${node.badge || ''} ${node.entry?.speaker_name || ''}`.toLowerCase();
+      return hay.includes(q);
+    },
+    [isSearchActive, nodeKindFilter, searchQuery]
+  );
+
+  const handleSaveInlineEntryEdit = async () => {
+    if (!selectedEntry || !onEditEntry || !entryEditContent.trim()) return;
+    try {
+      setIsSavingEntryEdit(true);
+      await onEditEntry(selectedEntry, { content: entryEditContent.trim() });
+      setEditingEntryInline(false);
     } finally {
-      setIsSubmitting(false);
+      setIsSavingEntryEdit(false);
     }
   };
 
-  const selectedNode = selectedNodeKey ? resolvedNodes.map.get(selectedNodeKey) || null : null;
-  const selectedIdea = selectedNode?.idea || null;
+  const handleCopyMarkdown = async () => {
+    const md = buildMindMapMarkdown(
+      project ? project.title : L('전체 프로젝트 자유 마인드맵', '全体フリーマインドマップ', 'Free Mind Map'),
+      resolvedNodes.allOrdered,
+      resolvedNodes.effectiveParentMap,
+      customEdges,
+      duplicateInitialEntryId
+    );
+    try {
+      await navigator.clipboard.writeText(md);
+      setCopiedMd(true);
+      setTimeout(() => setCopiedMd(false), 1800);
+    } catch {
+      prompt(L('마크다운 복사:', 'Markdownコピー:', 'Copy Markdown:'), md);
+    }
+  };
+
+  const handleExportPng = () => {
+    const pngNodes = resolvedNodes.ordered.map((n) => ({
+      x: n.x,
+      y: n.y,
+      w: n.w,
+      h: n.h,
+      title: n.title,
+      subtitle: n.subtitle,
+      badge: n.badge,
+      isRoot: n.kind === 'ROOT',
+      accentColor: n.autoEdgeColor,
+      fillColor:
+        n.kind === 'ROOT'
+          ? '#1B4D3E'
+          : n.kind === 'IDEA' || n.kind === 'INTENT_PINNED'
+          ? '#FFFBEB'
+          : n.kind === 'NEXT_STEP'
+          ? '#ECFDF5'
+          : '#FFFFFF',
+      borderColor: n.kind === 'ROOT' ? '#143B2F' : n.autoEdgeColor || '#D6D3C4',
+      textColor: n.kind === 'ROOT' ? '#FFFFFF' : '#1F2937',
+    }));
+
+    const pngEdges: Array<{
+      pathD: string;
+      color: string;
+      dashed?: boolean;
+      strokeWidth?: number;
+      label?: string;
+      midX?: number;
+      midY?: number;
+    }> = [];
+
+    for (const node of resolvedNodes.ordered) {
+      if (!node.parentKey) continue;
+      const parent = resolvedNodes.map.get(node.parentKey);
+      if (!parent) continue;
+      const { fromSide, toSide } = chooseFacingPorts(parent, node);
+      const p1 = getPortCoords(parent.x, parent.y, parent.w, parent.h, fromSide);
+      const p2 = getPortCoords(node.x, node.y, node.w, node.h, toSide);
+      const { path } = buildDirectionalBezier(p1, fromSide, p2, toSide);
+      pngEdges.push({
+        pathD: path,
+        color: node.autoEdgeColor,
+        strokeWidth: 1.8,
+      });
+    }
+    for (const edge of customEdges) {
+      const fKey = remapMindMapKey(edge.fromKey, duplicateInitialEntryId);
+      const tKey = remapMindMapKey(edge.toKey, duplicateInitialEntryId);
+      const from = resolvedNodes.map.get(fKey);
+      const to = resolvedNodes.map.get(tKey);
+      if (!from || !to) continue;
+      const p1 = getPortCoords(from.x, from.y, from.w, from.h, edge.fromSide);
+      const p2 = getPortCoords(to.x, to.y, to.w, to.h, edge.toSide);
+      const { path, midX, midY } = buildSmartFreeMapPath(
+        p1,
+        edge.fromSide,
+        p2,
+        edge.toSide,
+        obstacleBoxes
+      );
+      pngEdges.push({
+        pathD: path,
+        color: edge.color || '#7C3AED',
+        strokeWidth: 2.4,
+        label: edge.label,
+        midX,
+        midY,
+      });
+    }
+
+    const safeTitle = (project?.title || 'workspace-freemap').replace(/[\\/:*?"<>|]/g, '_');
+    downloadMindMapAsPng(`${safeTitle}-freemap.png`, pngNodes, pngEdges);
+  };
 
   // Cross-links defined via related_idea_ids (shown as subtle purple dashed wires unless already covered by a custom_edge)
-  const relatedIdeaWires = useMemo(() => {
-    const list: Array<{ fromKey: string; toKey: string }> = [];
-    const seen = new Set<string>();
-    const customPairSet = new Set<string>();
-    for (const ce of customEdges) {
-      const pair = [ce.fromKey, ce.toKey].sort().join('::');
-      customPairSet.add(pair);
-    }
-    for (const idea of ideas) {
-      const k1 = `idea-${idea.id}`;
-      if (!resolvedNodes.map.has(k1)) continue;
-      for (const tid of idea.related_idea_ids || []) {
-        const k2 = `idea-${tid}`;
-        if (tid === idea.id || !resolvedNodes.map.has(k2)) continue;
-        const pair = [k1, k2].sort().join('::');
-        if (seen.has(pair) || customPairSet.has(pair)) continue;
-        seen.add(pair);
-        list.push({ fromKey: k1, toKey: k2 });
+  const relatedIdeaWires = useMemo(
+    () => buildRelatedIdeaWires(ideas, customEdges, (k) => resolvedNodes.map.has(k)),
+    [ideas, customEdges, resolvedNodes.map]
+  );
+
+  const obstacleBoxes = useMemo<ObstacleBox[]>(() => {
+    const list: ObstacleBox[] = resolvedNodes.ordered.map((n) => ({
+      x: n.x,
+      y: n.y,
+      w: n.w,
+      h: n.h,
+    }));
+    if (!connectMode && !nestMode) {
+      for (const btn of leafAddButtons) {
+        list.push({
+          x: btn.btnX,
+          y: btn.btnY,
+          w: btn.size,
+          h: btn.size,
+        });
       }
     }
     return list;
-  }, [ideas, customEdges, resolvedNodes.map]);
+  }, [resolvedNodes.ordered, leafAddButtons, connectMode, nestMode]);
 
   return (
     <div className="bg-white rounded-xl border border-ivory-300 shadow-2xs overflow-hidden">
@@ -981,19 +1843,14 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
         </div>
 
         <div className="flex items-center gap-1.5 flex-wrap">
-          {project && onAddIdea && (
+          {project && (onAddIdea || onAddEntry) && (
             <button
               type="button"
-              onClick={() => {
-                setComposerParentId(null);
-                setComposerTitle('');
-                setComposerNote('');
-                setComposerOpen(true);
-              }}
+              onClick={() => openComposerForNode(null)}
               className="px-2.5 py-1 rounded-lg bg-forest-800 text-white text-xs font-bold hover:bg-forest-900 inline-flex items-center gap-1"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>{L('새 아이디어', '新規アイデア', 'New Idea')}</span>
+              <span>{L('새 노드 / 기록', '新規追加', 'New Node')}</span>
             </button>
           )}
 
@@ -1010,12 +1867,40 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
 
           <button
             type="button"
+            onClick={() => fitAllNodesInViewport('smooth')}
+            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
+            title={L('모든 노드가 한눈에 보이도록 화면 맞춤', '全ノードが画面に収まるようフィット', 'Fit all nodes to viewport')}
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">{L('전체 보기', '全体表示', 'Fit')}</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => centerViewport('smooth')}
             className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
-            title={L('중앙으로 이동', '中央へ移動', 'Center view')}
+            title={L('프로젝트 중심 노드로 이동', '中央ノードへ移動', 'Center on root')}
           >
             <Crosshair className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">{L('중앙', '中央', 'Center')}</span>
+            <span className="hidden md:inline">{L('중앙', '中央', 'Center')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setMoveSubtreeWithParent((v) => !v)}
+            className={`px-2 py-1 rounded-lg border text-xs font-bold inline-flex items-center gap-1 transition ${
+              moveSubtreeWithParent
+                ? 'bg-forest-100 text-forest-900 border-forest-300'
+                : 'bg-white text-charcoal-600 border-ivory-300 hover:bg-ivory-100'
+            }`}
+            title={L(
+              '켜짐: 부모 노드 드래그 시 하위 가지가 함께 이동 (드래그 중 Shift 키로 임시 반전)',
+              'ON: 親ノード移動時に子ノードも連動移動 (Shiftキーで一時切替)',
+              'ON: Dragging a parent moves its entire subtree (hold Shift to invert)'
+            )}
+          >
+            <GitBranch className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline">{L('하위 함께 이동', '子も連動移動', 'Move Subtree')}</span>
           </button>
 
           <button
@@ -1025,7 +1910,38 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
             title={L('방사형 기본 위치로 재정렬 (연결선은 유지)', '放射状に自動整列 (接続線は維持)', 'Reset radial positions (keeps links)')}
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">{L('재정렬', '再整列', 'Auto-Arrange')}</span>
+            <span className="hidden md:inline">{L('재정렬', '再整列', 'Arrange')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleUndo}
+            disabled={undoStack.length === 0}
+            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 disabled:opacity-40 inline-flex items-center gap-1"
+            title={L('직전 작업 되돌리기 (Ctrl+Z)', '直前の操作を元に戻す (Ctrl+Z)', 'Undo last change (Ctrl+Z)')}
+          >
+            <Undo2 className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">{L('되돌리기', '戻す', 'Undo')}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void handleCopyMarkdown()}
+            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
+            title={L('마인드맵 계층 구조를 마크다운으로 복사', 'Markdown形式でコピー', 'Copy mind map as Markdown')}
+          >
+            {copiedMd ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+            <span className="hidden xl:inline">{copiedMd ? L('복사됨', 'コピー済', 'Copied') : 'MD'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExportPng}
+            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
+            title={L('현재 마인드맵을 PNG 이미지로 저장', 'PNG画像として保存', 'Download as PNG image')}
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span className="hidden xl:inline">PNG</span>
           </button>
 
           <button
@@ -1094,6 +2010,63 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
         </div>
       </div>
 
+      {/* Compact Search, Filter & Fold Controls Bar */}
+      {project && (
+        <div className="px-3 py-1.5 bg-white border-b border-ivory-200 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <div className="relative">
+              <Search className="w-3 h-3 text-charcoal-400 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={L('노드 검색·하이라이트...', 'ノード検索...', 'Search nodes...')}
+                className="pl-6 pr-6 py-1 rounded-lg bg-ivory-50 border border-ivory-300 text-[11px] font-medium text-charcoal-900 w-36 sm:w-44 focus:outline-none focus:ring-1 focus:ring-forest-500"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-charcoal-400 hover:text-charcoal-700"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+            {(
+              [
+                { id: 'ALL', label: L('전체', 'すべて', 'All') },
+                { id: 'DIALOGUE', label: L('💬 대화·완료', '💬 対話', '💬 Dialogue') },
+                { id: 'IDEA', label: L('💡 아이디어', '💡 アイデア', '💡 Ideas') },
+                { id: 'TOPIC', label: L('🎯 토픽·의도', '🎯 トピック', '🎯 Topics') },
+              ] as const
+            ).map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                onClick={() => setNodeKindFilter(chip.id)}
+                className={`px-2 py-0.5 rounded-full border font-bold transition ${
+                  nodeKindFilter === chip.id
+                    ? 'bg-forest-800 text-white border-forest-900'
+                    : 'bg-ivory-50 text-charcoal-600 border-ivory-300 hover:bg-ivory-100'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
+          {collapsedKeys.size > 0 && (
+            <button
+              type="button"
+              onClick={() => setCollapsedKeys(new Set())}
+              className="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-900 font-bold hover:bg-amber-100"
+            >
+              {L(`접힌 가지 모두 펼치기 (${collapsedKeys.size})`, `折りたたみ全解除 (${collapsedKeys.size})`, `Expand All (${collapsedKeys.size})`)}
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Mode Hint Banner (Connect Mode OR Nest Mode) */}
       {(connectMode || nestMode) && (
         <div
@@ -1134,51 +2107,22 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
         </div>
       )}
 
-      {/* Inline Add Idea Bar */}
-      {composerOpen && project && onAddIdea && (
-        <form
-          onSubmit={handleSubmitIdea}
-          className="p-3 bg-amber-50/70 border-b border-amber-200 flex flex-col sm:flex-row items-stretch sm:items-center gap-2 text-xs"
-        >
-          <div className="px-2 py-1 rounded bg-amber-100 border border-amber-300 text-amber-900 font-bold whitespace-nowrap shrink-0">
-            {composerParentId
-              ? `${L('하위 가지 →', '子ノード →', 'Child of:')} ${
-                  ideas.find((i) => i.id === composerParentId)?.title || ''
-                }`
-              : L('새 아이디어 노드', '新規アイデア', 'New Idea Node')}
-          </div>
-          <input
-            type="text"
-            autoFocus
-            value={composerTitle}
-            onChange={(e) => setComposerTitle(e.target.value)}
-            placeholder={L('뻗어나갈 아이디어 제목...', 'アイデア名...', 'Idea title...')}
-            className="flex-1 p-1.5 bg-white border border-ivory-300 rounded-lg font-bold text-charcoal-900"
-          />
-          <input
-            type="text"
-            value={composerNote}
-            onChange={(e) => setComposerNote(e.target.value)}
-            placeholder={L('짧은 메모 (선택)', 'メモ (任意)', 'Note (optional)')}
-            className="flex-1 p-1.5 bg-white border border-ivory-300 rounded-lg text-charcoal-800"
-          />
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="submit"
-              disabled={isSubmitting || !composerTitle.trim()}
-              className="px-3 py-1.5 rounded-lg bg-forest-800 text-white font-bold disabled:opacity-50 hover:bg-forest-900"
-            >
-              {L('추가', '追加', 'Add')}
-            </button>
-            <button
-              type="button"
-              onClick={() => setComposerOpen(false)}
-              className="p-1.5 rounded-lg bg-white border border-ivory-300 text-charcoal-600 hover:bg-ivory-100"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </form>
+      {/* Unified Timeline & Idea Node Composer */}
+      {composerState.open && project && (onAddIdea || onAddEntry) && (
+        <MindMapNodeComposer
+          project={project}
+          entries={entries}
+          ideas={ideas}
+          initialKind={composerState.initialKind}
+          initialCompletedTarget={composerState.initialCompletedTarget}
+          parentNodeKey={composerState.parentNodeKey}
+          parentNodeTitle={composerState.parentNodeTitle}
+          parentIdeaId={composerState.parentIdeaId}
+          onAddIdea={onAddIdea}
+          onAddEntry={onAddEntry}
+          onCreatedNode={handleComposerCreatedNode}
+          onClose={() => setComposerState((prev) => ({ ...prev, open: false }))}
+        />
       )}
 
       {/* Interactive Dotted Grid Free Canvas */}
@@ -1206,8 +2150,8 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
       >
         <div
           style={{
-            width: CANVAS_W * scale,
-            height: CANVAS_H * scale,
+            width: resolvedNodes.canvasBounds.width * scale,
+            height: resolvedNodes.canvasBounds.height * scale,
           }}
           className="relative"
         >
@@ -1226,15 +2170,22 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
               }
             }}
             style={{
-              width: CANVAS_W,
-              height: CANVAS_H,
+              width: resolvedNodes.canvasBounds.width,
+              height: resolvedNodes.canvasBounds.height,
               transform: `scale(${scale})`,
               transformOrigin: 'top left',
             }}
             className="relative"
           >
             {/* SVG Edges Layer */}
-            <svg width={CANVAS_W} height={CANVAS_H} className="absolute inset-0 pointer-events-none">
+            <svg
+              width={resolvedNodes.canvasBounds.width}
+              height={resolvedNodes.canvasBounds.height}
+              className="absolute inset-0 pointer-events-none"
+            >
+              <g
+                transform={`translate(${resolvedNodes.canvasBounds.offsetX}, ${resolvedNodes.canvasBounds.offsetY})`}
+              >
               {/* 1. Auto Structural Radial Links (Root -> Node / Parent Idea -> Child Idea) */}
               {resolvedNodes.ordered.map((node) => {
                 if (!node.parentKey) return null;
@@ -1256,6 +2207,23 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                 );
               })}
 
+              {/* 1b. Dashed Connectors to Trailing Leaf [+] Buttons */}
+              {!connectMode &&
+                !nestMode &&
+                leafAddButtons.map((btn) => (
+                  <line
+                    key={`edge-${btn.key}`}
+                    x1={btn.portX}
+                    y1={btn.portY}
+                    x2={btn.btnX + btn.size / 2}
+                    y2={btn.btnY + btn.size / 2}
+                    stroke={btn.edgeColor}
+                    strokeWidth={1.8}
+                    strokeDasharray="4 3"
+                    strokeOpacity={0.65}
+                  />
+                ))}
+
               {/* 2. Promoted Idea -> Next Step */}
               {project &&
                 ideas
@@ -1267,7 +2235,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                     const { fromSide, toSide } = chooseFacingPorts(from, to);
                     const p1 = getPortCoords(from.x, from.y, from.w, from.h, fromSide);
                     const p2 = getPortCoords(to.x, to.y, to.w, to.h, toSide);
-                    const { path } = buildDirectionalBezier(p1, fromSide, p2, toSide);
+                    const { path } = buildSmartFreeMapPath(p1, fromSide, p2, toSide, obstacleBoxes);
                     return (
                       <path
                         key={`free-promo-${idea.id}`}
@@ -1289,7 +2257,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                 const { fromSide, toSide } = chooseFacingPorts(from, to);
                 const p1 = getPortCoords(from.x, from.y, from.w, from.h, fromSide);
                 const p2 = getPortCoords(to.x, to.y, to.w, to.h, toSide);
-                const { path } = buildDirectionalBezier(p1, fromSide, p2, toSide);
+                const { path } = buildSmartFreeMapPath(p1, fromSide, p2, toSide, obstacleBoxes);
                 return (
                   <path
                     key={`relwire-${idx}`}
@@ -1303,14 +2271,22 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                 );
               })}
 
-              {/* 4. Custom User-Dragged Port-to-Port Edges */}
+              {/* 4. Custom User-Dragged Port-to-Port Edges (Smart Bezier + Automatic Obstacle Detour) */}
               {customEdges.map((edge) => {
-                const from = resolvedNodes.map.get(edge.fromKey);
-                const to = resolvedNodes.map.get(edge.toKey);
+                const fromKey = remapMindMapKey(edge.fromKey, duplicateInitialEntryId);
+                const toKey = remapMindMapKey(edge.toKey, duplicateInitialEntryId);
+                const from = resolvedNodes.map.get(fromKey);
+                const to = resolvedNodes.map.get(toKey);
                 if (!from || !to) return null;
                 const p1 = getPortCoords(from.x, from.y, from.w, from.h, edge.fromSide);
                 const p2 = getPortCoords(to.x, to.y, to.w, to.h, edge.toSide);
-                const { path, midX, midY } = buildDirectionalBezier(p1, edge.fromSide, p2, edge.toSide);
+                const { path, midX, midY } = buildSmartFreeMapPath(
+                  p1,
+                  edge.fromSide,
+                  p2,
+                  edge.toSide,
+                  obstacleBoxes
+                );
                 const isEdgeSelected = selectedEdgeId === edge.id;
                 return (
                   <g key={edge.id} className="pointer-events-auto cursor-pointer">
@@ -1331,38 +2307,65 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                       strokeWidth={isEdgeSelected ? 3.2 : 2.4}
                       strokeOpacity={0.9}
                     />
-                    {/* Midpoint clickable handle to inspect or delete custom link */}
-                    <circle
-                      cx={midX}
-                      cy={midY}
-                      r={isEdgeSelected ? 10 : 7}
-                      fill={isEdgeSelected ? '#E11D48' : '#FFFFFF'}
-                      stroke={isEdgeSelected ? '#9F1239' : '#7C3AED'}
-                      strokeWidth={1.8}
-                      onClick={(ev) => {
-                        ev.stopPropagation();
-                        if (isEdgeSelected) {
-                          handleDeleteCustomEdge(edge.id);
-                        } else {
-                          setSelectedEdgeId(edge.id);
-                        }
-                      }}
-                    />
-                    {isEdgeSelected && (
-                      <text
-                        x={midX}
-                        y={midY + 3.5}
-                        textAnchor="middle"
-                        fontSize={10}
-                        fontWeight="bold"
-                        fill="#FFFFFF"
+                    {edge.label ? (
+                      <g
                         onClick={(ev) => {
                           ev.stopPropagation();
-                          handleDeleteCustomEdge(edge.id);
+                          setSelectedEdgeId((prev) => (prev === edge.id ? null : edge.id));
                         }}
                       >
-                        ×
-                      </text>
+                        <rect
+                          x={midX - Math.max(24, edge.label.length * 5.2 + 12)}
+                          y={midY - 10}
+                          width={Math.max(48, edge.label.length * 10.4 + 24)}
+                          height={20}
+                          rx={10}
+                          fill={isEdgeSelected ? '#E11D48' : '#FFFFFF'}
+                          stroke={isEdgeSelected ? '#9F1239' : edge.color || '#7C3AED'}
+                          strokeWidth={1.6}
+                        />
+                        <text
+                          x={midX}
+                          y={midY + 3.5}
+                          textAnchor="middle"
+                          fontSize={10}
+                          fontWeight="bold"
+                          fill={isEdgeSelected ? '#FFFFFF' : '#1F2937'}
+                        >
+                          {edge.label}
+                        </text>
+                      </g>
+                    ) : (
+                      <>
+                        <circle
+                          cx={midX}
+                          cy={midY}
+                          r={isEdgeSelected ? 10 : 7}
+                          fill={isEdgeSelected ? '#E11D48' : '#FFFFFF'}
+                          stroke={isEdgeSelected ? '#9F1239' : edge.color || '#7C3AED'}
+                          strokeWidth={1.8}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            setSelectedEdgeId((prev) => (prev === edge.id ? null : edge.id));
+                          }}
+                        />
+                        {isEdgeSelected && (
+                          <text
+                            x={midX}
+                            y={midY + 3.5}
+                            textAnchor="middle"
+                            fontSize={10}
+                            fontWeight="bold"
+                            fill="#FFFFFF"
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              setSelectedEdgeId(null);
+                            }}
+                          >
+                            ✎
+                          </text>
+                        )}
+                      </>
                     )}
                   </g>
                 );
@@ -1407,6 +2410,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                     />
                   );
                 })()}
+              </g>
             </svg>
 
             {/* Draggable Nodes + Conditional 4-Way Connection Port Dots */}
@@ -1416,19 +2420,34 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
               const isWireSource = connectingWire?.fromKey === node.key;
               const isWireTargetNode = hoveredConnectTarget?.key === node.key;
               const isNestTargetNode = hoveredNestTargetKey === node.key;
+              const descendantCount = resolvedNodes.descendantCountMap.get(node.key) || 0;
+              const isCollapsed = collapsedKeys.has(node.key);
+              const matchesFilter = doesNodeMatchFilter(node);
+              const isHighlighted = highlightedNodeKey === node.key;
+              const offX = resolvedNodes.canvasBounds.offsetX;
+              const offY = resolvedNodes.canvasBounds.offsetY;
 
               return (
                 <div
                   key={node.key}
                   style={{
-                    left: node.x,
-                    top: node.y,
+                    left: node.x + offX,
+                    top: node.y + offY,
                     width: node.w,
                     height: node.h,
                   }}
                   onPointerDown={(e) => {
                     if (e.button !== 0) return;
                     e.stopPropagation();
+                    const descOrig: Record<string, { x: number; y: number }> = {};
+                    for (const cand of resolvedNodes.allOrdered) {
+                      if (
+                        cand.key !== node.key &&
+                        isDescendantInParentMap(cand.key, node.key, resolvedNodes.effectiveParentMap)
+                      ) {
+                        descOrig[cand.key] = { x: cand.x, y: cand.y };
+                      }
+                    }
                     setDraggingNode({
                       key: node.key,
                       startClientX: e.clientX,
@@ -1436,6 +2455,8 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                       origX: node.x,
                       origY: node.y,
                       moved: false,
+                      descendantOrigPositions: descOrig,
+                      preDragPositions: { ...positionsRef.current },
                     });
                   }}
                   className={`group absolute rounded-xl border px-3 py-1.5 shadow-sm flex flex-col justify-center cursor-move transition-shadow ${
@@ -1444,8 +2465,35 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                     isSelected ? 'ring-2 ring-gold-500 shadow-md z-30' : 'hover:shadow-md z-20'
                   } ${isDraggingThis ? 'shadow-lg z-40 opacity-90' : ''} ${
                     isWireTargetNode ? 'ring-2 ring-violet-500 bg-violet-50/40' : ''
-                  } ${isNestTargetNode ? 'ring-2 ring-emerald-500 bg-emerald-50/70 scale-[1.03] z-30' : ''}`}
+                  } ${isNestTargetNode ? 'ring-2 ring-emerald-500 bg-emerald-50/70 scale-[1.03] z-30' : ''} ${
+                    isSearchActive && !matchesFilter ? 'opacity-25' : ''
+                  } ${
+                    isSearchActive && matchesFilter && node.kind !== 'ROOT' ? 'ring-2 ring-amber-400' : ''
+                  } ${isHighlighted ? 'ring-4 ring-amber-500 shadow-lg animate-pulse z-40' : ''}`}
                 >
+                  {/* Subtree Collapse / Expand Toggle Badge ([-] / [+N]) */}
+                  {!connectMode && !nestMode && node.kind !== 'ROOT' && descendantCount > 0 && (
+                    <button
+                      type="button"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleCollapseNode(node.key);
+                      }}
+                      title={
+                        isCollapsed
+                          ? L(`접힌 하위 노드 ${descendantCount}개 펼치기`, `子ノード ${descendantCount}件を展開`, `Expand ${descendantCount} hidden nodes`)
+                          : L('하위 가지 접기', '子分岐を折りたたむ', 'Collapse branch')
+                      }
+                      className={`absolute -right-2.5 -top-2.5 z-30 h-5 px-1.5 rounded-full border text-[10px] font-mono font-bold shadow-xs transition flex items-center justify-center ${
+                        isCollapsed
+                          ? 'bg-amber-500 text-white border-amber-700 hover:bg-amber-600 scale-105'
+                          : 'bg-white text-charcoal-600 border-ivory-400 opacity-0 group-hover:opacity-100 hover:bg-ivory-100'
+                      }`}
+                    >
+                      {isCollapsed ? `+${descendantCount}` : '−'}
+                    </button>
+                  )}
                   {isNestTargetNode && (
                     <span className="absolute -top-5 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-emerald-700 text-white text-[10px] font-bold whitespace-nowrap shadow-xs pointer-events-none">
                       {L('↳ 여기에 종속', '↳ ここに従属', '↳ Nest here')}
@@ -1560,17 +2608,118 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                 </div>
               );
             })}
+
+            {/* Trailing Dashed [+] Add Buttons on Each Branch's Last Node */}
+            {!connectMode &&
+              !nestMode &&
+              leafAddButtons.map((btn) => (
+                <button
+                  key={btn.key}
+                  type="button"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openComposerForNode(
+                      btn.isRootSubtopicTrigger ? null : btn.parentNode,
+                      { x: btn.spawnX, y: btn.spawnY },
+                      Boolean(btn.isRootSubtopicTrigger)
+                    );
+                  }}
+                  style={{
+                    left: btn.btnX + resolvedNodes.canvasBounds.offsetX,
+                    top: btn.btnY + resolvedNodes.canvasBounds.offsetY,
+                    width: btn.size,
+                    height: btn.size,
+                  }}
+                  title={
+                    btn.isRootSubtopicTrigger
+                      ? L(
+                          '프로젝트 루트에서 새 독립 서브토픽 가지 추가',
+                          'プロジェクトルートから新規サブトピック分岐を追加',
+                          'Add new independent subtopic branch from Project Root'
+                        )
+                      : L(
+                          `[${btn.parentNode.title}] 끝에 새 노드 추가`,
+                          `「${btn.parentNode.title}」の先に新規追加`,
+                          `Add node after "${btn.parentNode.title}"`
+                        )
+                  }
+                  className={`absolute rounded-full border border-dashed bg-white/95 hover:text-white hover:border-solid hover:scale-110 shadow-xs flex items-center justify-center transition z-20 ${
+                    btn.isRootSubtopicTrigger
+                      ? 'border-purple-600 text-purple-800 hover:bg-purple-700'
+                      : 'border-forest-500 text-forest-800 hover:bg-forest-800'
+                  }`}
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+              ))}
           </div>
         </div>
 
-        {/* Selected Custom Edge Delete Pill Hint */}
-        {selectedEdgeId && (
-          <div className="sticky bottom-3 left-1/2 -translate-x-1/2 w-fit mx-auto z-40 px-3 py-1.5 rounded-full bg-rose-700 text-white text-xs font-bold shadow-lg flex items-center gap-2">
-            <span>{L('선택된 연결선 삭제:', '選択中の接続線を削除:', 'Delete selected wire:')}</span>
+        {/* Selected Custom Edge Label, Color & Delete Inspector Pill */}
+        {selectedEdge && (
+          <div className="sticky bottom-3 left-1/2 -translate-x-1/2 w-fit max-w-[95%] mx-auto z-40 px-3 py-2 rounded-2xl bg-charcoal-900 text-white text-xs font-bold shadow-xl flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1">
+              {WIRE_COLOR_PRESETS.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => handleUpdateCustomEdge(selectedEdge.id, { color: c })}
+                  className={`w-4 h-4 rounded-full border-2 transition ${
+                    (selectedEdge.color || '#7C3AED') === c
+                      ? 'border-white scale-115'
+                      : 'border-transparent opacity-75 hover:opacity-100'
+                  }`}
+                  style={{ backgroundColor: c }}
+                  title={L('연결선 색상 변경', '接続線の色を変更', 'Change wire color')}
+                />
+              ))}
+            </div>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleUpdateCustomEdge(selectedEdge.id, { label: wireLabelDraft });
+              }}
+              className="flex items-center gap-1"
+            >
+              <input
+                type="text"
+                value={wireLabelDraft}
+                onChange={(e) => setWireLabelDraft(e.target.value)}
+                placeholder={L('관계 메모 (예: 원인, 참고)', '関係メモ (例: 原因, 参考)', 'Label (e.g. cause, ref)')}
+                className="px-2 py-0.5 rounded bg-white text-charcoal-900 text-[11px] font-medium w-36 focus:outline-none"
+              />
+              <button
+                type="submit"
+                className="px-2 py-0.5 rounded bg-emerald-600 text-white text-[11px] font-bold hover:bg-emerald-500"
+              >
+                {L('저장', '保存', 'Save')}
+              </button>
+            </form>
+            <div className="hidden sm:flex items-center gap-1">
+              {[
+                L('원인', '原因', 'Cause'),
+                L('참고', '参考', 'Ref'),
+                L('블로커', '課題', 'Blocker'),
+                L('파생', '派生', 'Derived'),
+              ].map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => {
+                    setWireLabelDraft(preset);
+                    handleUpdateCustomEdge(selectedEdge.id, { label: preset });
+                  }}
+                  className="px-1.5 py-0.5 rounded bg-white/15 hover:bg-white/25 text-[10px] font-bold"
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
             <button
               type="button"
-              onClick={() => handleDeleteCustomEdge(selectedEdgeId)}
-              className="px-2 py-0.5 rounded bg-white text-rose-800 font-bold hover:bg-rose-50"
+              onClick={() => handleDeleteCustomEdge(selectedEdge.id)}
+              className="px-2 py-0.5 rounded bg-rose-600 text-white font-bold hover:bg-rose-500"
             >
               {L('삭제', '削除', 'Delete')}
             </button>
@@ -1600,22 +2749,62 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                 </span>
                 <span className="font-bold text-sm text-charcoal-900">{selectedNode.title}</span>
               </div>
-              {selectedNode.subtitle && (
-                <p className="text-charcoal-700 whitespace-pre-wrap">{selectedNode.subtitle}</p>
+              {editingEntryInline && selectedEntry ? (
+                <div className="space-y-1.5 pt-1">
+                  <textarea
+                    rows={3}
+                    autoFocus
+                    value={entryEditContent}
+                    onChange={(e) => setEntryEditContent(e.target.value)}
+                    onKeyDown={(e) => {
+                      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                        e.preventDefault();
+                        void handleSaveInlineEntryEdit();
+                      }
+                    }}
+                    className="w-full p-2 bg-white border border-forest-400 rounded-lg text-xs text-charcoal-900 focus:outline-none focus:ring-2 focus:ring-forest-500/40"
+                  />
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={isSavingEntryEdit || !entryEditContent.trim()}
+                      onClick={() => void handleSaveInlineEntryEdit()}
+                      className="px-2.5 py-1 rounded-lg bg-forest-800 text-white font-bold hover:bg-forest-900 disabled:opacity-50"
+                    >
+                      {L('수정 저장 (Ctrl+Enter)', '変更を保存', 'Save (Ctrl+Enter)')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingEntryInline(false)}
+                      className="px-2.5 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 font-bold hover:bg-ivory-100"
+                    >
+                      {L('취소', 'キャンセル', 'Cancel')}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                selectedNode.subtitle && (
+                  <p className="text-charcoal-700 whitespace-pre-wrap">{selectedNode.subtitle}</p>
+                )
               )}
               {parentOverrides[selectedNode.key] && (
                 <div className="flex items-center gap-2 pt-1">
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300 text-[11px] font-bold">
                     <CornerDownRight className="w-3 h-3" />
-                    {L('종속 상위:', '従属親:', 'Nested under:')}{' '}
-                    {resolvedNodes.map.get(parentOverrides[selectedNode.key])?.title || ''}
+                    {parentOverrides[selectedNode.key] === ROOT_SUBTOPIC_KEY
+                      ? L('🌿 루트 직결 독립 서브토픽', '🌿 ルート直結サブトピック', '🌿 Root Subtopic')
+                      : `${L('종속 상위:', '従属親:', 'Nested under:')} ${
+                          resolvedNodes.map.get(
+                            remapMindMapKey(parentOverrides[selectedNode.key], duplicateInitialEntryId)
+                          )?.title || ''
+                        }`}
                   </span>
                   <button
                     type="button"
                     onClick={() => handleDetachNodeToRoot(selectedNode.key)}
                     className="px-2 py-0.5 rounded-lg bg-white border border-ivory-300 text-charcoal-700 font-bold text-[11px] hover:bg-ivory-100"
                   >
-                    {L('루트로 분리', 'ルートへ戻す', 'Detach to Root')}
+                    {L('원래 위치로 분리', '元の位置へ戻す', 'Detach to Default')}
                   </button>
                 </div>
               )}
@@ -1629,24 +2818,112 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
             </button>
           </div>
 
-          {project && selectedIdea && (
+          {project && (onAddIdea || onAddEntry) && selectedNode.kind !== 'ROOT' && selectedNode.kind !== 'PROJECT_CARD' && (
             <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-ivory-200">
-              {onAddIdea && (
+              <button
+                type="button"
+                onClick={() => openComposerForNode(selectedNode)}
+                className="px-2.5 py-1 rounded-lg bg-forest-800 text-white font-bold hover:bg-forest-900 inline-flex items-center gap-1"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>{L('이 노드에서 가지 뻗기', 'ここから分岐を追加', 'Add Child Node')}</span>
+              </button>
+              {parentOverrides[selectedNode.key] !== ROOT_SUBTOPIC_KEY && (
                 <button
                   type="button"
                   onClick={() => {
-                    setComposerParentId(selectedIdea.id);
-                    setComposerTitle('');
-                    setComposerNote('');
-                    setComposerOpen(true);
+                    pushUndoSnapshot();
+                    const nextParents = {
+                      ...parentOverrides,
+                      [selectedNode.key]: ROOT_SUBTOPIC_KEY,
+                    };
+                    setParentOverrides(nextParents);
+                    persistLayout(positions, customEdges, nextParents);
                   }}
-                  className="px-2.5 py-1 rounded-lg bg-forest-800 text-white font-bold hover:bg-forest-900 inline-flex items-center gap-1"
+                  className="px-2.5 py-1 rounded-lg bg-white border border-purple-300 text-purple-800 font-bold hover:bg-purple-50 inline-flex items-center gap-1"
                 >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>{L('하위 아이디어 뻗기', '子アイデア追加', 'Add Sub-Idea')}</span>
+                  <GitBranch className="w-3.5 h-3.5" />
+                  <span>{L('🌿 루트 서브토픽으로 분리', '🌿 ルートサブトピック化', '🌿 Make Root Subtopic')}</span>
                 </button>
               )}
-              {onPromoteIdea && selectedIdea.status !== 'PROMOTED' && (
+              {onJumpToTimeline && (selectedEntry || selectedIdea) && (
+                <button
+                  type="button"
+                  onClick={() => onJumpToTimeline(selectedNode.key)}
+                  className="px-2.5 py-1 rounded-lg bg-white border border-sky-300 text-sky-900 font-bold hover:bg-sky-50 inline-flex items-center gap-1"
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>{L('타임라인에서 보기', 'タイムラインで見る', 'View in Timeline')}</span>
+                </button>
+              )}
+              {selectedEntry && (
+                <>
+                  {onEditEntry && Number(selectedEntry.author_id) === Number(currentUserId) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEntryEditContent(selectedEntry.content);
+                        setEditingEntryInline((prev) => !prev);
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-800 font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                      <span>{L('내용 수정', '内容を編集', 'Edit')}</span>
+                    </button>
+                  )}
+                  {onAddEntry && selectedEntry.entry_type !== 'PROGRESS' && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        openComposerForNode(selectedNode, null, false, 'PROGRESS', `ENTRY:${selectedEntry.id}`)
+                      }
+                      className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 inline-flex items-center gap-1"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>{L('완료 기록', '完了記録', 'Mark Done')}</span>
+                    </button>
+                  )}
+                  {onPromoteEntryToNextStep &&
+                    !isTopicMilestoneEntry(selectedEntry) &&
+                    !isCurrentFocusIntentEntry(selectedEntry) && (
+                      <button
+                        type="button"
+                        onClick={() => void onPromoteEntryToNextStep(selectedEntry)}
+                        className="px-2.5 py-1 rounded-lg bg-amber-500 text-white font-bold hover:bg-amber-600 inline-flex items-center gap-1"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>{L('다음 할 일(토픽) 승격', 'Next Step昇格', 'Promote to Topic')}</span>
+                      </button>
+                    )}
+                  {onDeleteEntry &&
+                    (Number(selectedEntry.author_id) === Number(currentUserId) ||
+                      Number(project.created_by) === Number(currentUserId)) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (
+                            !confirm(
+                              L(
+                                '이 기록을 삭제하시겠습니까? 하위 노드는 자동으로 상위 가지에 이어집니다.',
+                                'この記録を削除しますか？（子ノードは自動的に親へ引き継がれます）',
+                                'Delete this log? Child nodes will automatically re-attach to its parent.'
+                              )
+                            )
+                          ) {
+                            return;
+                          }
+                          void onDeleteEntry(selectedEntry.id);
+                          setSelectedNodeKey(null);
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center gap-1"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>{L('삭제', '削除', 'Delete')}</span>
+                      </button>
+                    )}
+                </>
+              )}
+              {selectedIdea && onPromoteIdea && selectedIdea.status !== 'PROMOTED' && (
                 <button
                   type="button"
                   onClick={() => void onPromoteIdea(selectedIdea)}
@@ -1656,7 +2933,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                   <span>{L('Next Step 승격', 'Next Stepへ昇格', 'Promote to Next Step')}</span>
                 </button>
               )}
-              {onUpdateIdeaStatus && (
+              {selectedIdea && onUpdateIdeaStatus && (
                 <button
                   type="button"
                   onClick={() =>
@@ -1675,7 +2952,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                   </span>
                 </button>
               )}
-              {onDeleteIdea && (
+              {selectedIdea && onDeleteIdea && (
                 <button
                   type="button"
                   onClick={() => {

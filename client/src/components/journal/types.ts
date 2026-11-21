@@ -12,6 +12,7 @@ export interface FreeMapEdge {
   toKey: string;
   toSide: PortSide;
   color?: string;
+  label?: string;
 }
 
 export interface MindMapLayoutData {

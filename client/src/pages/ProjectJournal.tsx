@@ -43,10 +43,19 @@ import {
   Check,
   Share2,
   History,
+  CornerDownRight,
 } from 'lucide-react';
 import { JournalHorizontalTimeline } from '../components/journal/JournalHorizontalTimeline';
 import { JournalMindMap } from '../components/journal/JournalMindMap';
 import { JournalFreeMindMap } from '../components/journal/JournalFreeMindMap';
+import {
+  CreateJournalEntryPayload,
+  CreateJournalIdeaPayload,
+  ROOT_SUBTOPIC_KEY,
+  cleanTopicMilestoneTitle,
+  isCurrentFocusIntentEntry,
+  isTopicMilestoneEntry,
+} from '../components/journal/mindmapUtils';
 import {
   JournalMode,
   PartnerType,
@@ -138,11 +147,16 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const [detailIdeas, setDetailIdeas] = useState<JournalIdea[]>([]);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [detailSubTab, setDetailSubTab] = useState<'TIMELINE' | 'MINDMAP' | 'FREEMAP'>('TIMELINE');
+  const [lastMindMapTab, setLastMindMapTab] = useState<'MINDMAP' | 'FREEMAP'>('MINDMAP');
+  const [focusMindMapNodeKey, setFocusMindMapNodeKey] = useState<string | null>(null);
+  const [highlightTimelineKey, setHighlightTimelineKey] = useState<string | null>(null);
   const [entryFilter, setEntryFilter] = useState<'ALL' | 'DIALOGUE' | 'INTENT' | 'IDEA' | 'PROGRESS'>('ALL');
   const [entrySortDesc, setEntrySortDesc] = useState(true);
 
   // Unified Timeline Composer State (Na / Them / Intent / Idea / Progress)
   const [composerKind, setComposerKind] = useState<EntryType | 'IDEA'>('INTENT');
+  const [timelineParentNodeKey, setTimelineParentNodeKey] = useState<string | null>(null);
+  const [autoSwitchTurnOnSubmit, setAutoSwitchTurnOnSubmit] = useState(false);
   const [entryDate, setEntryDate] = useState<string>(getJstTodayStr);
   const [entryTime, setEntryTime] = useState<string>('');
   const [dueDate, setDueDate] = useState<string>('');
@@ -367,6 +381,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       setShowTheirTurnPanel(false);
       setPendingTurnTargetUserId(null);
       setPendingWaitDays('');
+      setTimelineParentNodeKey(null);
     } else {
       setDetailProject(null);
       setDetailEntries([]);
@@ -786,10 +801,19 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
           });
           setEditingIdeaId(null);
         } else {
-          await api.post(`/journal/projects/${detailProject.id}/ideas`, {
+          const parentIdeaId =
+            timelineParentNodeKey && timelineParentNodeKey.startsWith('idea-')
+              ? Number(timelineParentNodeKey.slice(5))
+              : null;
+          const created = await api.post<JournalIdea>(`/journal/projects/${detailProject.id}/ideas`, {
             title: ideaTitle.trim(),
             note: ideaNote.trim() || null,
+            parent_idea_id: parentIdeaId,
+            parent_node_key: parentIdeaId ? null : timelineParentNodeKey,
           });
+          if (timelineParentNodeKey && created?.id) {
+            setTimelineParentNodeKey(`idea-${created.id}`);
+          }
         }
         setIdeaTitle('');
         setIdeaNote('');
@@ -831,13 +855,23 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
         due_time: dueTime || null,
         completed_target_type: completed_target_type ?? null,
         completed_target_id: completed_target_id ?? null,
+        parent_node_key: editingEntryId ? undefined : timelineParentNodeKey,
+        ...(!editingEntryId && autoSwitchTurnOnSubmit && composerKind === 'DIALOGUE_ME'
+          ? { next_turn_state: 'THEIR_TURN' as const }
+          : !editingEntryId && autoSwitchTurnOnSubmit && composerKind === 'DIALOGUE_THEM'
+          ? { next_turn_state: 'MY_TURN' as const }
+          : {}),
       };
       if (editingEntryId) {
         await api.patch(`/journal/entries/${editingEntryId}`, payload);
       } else {
-        await api.post(`/journal/projects/${detailProject.id}/entries`, payload);
+        const created = await api.post<JournalEntry>(`/journal/projects/${detailProject.id}/entries`, payload);
+        if (timelineParentNodeKey && created?.id) {
+          setTimelineParentNodeKey(`entry-${created.id}`);
+        }
       }
       setEditingEntryId(null);
+      setAutoSwitchTurnOnSubmit(false);
       setEntryContent('');
       setEntrySpeaker('');
       setCompletedTarget('');
@@ -994,22 +1028,109 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     }
   };
 
-  const handleMindMapAddIdea = async (payload: {
-    projectId: number;
-    title: string;
-    note: string | null;
-    parent_idea_id: number | null;
-  }) => {
+  const handleMindMapAddIdea = async (payload: CreateJournalIdeaPayload): Promise<JournalIdea | null> => {
     try {
-      await api.post(`/journal/projects/${payload.projectId}/ideas`, {
+      const created = await api.post<JournalIdea>(`/journal/projects/${payload.projectId}/ideas`, {
         title: payload.title,
         note: payload.note,
         parent_idea_id: payload.parent_idea_id,
+        parent_node_key: payload.parent_node_key ?? null,
       });
       await refreshAfterIdeaChange(payload.projectId);
+      return created;
+    } catch (err: any) {
+      alert(err.message || t('common.error'));
+      return null;
+    }
+  };
+
+  const handleMindMapAddEntry = async (payload: CreateJournalEntryPayload): Promise<JournalEntry | null> => {
+    try {
+      const created = await api.post<JournalEntry>(`/journal/projects/${payload.projectId}/entries`, {
+        entry_type: payload.entry_type,
+        speaker_name: payload.speaker_name,
+        content: payload.content,
+        entry_date: payload.entry_date,
+        entry_time: payload.entry_time,
+        due_date: payload.due_date,
+        due_time: payload.due_time,
+        completed_target_type: payload.completed_target_type,
+        completed_target_id: payload.completed_target_id,
+        parent_node_key: payload.parent_node_key ?? null,
+        ...(payload.next_turn_state ? { next_turn_state: payload.next_turn_state } : {}),
+      });
+      await refreshAfterIdeaChange(payload.projectId);
+      return created;
+    } catch (err: any) {
+      alert(err.message || t('common.error'));
+      return null;
+    }
+  };
+
+  const handleMindMapEditEntry = async (
+    en: JournalEntry,
+    updates: { content: string; speaker_name?: string | null }
+  ) => {
+    try {
+      await api.patch(`/journal/entries/${en.id}`, {
+        entry_type: en.entry_type,
+        speaker_name: updates.speaker_name !== undefined ? updates.speaker_name : en.speaker_name,
+        content: updates.content,
+        entry_date: en.entry_date,
+        entry_time: en.entry_time,
+        due_date: en.due_date ?? null,
+        due_time: en.due_time ?? null,
+        completed_target_type: en.completed_target_type ?? null,
+        completed_target_id: en.completed_target_id ?? null,
+      });
+      await refreshAfterIdeaChange(en.project_id);
     } catch (err: any) {
       alert(err.message || t('common.error'));
     }
+  };
+
+  const handleMindMapDeleteEntry = async (entryId: number) => {
+    try {
+      await api.delete(`/journal/entries/${entryId}`);
+      await fetchOverview();
+      if (selectedProjectId) {
+        await fetchProjectDetail(selectedProjectId);
+      }
+    } catch (err: any) {
+      alert(err.message || t('common.error'));
+    }
+  };
+
+  const handleMindMapPromoteEntryToNextStep = async (en: JournalEntry) => {
+    try {
+      const nextActionText = cleanTopicMilestoneTitle(en.content).slice(0, 120);
+      if (!nextActionText) return;
+      await api.patch(`/journal/projects/${en.project_id}`, {
+        next_action: nextActionText,
+        ...(en.due_date ? { next_action_date: en.due_date } : {}),
+      });
+      await refreshAfterIdeaChange(en.project_id);
+    } catch (err: any) {
+      alert(err.message || t('common.error'));
+    }
+  };
+
+  const handleJumpFromTimelineToMindMap = (nodeKey: string) => {
+    setDetailSubTab(lastMindMapTab);
+    setFocusMindMapNodeKey(nodeKey);
+  };
+
+  const handleJumpFromMindMapToTimeline = (nodeKey: string) => {
+    setDetailSubTab('TIMELINE');
+    setEntryFilter('ALL');
+    setHighlightTimelineKey(nodeKey);
+    setTimeout(() => {
+      const el = document.getElementById(`tl-node-${nodeKey}`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 60);
+    setTimeout(() => {
+      setHighlightTimelineKey((prev) => (prev === nodeKey ? null : prev));
+    }, 2400);
   };
 
   const handleMindMapToggleLink = async (ideaId: number, targetIdeaId: number, projectId: number) => {
@@ -1793,13 +1914,19 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               entries={focusedMindMapProject?.timeline_entries || []}
               ideas={focusedMindMapProject?.ideas || []}
               allProjects={filteredProjects}
+              currentUserId={user?.id}
               onFocusProject={(id) => setMindMapProjectId(id ?? 'ALL')}
               onOpenProjectDetail={(id) => {
                 navigateProjectSelection(id);
                 setDetailSubTab('MINDMAP');
                 setViewMode('BOARD');
               }}
+              onSaveLayout={handleSaveMindMapLayout}
               onAddIdea={handleMindMapAddIdea}
+              onAddEntry={handleMindMapAddEntry}
+              onEditEntry={handleMindMapEditEntry}
+              onDeleteEntry={handleMindMapDeleteEntry}
+              onPromoteEntryToNextStep={handleMindMapPromoteEntryToNextStep}
               onToggleRelatedIdea={handleMindMapToggleLink}
               onPromoteIdea={handleMindMapPromoteIdea}
               onUpdateIdeaStatus={handleMindMapUpdateIdeaStatus}
@@ -1820,6 +1947,10 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               }}
               onSaveLayout={handleSaveMindMapLayout}
               onAddIdea={handleMindMapAddIdea}
+              onAddEntry={handleMindMapAddEntry}
+              onEditEntry={handleMindMapEditEntry}
+              onDeleteEntry={handleMindMapDeleteEntry}
+              onPromoteEntryToNextStep={handleMindMapPromoteEntryToNextStep}
               onPromoteIdea={handleMindMapPromoteIdea}
               onUpdateIdeaStatus={handleMindMapUpdateIdeaStatus}
               onDeleteIdea={handleMindMapDeleteIdea}
@@ -2054,6 +2185,12 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 rows={3}
                                 value={intentDraft}
                                 onChange={(e) => setIntentDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                                    e.preventDefault();
+                                    void handleSaveIntent();
+                                  }
+                                }}
                                 placeholder={L(
                                   '현재 진행 상황과 핵심 방향성을 수정·업데이트하세요 (최초 의도는 별도 보존됩니다).',
                                   '現在の方針やメモを更新してください（当初の意図は別途保持されます）。',
@@ -2388,38 +2525,45 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                       )}
                     </div>
 
-                    {/* Mini Relay Flow Visualization (Mobile: newest on left with ←; Desktop: chronological →) */}
+                    {/* Mini Relay Flow Visualization (Mobile & Desktop: newest on left with ←) */}
                     {detailEntries.length > 0 && (() => {
                       const relayEntries = allUnifiedItems
                         .filter((item): item is Extract<UnifiedTimelineItem, { kind: 'ENTRY' }> => item.kind === 'ENTRY')
-                        .map((item) => item.entry)
-                        .slice(-8);
+                        .map((item) => item.entry);
                       return (
                       <div className="space-y-1">
                         <span className="text-[11px] font-bold text-charcoal-500 block">
                           {L('진행 릴레이 흐름 (최근 기록)', '進行リレーの流れ', 'Relay Flow')}
                         </span>
-                        {/* Mobile: Latest first on the left, flowing leftward */}
-                        <div className="flex sm:hidden items-center gap-1 overflow-x-auto pb-1">
+                        {/* Latest first on the left, flowing leftward */}
+                        <div className="flex items-center gap-1 overflow-x-auto pb-1">
                           {[...relayEntries].reverse().map((en, idx, arr) => {
-                            const pillCls =
-                              en.entry_type === 'DIALOGUE_ME'
-                                ? 'bg-forest-700 text-white'
-                                : en.entry_type === 'DIALOGUE_THEM'
-                                ? 'bg-sky-100 text-sky-900 border border-sky-300'
-                                : en.entry_type === 'PROGRESS'
-                                ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
-                                : 'bg-amber-100 text-amber-900 border border-amber-300';
-                            const shortLbl =
-                              en.entry_type === 'DIALOGUE_ME'
-                                ? L('나', '自分', 'Me')
-                                : en.entry_type === 'DIALOGUE_THEM'
-                                ? (en.speaker_name || L('상대', '相手', 'Them'))
-                                : en.entry_type === 'PROGRESS'
-                                ? L('완료', '完了', 'Done')
-                                : L('의도', '意図', 'Intent');
+                            const isTopic = isTopicMilestoneEntry(en);
+                            const isFocus = isCurrentFocusIntentEntry(en);
+                            const pillCls = isTopic
+                              ? 'bg-emerald-100 text-emerald-900 border border-emerald-400'
+                              : isFocus
+                              ? 'bg-amber-100 text-amber-900 border border-amber-400'
+                              : en.entry_type === 'DIALOGUE_ME'
+                              ? 'bg-forest-700 text-white'
+                              : en.entry_type === 'DIALOGUE_THEM'
+                              ? 'bg-sky-100 text-sky-900 border border-sky-300'
+                              : en.entry_type === 'PROGRESS'
+                              ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                              : 'bg-amber-100 text-amber-900 border border-amber-300';
+                            const shortLbl = isTopic
+                              ? L('🎯 토픽', '🎯 トピック', '🎯 Topic')
+                              : isFocus
+                              ? L('🧭 방향', '🧭 方向', '🧭 Focus')
+                              : en.entry_type === 'DIALOGUE_ME'
+                              ? L('나', '自分', 'Me')
+                              : en.entry_type === 'DIALOGUE_THEM'
+                              ? (en.speaker_name || L('상대', '相手', 'Them'))
+                              : en.entry_type === 'PROGRESS'
+                              ? L('완료', '完了', 'Done')
+                              : L('의도', '意図', 'Intent');
                             return (
-                              <React.Fragment key={`relay-m-${en.id}`}>
+                              <React.Fragment key={`relay-${en.id}`}>
                                 <span
                                   className={`px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap shrink-0 ${pillCls}`}
                                   title={`${en.entry_date ? `${en.entry_date} ` : ''}${en.content}`}
@@ -2428,40 +2572,6 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 </span>
                                 {idx < arr.length - 1 && (
                                   <ArrowLeft className="w-3 h-3 text-charcoal-400 shrink-0" />
-                                )}
-                              </React.Fragment>
-                            );
-                          })}
-                        </div>
-                        {/* Desktop: Chronological oldest -> newest */}
-                        <div className="hidden sm:flex items-center gap-1 overflow-x-auto pb-1">
-                          {relayEntries.map((en, idx, arr) => {
-                            const pillCls =
-                              en.entry_type === 'DIALOGUE_ME'
-                                ? 'bg-forest-700 text-white'
-                                : en.entry_type === 'DIALOGUE_THEM'
-                                ? 'bg-sky-100 text-sky-900 border border-sky-300'
-                                : en.entry_type === 'PROGRESS'
-                                ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
-                                : 'bg-amber-100 text-amber-900 border border-amber-300';
-                            const shortLbl =
-                              en.entry_type === 'DIALOGUE_ME'
-                                ? L('나', '自分', 'Me')
-                                : en.entry_type === 'DIALOGUE_THEM'
-                                ? (en.speaker_name || L('상대', '相手', 'Them'))
-                                : en.entry_type === 'PROGRESS'
-                                ? L('완료', '完了', 'Done')
-                                : L('의도', '意図', 'Intent');
-                            return (
-                              <React.Fragment key={`relay-d-${en.id}`}>
-                                <span
-                                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap shrink-0 ${pillCls}`}
-                                  title={`${en.entry_date ? `${en.entry_date} ` : ''}${en.content}`}
-                                >
-                                  {shortLbl}{en.entry_date ? ` (${en.entry_date.slice(5)})` : ''}
-                                </span>
-                                {idx < arr.length - 1 && (
-                                  <ArrowRight className="w-3 h-3 text-charcoal-400 shrink-0" />
                                 )}
                               </React.Fragment>
                             );
@@ -2491,7 +2601,10 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                       </button>
                       <button
                         type="button"
-                        onClick={() => setDetailSubTab('MINDMAP')}
+                        onClick={() => {
+                          setDetailSubTab('MINDMAP');
+                          setLastMindMapTab('MINDMAP');
+                        }}
                         className={`py-1.5 px-2 rounded-lg flex items-center justify-center gap-1.5 transition truncate ${
                           detailSubTab === 'MINDMAP' ? 'bg-forest-800 text-white shadow-2xs' : 'text-charcoal-700'
                         }`}
@@ -2501,7 +2614,10 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                       </button>
                       <button
                         type="button"
-                        onClick={() => setDetailSubTab('FREEMAP')}
+                        onClick={() => {
+                          setDetailSubTab('FREEMAP');
+                          setLastMindMapTab('FREEMAP');
+                        }}
                         className={`py-1.5 px-2 rounded-lg flex items-center justify-center gap-1.5 transition truncate ${
                           detailSubTab === 'FREEMAP' ? 'bg-forest-800 text-white shadow-2xs' : 'text-charcoal-700'
                         }`}
@@ -2571,6 +2687,72 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                               </button>
                             ))}
                           </div>
+
+                          {!editingEntryId && !editingIdeaId && (
+                            <div className="flex flex-wrap items-center justify-between gap-1.5 px-2.5 py-1.5 rounded-lg bg-ivory-50 border border-ivory-200 text-[11px]">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-bold text-charcoal-600 inline-flex items-center gap-1">
+                                  <GitBranch className="w-3.5 h-3.5 text-forest-700" />
+                                  <span>{L('마인드맵 연결:', 'マップ接続先:', 'Mind Map Branch:')}</span>
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => setTimelineParentNodeKey(null)}
+                                  className={`px-2 py-0.5 rounded-full border font-bold transition ${
+                                    timelineParentNodeKey === null
+                                      ? 'bg-emerald-700 text-white border-emerald-800'
+                                      : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
+                                  }`}
+                                >
+                                  {L('🎯 현재 토픽(할 일) 꼬리에 자동 연결', '🎯 現在トピック末尾に自動接続', '🎯 Auto-chain to Current Topic')}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setTimelineParentNodeKey(ROOT_SUBTOPIC_KEY)}
+                                  className={`px-2 py-0.5 rounded-full border font-bold transition ${
+                                    timelineParentNodeKey === ROOT_SUBTOPIC_KEY
+                                      ? 'bg-purple-700 text-white border-purple-800'
+                                      : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
+                                  }`}
+                                >
+                                  {L('🌿 루트에서 새 서브토픽(독립 가지) 시작', '🌿 ルートから新規サブトピック開始', '🌿 Start New Root Subtopic')}
+                                </button>
+                              </div>
+
+                              {timelineParentNodeKey && timelineParentNodeKey !== ROOT_SUBTOPIC_KEY && (() => {
+                                let labelText = timelineParentNodeKey;
+                                if (timelineParentNodeKey.startsWith('entry-')) {
+                                  const eid = Number(timelineParentNodeKey.slice(6));
+                                  const found = detailEntries.find((x) => x.id === eid);
+                                  if (found) {
+                                    labelText = isTopicMilestoneEntry(found)
+                                      ? `🎯 ${cleanTopicMilestoneTitle(found.content)}`
+                                      : found.content.slice(0, 32);
+                                  }
+                                } else if (timelineParentNodeKey.startsWith('idea-')) {
+                                  const iid = Number(timelineParentNodeKey.slice(5));
+                                  const found = detailIdeas.find((x) => x.id === iid);
+                                  if (found) labelText = `💡 ${found.title}`;
+                                }
+                                return (
+                                  <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-950 border border-emerald-300 font-bold">
+                                    <CornerDownRight className="w-3 h-3 text-emerald-700" />
+                                    <span className="truncate max-w-[220px]">
+                                      {L(`이어쓰기 대상: ${labelText}`, `接続先: ${labelText}`, `Branching from: ${labelText}`)}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => setTimelineParentNodeKey(null)}
+                                      className="hover:text-rose-700"
+                                      title={L('기본 토픽 연결로 복귀', '基本トピック接続へ戻す', 'Reset to default topic')}
+                                    >
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  </span>
+                                );
+                              })()}
+                            </div>
+                          )}
 
                           {composerKind === 'IDEA' ? (
                             <div className="space-y-2">
@@ -2809,6 +2991,12 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 rows={2}
                                 value={entryContent}
                                 onChange={(e) => setEntryContent(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                                    e.preventDefault();
+                                    void handleAddTimelineItem(e as unknown as React.FormEvent);
+                                  }
+                                }}
                                 placeholder={
                                   composerKind === 'DIALOGUE_ME'
                                     ? L('내가 상대에게 보낸 말·제안·요청 내용을 남기세요...', '自分が伝えた内容・提案を記録...', 'What did you say or propose?')
@@ -2821,20 +3009,42 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 className="w-full p-2.5 bg-white border border-ivory-300 rounded-lg text-xs text-charcoal-900"
                               />
 
-                              <div className="flex justify-end gap-2">
-                                {editingEntryId && (
-                                  <Button type="button" variant="secondary" size="sm" onClick={handleCancelEditEntry}>
-                                    <span>{t('common.cancel')}</span>
-                                  </Button>
-                                )}
-                                <Button type="submit" variant="primary" size="sm" isLoading={isAddingEntry}>
-                                  {editingEntryId ? <Edit2 className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
-                                  <span>
-                                    {editingEntryId
-                                      ? L('수정 저장', '変更を保存', 'Save Changes')
-                                      : L('기록 남기기', '記録する', 'Add Log')}
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                {!editingEntryId &&
+                                (composerKind === 'DIALOGUE_ME' || composerKind === 'DIALOGUE_THEM') ? (
+                                  <label className="inline-flex items-center gap-1.5 text-[11px] font-bold text-charcoal-700 cursor-pointer select-none">
+                                    <input
+                                      type="checkbox"
+                                      checked={autoSwitchTurnOnSubmit}
+                                      onChange={(e) => setAutoSwitchTurnOnSubmit(e.target.checked)}
+                                      className="rounded border-ivory-400 text-forest-700 focus:ring-forest-600"
+                                    />
+                                    <span>
+                                      {composerKind === 'DIALOGUE_ME'
+                                        ? L("저장 후 '⏳ 상대 턴'으로 전환", "保存後「⏳ 相手ターン」へ切替", "Switch to '⏳ Their Turn' on save")
+                                        : L("저장 후 '🔥 내 턴'으로 전환", "保存後「🔥 自分ターン」へ切替", "Switch to '🔥 My Turn' on save")}
+                                    </span>
+                                  </label>
+                                ) : (
+                                  <span className="text-[10px] text-charcoal-400 hidden sm:inline">
+                                    Ctrl+Enter {L('빠른 저장', 'で保存', 'to save')}
                                   </span>
-                                </Button>
+                                )}
+                                <div className="flex justify-end gap-2 ml-auto">
+                                  {editingEntryId && (
+                                    <Button type="button" variant="secondary" size="sm" onClick={handleCancelEditEntry}>
+                                      <span>{t('common.cancel')}</span>
+                                    </Button>
+                                  )}
+                                  <Button type="submit" variant="primary" size="sm" isLoading={isAddingEntry}>
+                                    {editingEntryId ? <Edit2 className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+                                    <span>
+                                      {editingEntryId
+                                        ? L('수정 저장', '変更を保存', 'Save Changes')
+                                        : L('기록 남기기', '記録する', 'Add Log')}
+                                    </span>
+                                  </Button>
+                                </div>
                               </div>
                             </>
                           )}
@@ -2893,13 +3103,14 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 return (
                                   <div
                                     key={`tl-idea-${idea.id}`}
-                                    className={`p-2.5 sm:p-3 rounded-xl border space-y-2 text-xs ${
+                                    id={`tl-node-idea-${idea.id}`}
+                                    className={`p-2.5 sm:p-3 rounded-xl border space-y-2 text-xs transition ${
                                       idea.status === 'PROMOTED'
                                         ? 'bg-emerald-50/70 border-emerald-300'
                                         : idea.status === 'ARCHIVED'
                                         ? 'bg-stone-50 border-stone-200 opacity-75'
                                         : 'bg-yellow-50/50 border-amber-300'
-                                    }`}
+                                    } ${highlightTimelineKey === `idea-${idea.id}` ? 'ring-2 ring-amber-500 shadow-md' : ''}`}
                                   >
                                     <div className="flex items-center justify-between gap-1.5 min-w-0">
                                       <div className="flex items-center gap-1.5 min-w-0 flex-nowrap">
@@ -2920,6 +3131,31 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                       </div>
 
                                       <div className="flex items-center gap-0.5 shrink-0">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleJumpFromTimelineToMindMap(`idea-${idea.id}`)}
+                                          className="px-1.5 py-1 rounded-lg border bg-white border-ivory-300 text-charcoal-700 hover:bg-sky-50 hover:border-sky-300 text-[11px] font-bold inline-flex items-center gap-0.5 transition"
+                                          title={L('마인드맵에서 이 아이디어 위치 보기', 'マインドマップで位置を見る', 'Locate on Mind Map')}
+                                        >
+                                          <GitBranch className="w-3.5 h-3.5 text-forest-700" />
+                                          <span className="hidden sm:inline">{L('맵', 'マップ', 'Map')}</span>
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setTimelineParentNodeKey(`idea-${idea.id}`);
+                                            composerFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                                          }}
+                                          className={`px-1.5 py-1 rounded-lg border text-[11px] font-bold inline-flex items-center gap-0.5 transition ${
+                                            timelineParentNodeKey === `idea-${idea.id}`
+                                              ? 'bg-emerald-700 text-white border-emerald-800'
+                                              : 'bg-white border-ivory-300 text-charcoal-700 hover:bg-emerald-50 hover:border-emerald-300'
+                                          }`}
+                                          title={L('이 아이디어 노드에 이어서 새 가지 작성', 'このアイデアの先に続けて記録', 'Branch next entry from this idea')}
+                                        >
+                                          <CornerDownRight className="w-3.5 h-3.5" />
+                                          <span className="hidden sm:inline">{L('이어쓰기', '続けて記録', 'Branch')}</span>
+                                        </button>
                                         <button
                                           type="button"
                                           onClick={() => handleStartCompleteTarget(targetKey)}
@@ -3003,6 +3239,8 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                               }
 
                               const en = item.entry;
+                              const isTopicMilestone = isTopicMilestoneEntry(en);
+                              const isCurrentFocusIntent = isCurrentFocusIntentEntry(en);
                               const isMe = en.entry_type === 'DIALOGUE_ME';
                               const isThem = en.entry_type === 'DIALOGUE_THEM';
                               const isProgress = en.entry_type === 'PROGRESS';
@@ -3017,7 +3255,11 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 ? 'flex justify-start'
                                 : '';
 
-                              const cardStyle = isMe
+                              const cardStyle = isTopicMilestone
+                                ? 'w-full bg-emerald-50/85 border-emerald-400 rounded-xl'
+                                : isCurrentFocusIntent
+                                ? 'w-full bg-amber-50/90 border-amber-400 rounded-xl'
+                                : isMe
                                 ? 'w-[92%] sm:w-[60%] bg-forest-50/75 border-forest-300 rounded-xl'
                                 : isThem
                                 ? 'w-[92%] sm:w-[60%] bg-sky-50/85 border-sky-300 rounded-xl'
@@ -3025,7 +3267,11 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 ? 'w-full bg-emerald-50/70 border-emerald-300 rounded-xl'
                                 : 'w-full bg-amber-50/60 border-amber-300 rounded-xl';
 
-                              const badgeLabel = isMe
+                              const badgeLabel = isTopicMilestone
+                                ? L('🎯 토픽 전환 (다음 할 일)', '🎯 トピック (次の行動)', '🎯 Topic (Next Step)')
+                                : isCurrentFocusIntent
+                                ? L('🧭 현재 방향 · 핵심 메모', '🧭 現在の方向・核心メモ', '🧭 Current Focus · Memo')
+                                : isMe
                                 ? L('🗣️ 나', '🗣️ 自分', '🗣️ Me')
                                 : isThem
                                 ? `👤 ${en.speaker_name || detailProject.resolved_partner_name || L('상대방', '相手', 'Partner')}`
@@ -3043,8 +3289,12 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                   : L('🧭 의도·결정', '🧭 意図', '🧭 Intent');
 
                               return (
-                                <div key={`tl-entry-${en.id}`} className={wrapperStyle}>
-                                  <div className={`p-2.5 sm:p-3 border space-y-1.5 text-xs ${cardStyle}`}>
+                                <div key={`tl-entry-${en.id}`} id={`tl-node-entry-${en.id}`} className={wrapperStyle}>
+                                  <div
+                                    className={`p-2.5 sm:p-3 border space-y-1.5 text-xs transition ${cardStyle} ${
+                                      highlightTimelineKey === `entry-${en.id}` ? 'ring-2 ring-amber-500 shadow-md' : ''
+                                    }`}
+                                  >
                                   <div className="flex items-center justify-between gap-1.5 min-w-0">
                                     <div className="flex items-center gap-1.5 min-w-0 flex-nowrap">
                                       <span className="font-bold text-charcoal-900 truncate whitespace-nowrap">{badgeLabel}</span>
@@ -3064,6 +3314,31 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                     </div>
 
                                     <div className="flex items-center gap-0.5 shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleJumpFromTimelineToMindMap(`entry-${en.id}`)}
+                                        className="px-1.5 py-1 rounded-lg border bg-white border-ivory-300 text-charcoal-700 hover:bg-sky-50 hover:border-sky-300 text-[11px] font-bold inline-flex items-center gap-0.5 transition"
+                                        title={L('마인드맵에서 이 기록 위치 보기', 'マインドマップで位置を見る', 'Locate on Mind Map')}
+                                      >
+                                        <GitBranch className="w-3.5 h-3.5 text-forest-700" />
+                                        <span className="hidden sm:inline">{L('맵', 'マップ', 'Map')}</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setTimelineParentNodeKey(`entry-${en.id}`);
+                                          composerFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                                        }}
+                                        className={`px-1.5 py-1 rounded-lg border text-[11px] font-bold inline-flex items-center gap-0.5 transition ${
+                                          timelineParentNodeKey === `entry-${en.id}`
+                                            ? 'bg-emerald-700 text-white border-emerald-800'
+                                            : 'bg-white border-ivory-300 text-charcoal-700 hover:bg-emerald-50 hover:border-emerald-300'
+                                        }`}
+                                        title={L('이 노드에 이어서 새 가지 작성', 'このノードの先に続けて記録', 'Branch next entry from this node')}
+                                      >
+                                        <CornerDownRight className="w-3.5 h-3.5" />
+                                        <span className="hidden sm:inline">{L('이어쓰기', '続けて記録', 'Branch')}</span>
+                                      </button>
                                       {!isProgress && (
                                         <button
                                           type="button"
@@ -3249,11 +3524,20 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         project={detailProject}
                         entries={detailEntries}
                         ideas={detailIdeas}
+                        currentUserId={user?.id}
+                        onSaveLayout={handleSaveMindMapLayout}
                         onAddIdea={handleMindMapAddIdea}
+                        onAddEntry={handleMindMapAddEntry}
+                        onEditEntry={handleMindMapEditEntry}
+                        onDeleteEntry={handleMindMapDeleteEntry}
+                        onPromoteEntryToNextStep={handleMindMapPromoteEntryToNextStep}
                         onToggleRelatedIdea={handleMindMapToggleLink}
                         onPromoteIdea={handleMindMapPromoteIdea}
                         onUpdateIdeaStatus={handleMindMapUpdateIdeaStatus}
                         onDeleteIdea={handleMindMapDeleteIdea}
+                        onJumpToTimeline={handleJumpFromMindMapToTimeline}
+                        focusNodeKey={focusMindMapNodeKey}
+                        onConsumedFocusNode={() => setFocusMindMapNodeKey(null)}
                       />
                     )}
 
@@ -3266,9 +3550,16 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         currentUserId={user?.id}
                         onSaveLayout={handleSaveMindMapLayout}
                         onAddIdea={handleMindMapAddIdea}
+                        onAddEntry={handleMindMapAddEntry}
+                        onEditEntry={handleMindMapEditEntry}
+                        onDeleteEntry={handleMindMapDeleteEntry}
+                        onPromoteEntryToNextStep={handleMindMapPromoteEntryToNextStep}
                         onPromoteIdea={handleMindMapPromoteIdea}
                         onUpdateIdeaStatus={handleMindMapUpdateIdeaStatus}
                         onDeleteIdea={handleMindMapDeleteIdea}
+                        onJumpToTimeline={handleJumpFromMindMapToTimeline}
+                        focusNodeKey={focusMindMapNodeKey}
+                        onConsumedFocusNode={() => setFocusMindMapNodeKey(null)}
                       />
                     )}
                   </>
