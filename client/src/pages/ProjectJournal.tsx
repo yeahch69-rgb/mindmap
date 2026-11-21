@@ -382,6 +382,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       setPendingTurnTargetUserId(null);
       setPendingWaitDays('');
       setTimelineParentNodeKey(null);
+      setFocusMindMapNodeKey(null);
     } else {
       setDetailProject(null);
       setDetailEntries([]);
@@ -392,6 +393,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       setIdeaNote('');
       setRevisionFormEntryId(null);
       setRevisionReason('');
+      setFocusMindMapNodeKey(null);
     }
   }, [selectedProjectId]);
 
@@ -1116,7 +1118,8 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   };
 
   const handleJumpFromTimelineToMindMap = (nodeKey: string) => {
-    setDetailSubTab(lastMindMapTab);
+    setDetailSubTab('MINDMAP');
+    setLastMindMapTab('MINDMAP');
     setFocusMindMapNodeKey(nodeKey);
   };
 
@@ -1931,6 +1934,8 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               onPromoteIdea={handleMindMapPromoteIdea}
               onUpdateIdeaStatus={handleMindMapUpdateIdeaStatus}
               onDeleteIdea={handleMindMapDeleteIdea}
+              focusNodeKey={focusMindMapNodeKey}
+              onSelectNodeKey={setFocusMindMapNodeKey}
             />
           ) : (
             <JournalFreeMindMap
@@ -1954,6 +1959,8 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               onPromoteIdea={handleMindMapPromoteIdea}
               onUpdateIdeaStatus={handleMindMapUpdateIdeaStatus}
               onDeleteIdea={handleMindMapDeleteIdea}
+              focusNodeKey={focusMindMapNodeKey}
+              onSelectNodeKey={setFocusMindMapNodeKey}
             />
           )}
         </div>
@@ -3537,7 +3544,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         onDeleteIdea={handleMindMapDeleteIdea}
                         onJumpToTimeline={handleJumpFromMindMapToTimeline}
                         focusNodeKey={focusMindMapNodeKey}
-                        onConsumedFocusNode={() => setFocusMindMapNodeKey(null)}
+                        onSelectNodeKey={setFocusMindMapNodeKey}
                       />
                     )}
 
@@ -3559,7 +3566,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         onDeleteIdea={handleMindMapDeleteIdea}
                         onJumpToTimeline={handleJumpFromMindMapToTimeline}
                         focusNodeKey={focusMindMapNodeKey}
-                        onConsumedFocusNode={() => setFocusMindMapNodeKey(null)}
+                        onSelectNodeKey={setFocusMindMapNodeKey}
                       />
                     )}
                   </>

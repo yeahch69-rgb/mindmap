@@ -87,6 +87,7 @@ interface JournalFreeMindMapProps {
   onDeleteIdea?: (idea: JournalIdea) => Promise<void>;
   onJumpToTimeline?: (targetKey: string) => void;
   focusNodeKey?: string | null;
+  onSelectNodeKey?: (key: string | null) => void;
   onConsumedFocusNode?: () => void;
 }
 
@@ -262,6 +263,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
   onDeleteIdea,
   onJumpToTimeline,
   focusNodeKey,
+  onSelectNodeKey,
   onConsumedFocusNode,
 }) => {
   const { L } = useLanguage();
@@ -297,6 +299,15 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [highlightedNodeKey, setHighlightedNodeKey] = useState<string | null>(null);
   const [wireLabelDraft, setWireLabelDraft] = useState('');
+
+  const selectAndSyncNode = useCallback(
+    (nextKey: string | null) => {
+      setSelectedNodeKey(nextKey);
+      setHighlightedNodeKey(nextKey);
+      onSelectNodeKey?.(nextKey);
+    },
+    [onSelectNodeKey]
+  );
 
   // Inline entry editing in Inspector bar
   const [editingEntryInline, setEditingEntryInline] = useState(false);
@@ -402,11 +413,12 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
     [scale, project]
   );
 
-  // Center canvas when switching project or mounting
+  // Center canvas on root when switching project or mounting (unless focusing a specific target node!)
   useEffect(() => {
+    if (focusNodeKey) return;
     const timer = setTimeout(() => centerViewport('auto'), 40);
     return () => clearTimeout(timer);
-  }, [project?.id]);
+  }, [project?.id, focusNodeKey]);
 
   const getTurnLabel = (turn: TurnState) => {
     if (turn === 'MY_TURN') return L('내 턴', '自分ターン', 'My Turn');
@@ -1257,7 +1269,8 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
             persistLayout(positionsRef.current, customEdgesRef.current, parentOverridesRef.current);
           }
         } else {
-          setSelectedNodeKey((prev) => (prev === draggingNode.key ? null : draggingNode.key));
+          const nextKey = selectedNodeKey === draggingNode.key ? null : draggingNode.key;
+          selectAndSyncNode(nextKey);
           setSelectedEdgeId(null);
         }
         setDraggingNode(null);
@@ -1306,7 +1319,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
-  }, [draggingNode, panning, connectingWire, nestMode, moveSubtreeWithParent, scale, project, persistLayout, pushUndoSnapshot]);
+  }, [draggingNode, panning, connectingWire, nestMode, moveSubtreeWithParent, scale, project, persistLayout, pushUndoSnapshot, selectedNodeKey, selectAndSyncNode]);
 
   // Escape & Ctrl+Z keyboard shortcuts
   useEffect(() => {
@@ -1332,11 +1345,11 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
         return;
       }
       if (selectedEdgeId) setSelectedEdgeId(null);
-      if (selectedNodeKey) setSelectedNodeKey(null);
+      if (selectedNodeKey) selectAndSyncNode(null);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [connectMode, nestMode, selectedEdgeId, selectedNodeKey, editingEntryInline, undoStack.length, handleUndo]);
+  }, [connectMode, nestMode, selectedEdgeId, selectedNodeKey, selectAndSyncNode, editingEntryInline, undoStack.length, handleUndo]);
 
   useEffect(() => {
     if (!selectedEdgeId) {
@@ -1352,7 +1365,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
     setEntryEditContent('');
   }, [selectedNodeKey]);
 
-  // External focus jump from Timeline -> Free Mind Map
+  // External focus jump from Timeline or tab sync between Mind Map <-> Free Mind Map
   useEffect(() => {
     if (!focusNodeKey) return;
     const remapped = remapMindMapKey(focusNodeKey, duplicateInitialEntryId);
@@ -1378,15 +1391,17 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
     if (node) {
       setSelectedNodeKey(remapped);
       setHighlightedNodeKey(remapped);
-      const vp = viewportRef.current;
-      if (vp) {
+      const centerOnNode = (behavior: ScrollBehavior) => {
+        const vp = viewportRef.current;
+        if (!vp) return;
         const bounds = resolvedNodes.canvasBounds;
         const targetLeft = Math.max(0, (node.x + node.w / 2 + bounds.offsetX) * scale - vp.clientWidth / 2);
         const targetTop = Math.max(0, (node.y + node.h / 2 + bounds.offsetY) * scale - vp.clientHeight / 2);
-        vp.scrollTo({ left: targetLeft, top: targetTop, behavior: 'smooth' });
-      }
+        vp.scrollTo({ left: targetLeft, top: targetTop, behavior });
+      };
+      centerOnNode('auto');
+      const timer = setTimeout(() => centerOnNode('smooth'), 45);
       onConsumedFocusNode?.();
-      const timer = setTimeout(() => setHighlightedNodeKey(null), 2400);
       return () => clearTimeout(timer);
     }
   }, [focusNodeKey, duplicateInitialEntryId, resolvedNodes.allMap, resolvedNodes.effectiveParentMap, resolvedNodes.canvasBounds, scale, onConsumedFocusNode]);
@@ -2130,7 +2145,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
         ref={viewportRef}
         onPointerDown={(e) => {
           if (e.target === viewportRef.current || e.target === canvasRef.current) {
-            setSelectedNodeKey(null);
+            selectAndSyncNode(null);
             setSelectedEdgeId(null);
             setPanning({
               startClientX: e.clientX,
@@ -2159,7 +2174,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
             ref={canvasRef}
             onPointerDown={(e) => {
               if (e.target === canvasRef.current) {
-                setSelectedNodeKey(null);
+                selectAndSyncNode(null);
                 setSelectedEdgeId(null);
                 setPanning({
                   startClientX: e.clientX,
@@ -2811,7 +2826,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
             </div>
             <button
               type="button"
-              onClick={() => setSelectedNodeKey(null)}
+              onClick={() => selectAndSyncNode(null)}
               className="p-1 rounded-lg hover:bg-ivory-200 text-charcoal-500"
             >
               <X className="w-4 h-4" />
@@ -2913,7 +2928,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                             return;
                           }
                           void onDeleteEntry(selectedEntry.id);
-                          setSelectedNodeKey(null);
+                          selectAndSyncNode(null);
                         }}
                         className="px-2.5 py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center gap-1"
                       >
@@ -2966,7 +2981,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                       : L('이 아이디어를 삭제하시겠습니까?', 'このアイデアを削除しますか？', 'Delete this idea?');
                     if (!confirm(msg)) return;
                     void onDeleteIdea(selectedIdea);
-                    setSelectedNodeKey(null);
+                    selectAndSyncNode(null);
                   }}
                   className="px-2.5 py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center gap-1"
                 >
