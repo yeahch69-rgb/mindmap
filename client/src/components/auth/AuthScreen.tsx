@@ -152,14 +152,19 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ pendingInviteToken }) =>
 
             <div>
               <label className="block font-bold text-charcoal-800 mb-1">
-                {L('이메일', 'メールアドレス', 'Email')}
+                {L('아이디 또는 이메일', 'ID またはメールアドレス', 'ID or Email')}
               </label>
               <input
-                type="email"
+                type="text"
+                autoComplete="username"
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
+                placeholder={
+                  mode === 'LOGIN'
+                    ? L('아이디 또는 이메일 (예: admin)', 'ID またはメール (例: admin)', 'ID or email (e.g. admin)')
+                    : L('아이디 또는 이메일 (공백 없이 2자 이상)', 'ID またはメール (空白なし2文字以上)', 'ID or email (2+ chars, no spaces)')
+                }
                 className="w-full p-2.5 bg-ivory-50 border border-ivory-300 rounded-lg text-charcoal-900"
               />
             </div>
@@ -171,10 +176,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ pendingInviteToken }) =>
               <input
                 type="password"
                 required
-                minLength={6}
+                minLength={mode === 'REGISTER' ? 6 : 1}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={L('6자 이상', '6文字以上', 'At least 6 characters')}
+                placeholder={mode === 'REGISTER' ? L('6자 이상', '6文字以上', 'At least 6 characters') : L('비밀번호 입력', 'パスワード入力', 'Enter password')}
                 className="w-full p-2.5 bg-ivory-50 border border-ivory-300 rounded-lg text-charcoal-900"
               />
             </div>

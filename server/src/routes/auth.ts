@@ -44,6 +44,37 @@ export function ensureAdminAccount() {
       console.log(`🛡️ [Admin] Created ADMIN account: ${email}`);
     }
   }
+
+  // Consolidate legacy duplicate 'admin' account into ADMIN_EMAIL (e.g., admin@admin.admin)
+  if (adminEmail && adminEmail !== 'admin') {
+    const primaryAdmin = db.prepare('SELECT id FROM users WHERE email = ?').get(adminEmail) as
+      | { id: number }
+      | undefined;
+    const dupAdmin = db.prepare("SELECT id FROM users WHERE email = 'admin'").get() as
+      | { id: number }
+      | undefined;
+    if (primaryAdmin && dupAdmin && Number(primaryAdmin.id) !== Number(dupAdmin.id)) {
+      const fromId = Number(dupAdmin.id);
+      const toId = Number(primaryAdmin.id);
+      const mergeTx = db.transaction(() => {
+        db.prepare('UPDATE journal_projects SET created_by = ? WHERE created_by = ?').run(toId, fromId);
+        db.prepare('UPDATE journal_projects SET active_turn_user_id = ? WHERE active_turn_user_id = ?').run(toId, fromId);
+        db.prepare('UPDATE OR IGNORE journal_project_members SET user_id = ? WHERE user_id = ?').run(toId, fromId);
+        db.prepare('DELETE FROM journal_project_members WHERE user_id = ?').run(fromId);
+        db.prepare('UPDATE journal_entries SET author_id = ? WHERE author_id = ?').run(toId, fromId);
+        db.prepare('UPDATE journal_ideas SET author_id = ? WHERE author_id = ?').run(toId, fromId);
+        db.prepare('UPDATE journal_inbox SET author_id = ? WHERE author_id = ?').run(toId, fromId);
+        db.prepare('UPDATE push_subscriptions SET user_id = ? WHERE user_id = ?').run(toId, fromId);
+        db.prepare('UPDATE journal_entry_revision_requests SET requester_id = ? WHERE requester_id = ?').run(toId, fromId);
+        db.prepare('UPDATE OR IGNORE journal_turn_waits SET watcher_user_id = ? WHERE watcher_user_id = ?').run(toId, fromId);
+        db.prepare('DELETE FROM journal_turn_waits WHERE watcher_user_id = ?').run(fromId);
+        db.prepare('UPDATE journal_turn_waits SET target_user_id = ? WHERE target_user_id = ?').run(toId, fromId);
+        db.prepare('DELETE FROM users WHERE id = ?').run(fromId);
+      });
+      mergeTx();
+      console.log(`🛡️ [Admin] Removed duplicate 'admin' account (id=${fromId}) -> merged into ${adminEmail} (id=${toId})`);
+    }
+  }
 }
 
 function formatUser(row: any) {
@@ -71,8 +102,12 @@ router.post('/register', (req: Request, res: Response) => {
   const cleanName = typeof name === 'string' ? name.trim() : '';
   const cleanPassword = typeof password === 'string' ? password : '';
 
-  if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-    res.status(400).json({ error: '올바른 이메일 주소를 입력해주세요.' });
+  if (!cleanEmail || cleanEmail.length < 2 || cleanEmail.length > 100 || /\s/.test(cleanEmail)) {
+    res.status(400).json({ error: '아이디(또는 이메일)는 공백 없이 2자 이상 입력해주세요.' });
+    return;
+  }
+  if (cleanEmail === 'admin') {
+    res.status(400).json({ error: "'admin'은 관리자 로그인 전용 아이디입니다. 다른 아이디를 입력해주세요." });
     return;
   }
   if (!cleanName || cleanName.length < 1) {
@@ -87,7 +122,7 @@ router.post('/register', (req: Request, res: Response) => {
   try {
     const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(cleanEmail);
     if (existing) {
-      res.status(409).json({ error: '이미 가입된 이메일입니다.' });
+      res.status(409).json({ error: '이미 가입된 아이디(또는 이메일)입니다.' });
       return;
     }
 
@@ -115,17 +150,31 @@ router.post('/login', (req: Request, res: Response) => {
   const cleanPassword = typeof password === 'string' ? password : '';
 
   if (!cleanEmail || !cleanPassword) {
-    res.status(400).json({ error: '이메일과 비밀번호를 입력해주세요.' });
+    res.status(400).json({ error: '아이디(또는 이메일)와 비밀번호를 입력해주세요.' });
     return;
   }
 
   try {
-    const userRow = db
+    let userRow = db
       .prepare('SELECT id, email, name, role, password_hash, font_size, mobile_font_size, push_enabled FROM users WHERE email = ?')
       .get(cleanEmail) as any;
 
+    if (!userRow && cleanEmail === 'admin') {
+      const envAdminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+      if (envAdminEmail) {
+        userRow = db
+          .prepare('SELECT id, email, name, role, password_hash, font_size, mobile_font_size, push_enabled FROM users WHERE email = ?')
+          .get(envAdminEmail) as any;
+      }
+      if (!userRow) {
+        userRow = db
+          .prepare("SELECT id, email, name, role, password_hash, font_size, mobile_font_size, push_enabled FROM users WHERE role = 'ADMIN' ORDER BY id ASC LIMIT 1")
+          .get() as any;
+      }
+    }
+
     if (!userRow || !bcrypt.compareSync(cleanPassword, userRow.password_hash)) {
-      res.status(401).json({ error: '이메일 또는 비밀번호가 올바르지 않습니다.' });
+      res.status(401).json({ error: '아이디(또는 이메일) 또는 비밀번호가 올바르지 않습니다.' });
       return;
     }
 

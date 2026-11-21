@@ -1218,7 +1218,7 @@ router.post('/projects/:id/members', authenticateToken, (req: Request, res: Resp
   const cleanEmail = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
 
   if (!cleanEmail) {
-    res.status(400).json({ error: '초대할 사용자의 이메일을 입력해주세요.' });
+    res.status(400).json({ error: '초대할 사용자의 아이디(또는 이메일)를 입력해주세요.' });
     return;
   }
 
@@ -1239,7 +1239,7 @@ router.post('/projects/:id/members', authenticateToken, (req: Request, res: Resp
 
     if (!targetUser) {
       res.status(404).json({
-        error: '해당 이메일로 가입된 계정이 없습니다. 상단 초대 링크를 복사해 전달해 주세요.',
+        error: '해당 아이디(또는 이메일)로 가입된 계정이 없습니다. 상단 초대 링크를 복사해 전달해 주세요.',
       });
       return;
     }

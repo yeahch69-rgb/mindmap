@@ -3696,18 +3696,18 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                   )}
                 </div>
 
-                {/* Invite by exact email */}
+                {/* Invite by exact ID or email */}
                 {Number(detailProject.created_by) === Number(user?.id) && (
                   <form onSubmit={handleInviteMemberByEmail} className="space-y-1.5">
                     <label className="block font-bold text-charcoal-800">
-                      {L('가입된 상대 이메일로 바로 초대', '登録済みメールで直接招待', 'Invite Registered User by Email')}
+                      {L('가입된 상대 아이디(또는 이메일)로 바로 초대', '登録済みID（またはメール）で直接招待', 'Invite Registered User by ID or Email')}
                     </label>
                     <div className="flex items-center gap-1.5">
                       <input
-                        type="email"
+                        type="text"
                         value={inviteEmail}
                         onChange={(e) => setInviteEmail(e.target.value)}
-                        placeholder="partner@example.com"
+                        placeholder={L('상대 아이디 또는 이메일', '相手のIDまたはメール', 'Partner ID or email')}
                         className="flex-1 p-2 bg-ivory-50 border border-ivory-300 rounded-lg text-charcoal-900"
                       />
                       <Button type="submit" variant="secondary" size="sm" isLoading={isInvitingMember}>
