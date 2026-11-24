@@ -161,19 +161,26 @@ export const EventColorControls: React.FC<EventColorControlsProps> = ({
     });
   };
 
-  const handleResetDefaults = () => {
+  const handleResetLabelDefaults = () => {
     const defaultLabels = [...EVENT_LABEL_COLOR_PRESETS];
-    const defaultTexts = [...EVENT_TEXT_COLOR_PRESETS];
     setLabelSlots(defaultLabels);
-    setTextSlots(defaultTexts);
     onChangeBgColor(defaultLabels[activeLabelSlot] || defaultLabels[0]);
-    onChangeTextColor(defaultTexts[activeTextSlot] || defaultTexts[0]);
-    persistPalette(defaultLabels, defaultTexts);
+    persistPalette(defaultLabels, textSlots);
   };
 
-  const isCustomized =
-    labelSlots.some((c, i) => c.toUpperCase() !== EVENT_LABEL_COLOR_PRESETS[i].toUpperCase()) ||
-    textSlots.some((c, i) => c.toUpperCase() !== EVENT_TEXT_COLOR_PRESETS[i].toUpperCase());
+  const handleResetTextDefaults = () => {
+    const defaultTexts = [...EVENT_TEXT_COLOR_PRESETS];
+    setTextSlots(defaultTexts);
+    onChangeTextColor(defaultTexts[activeTextSlot] || defaultTexts[0]);
+    persistPalette(labelSlots, defaultTexts);
+  };
+
+  const isLabelCustomized = labelSlots.some(
+    (c, i) => c.toUpperCase() !== EVENT_LABEL_COLOR_PRESETS[i].toUpperCase()
+  );
+  const isTextCustomized = textSlots.some(
+    (c, i) => c.toUpperCase() !== EVENT_TEXT_COLOR_PRESETS[i].toUpperCase()
+  );
 
   return (
     <div className="space-y-3">
@@ -212,7 +219,7 @@ export const EventColorControls: React.FC<EventColorControlsProps> = ({
       <div className="p-3 rounded-xl bg-ivory-50 border border-ivory-200 space-y-3">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {/* Label Background Color Slots */}
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <div className="text-[11px] font-bold text-charcoal-700 flex items-center justify-between gap-2">
               <span className="inline-flex items-center gap-1">
                 <Palette className="w-3.5 h-3.5 text-forest-700" />
@@ -245,10 +252,11 @@ export const EventColorControls: React.FC<EventColorControlsProps> = ({
                   />
                 );
               })}
-
-              {/* RGB Picker: edits & saves the currently selected slot */}
+            </div>
+            {/* Always-below action row: RGB Picker + Reset Default */}
+            <div className="flex items-center gap-1.5">
               <label
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white border border-ivory-300 hover:border-forest-500 text-[11px] font-bold text-charcoal-700 cursor-pointer transition"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white border border-ivory-300 hover:border-forest-500 text-[11px] font-bold text-charcoal-700 cursor-pointer transition"
                 title={L(
                   `선택한 라벨 슬롯 #${activeLabelSlot + 1}의 색상을 RGB로 변경하여 저장`,
                   `選択中スロット #${activeLabelSlot + 1} の色をRGBで変更保存`,
@@ -263,11 +271,25 @@ export const EventColorControls: React.FC<EventColorControlsProps> = ({
                 />
                 <span>RGB</span>
               </label>
+              <button
+                type="button"
+                disabled={!isLabelCustomized}
+                onClick={handleResetLabelDefaults}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full border text-[11px] font-bold transition ${
+                  isLabelCustomized
+                    ? 'bg-white hover:bg-ivory-100 border-ivory-300 text-charcoal-700'
+                    : 'bg-ivory-100/70 border-ivory-200 text-charcoal-400 cursor-not-allowed'
+                }`}
+                title={L('라벨 색상 기본값으로 초기화', 'ラベル色をデフォルトに戻す', 'Reset label colors')}
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>{L('기본색', '初期化', 'Reset')}</span>
+              </button>
             </div>
           </div>
 
           {/* Text Color Slots */}
-          <div className="space-y-1.5">
+          <div className="space-y-2">
             <div className="text-[11px] font-bold text-charcoal-700 flex items-center justify-between gap-2">
               <span className="inline-flex items-center gap-1">
                 <Type className="w-3.5 h-3.5 text-forest-700" />
@@ -300,10 +322,11 @@ export const EventColorControls: React.FC<EventColorControlsProps> = ({
                   />
                 );
               })}
-
-              {/* RGB Picker: edits & saves the currently selected text slot */}
+            </div>
+            {/* Always-below action row: RGB Picker + Reset Default */}
+            <div className="flex items-center gap-1.5">
               <label
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white border border-ivory-300 hover:border-forest-500 text-[11px] font-bold text-charcoal-700 cursor-pointer transition"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white border border-ivory-300 hover:border-forest-500 text-[11px] font-bold text-charcoal-700 cursor-pointer transition"
                 title={L(
                   `선택한 텍스트 슬롯 #${activeTextSlot + 1}의 색상을 RGB로 변경하여 저장`,
                   `選択中スロット #${activeTextSlot + 1} の文字色をRGBで変更保存`,
@@ -318,11 +341,25 @@ export const EventColorControls: React.FC<EventColorControlsProps> = ({
                 />
                 <span>RGB</span>
               </label>
+              <button
+                type="button"
+                disabled={!isTextCustomized}
+                onClick={handleResetTextDefaults}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full border text-[11px] font-bold transition ${
+                  isTextCustomized
+                    ? 'bg-white hover:bg-ivory-100 border-ivory-300 text-charcoal-700'
+                    : 'bg-ivory-100/70 border-ivory-200 text-charcoal-400 cursor-not-allowed'
+                }`}
+                title={L('텍스트 색상 기본값으로 초기화', '文字色をデフォルトに戻す', 'Reset text colors')}
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>{L('기본색', '初期化', 'Reset')}</span>
+              </button>
             </div>
           </div>
         </div>
 
-        {/* Live Calendar Pill Preview + Hint / Reset */}
+        {/* Live Calendar Pill Preview + Hint */}
         <div className="pt-2 border-t border-ivory-200 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2.5 min-w-0">
             <span className="text-[11px] font-bold text-charcoal-500 shrink-0">
@@ -336,22 +373,9 @@ export const EventColorControls: React.FC<EventColorControlsProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-charcoal-400 hidden sm:inline">
-              {L('프리셋 선택 후 RGB 조정 시 자동 저장', 'スロット選択後にRGB調整で自動保存', 'Select a slot + adjust RGB to save')}
-            </span>
-            {isCustomized && (
-              <button
-                type="button"
-                onClick={handleResetDefaults}
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white hover:bg-ivory-100 border border-ivory-300 text-[10px] font-bold text-charcoal-600 transition"
-                title={L('기본 색상으로 되돌리기', 'デフォルト色に戻す', 'Reset to defaults')}
-              >
-                <RotateCcw className="w-3 h-3" />
-                <span>{L('기본색', '初期化', 'Reset')}</span>
-              </button>
-            )}
-          </div>
+          <span className="text-[10px] text-charcoal-400 hidden sm:inline">
+            {L('프리셋 선택 후 RGB 조정 시 자동 저장', 'スロット選択後にRGB調整で自動保存', 'Select a slot + adjust RGB to save')}
+          </span>
         </div>
       </div>
     </div>

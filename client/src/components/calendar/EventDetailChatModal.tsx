@@ -267,10 +267,11 @@ export const EventDetailChatModal: React.FC<EventDetailChatModalProps> = ({
               <button
                 type="button"
                 onClick={() => void handleDeleteEvent()}
-                className="p-1.5 rounded-lg text-charcoal-400 hover:text-rose-700 hover:bg-rose-50 transition"
-                title={L('삭제', '削除', 'Delete')}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-bold text-rose-700 hover:bg-rose-50 border border-rose-200 transition"
+                title={L('일정 삭제', '予定を削除', 'Delete event')}
               >
-                <Trash2 className="w-3.5 h-3.5" />
+                <Trash2 className="w-3 h-3" />
+                {L('삭제', '削除', 'Delete')}
               </button>
             </div>
           </div>
