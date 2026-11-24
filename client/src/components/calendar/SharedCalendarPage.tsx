@@ -25,9 +25,11 @@ import { useLanguage } from '../../context/LanguageContext';
 import { CalendarEventItem, CollabSpace } from '../../types/spaces';
 import {
   buildMonthGrid,
+  ExpandedEventInstance,
   expandEventsForRange,
   formatShortDate,
   layoutWeekBars,
+  MonthCell,
   parseYmd,
 } from '../../utils/calendarUtils';
 import { getJstTodayStr } from '../../utils/dateTime';
@@ -57,6 +59,265 @@ interface SharedCalendarPageProps {
 const WEEKDAYS_KO = ['일', '월', '화', '수', '목', '금', '토'];
 const WEEKDAYS_JA = ['日', '月', '火', '水', '木', '金', '土'];
 const WEEKDAYS_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+interface YearMonth {
+  year: number;
+  month0: number;
+}
+
+function shiftYearMonth(year: number, month0: number, delta: number): YearMonth {
+  const total = year * 12 + month0 + delta;
+  const nextYear = Math.floor(total / 12);
+  const nextMonth0 = ((total % 12) + 12) % 12;
+  return { year: nextYear, month0: nextMonth0 };
+}
+
+interface CalendarMonthPaneProps {
+  weeks: MonthCell[][];
+  expandedInstances: ExpandedEventInstance[];
+  weekdays: string[];
+  todayStr: string;
+  selectedDate: string;
+  isActive: boolean;
+  dragOverDate: string | null;
+  cardDragHoveredDate: string | null;
+  dropChoiceTargetDate: string | null;
+  hasPendingAction: boolean;
+  isCoarsePointer: boolean;
+  isDraggingEvent: boolean;
+  onDateCellClick?: (ymd: string) => void;
+  onDateContextMenu?: (e: React.MouseEvent, ymd: string) => void;
+  onDatePointerDown?: (e: React.PointerEvent, ymd: string) => void;
+  onPointerMoveLongPress?: (e: React.PointerEvent) => void;
+  onClearLongPress?: () => void;
+  onDateDragOver?: (e: React.DragEvent, ymd: string) => void;
+  onDateDragLeave?: (ymd: string) => void;
+  onDateDrop?: (e: React.DragEvent, ymd: string) => void;
+  onEventDragStart?: (e: React.DragEvent, ev: CalendarEventItem) => void;
+  onEventDragEnd?: () => void;
+  onEventClick?: (e: React.MouseEvent, ev: CalendarEventItem, startDate: string, colYmd: string | undefined) => void;
+  onEventContextMenu?: (e: React.MouseEvent, ev: CalendarEventItem) => void;
+  onEventPointerDown?: (e: React.PointerEvent, ev: CalendarEventItem) => void;
+}
+
+const CalendarMonthPane = React.memo<CalendarMonthPaneProps>(
+  ({
+    weeks,
+    expandedInstances,
+    weekdays,
+    todayStr,
+    selectedDate,
+    isActive,
+    dragOverDate,
+    cardDragHoveredDate,
+    dropChoiceTargetDate,
+    hasPendingAction,
+    isCoarsePointer,
+    isDraggingEvent,
+    onDateCellClick,
+    onDateContextMenu,
+    onDatePointerDown,
+    onPointerMoveLongPress,
+    onClearLongPress,
+    onDateDragOver,
+    onDateDragLeave,
+    onDateDrop,
+    onEventDragStart,
+    onEventDragEnd,
+    onEventClick,
+    onEventContextMenu,
+    onEventPointerDown,
+  }) => {
+    return (
+      <>
+        {/* Weekday Header */}
+        <div className="grid grid-cols-7 border-b border-ivory-200 bg-ivory-50">
+          {weekdays.map((wd, idx) => (
+            <div
+              key={wd}
+              className={`py-2 text-center text-[11px] font-bold ${
+                idx === 0 ? 'text-rose-600' : idx === 6 ? 'text-sky-700' : 'text-charcoal-600'
+              }`}
+            >
+              {wd}
+            </div>
+          ))}
+        </div>
+
+        {/* Week Rows with Multi-day Spanning Bars */}
+        <div className="divide-y divide-ivory-200">
+          {weeks.map((week, wIdx) => {
+            const barPlacements = layoutWeekBars(week, expandedInstances);
+            const MAX_VISIBLE_LANES = 4;
+            const visibleBars = barPlacements.filter((b) => b.lane < MAX_VISIBLE_LANES);
+            const overflowByCol = [0, 0, 0, 0, 0, 0, 0];
+            for (const b of barPlacements) {
+              if (b.lane >= MAX_VISIBLE_LANES) {
+                for (let c = b.colStart; c < b.colStart + b.colSpan; c++) {
+                  overflowByCol[c]++;
+                }
+              }
+            }
+
+            return (
+              <div key={wIdx} className="relative min-h-[104px] sm:min-h-[124px]">
+                {/* Background 7 Date Cells */}
+                <div className="grid grid-cols-7 divide-x divide-ivory-200 absolute inset-0">
+                  {week.map((cell, cIdx) => {
+                    const isToday = cell.ymd === todayStr;
+                    const isSelected = cell.ymd === selectedDate;
+                    const isDragOver =
+                      isActive &&
+                      (dragOverDate === cell.ymd ||
+                        cardDragHoveredDate === cell.ymd ||
+                        dropChoiceTargetDate === cell.ymd);
+
+                    return (
+                      <div
+                        key={cell.ymd}
+                        data-calendar-date={isActive ? cell.ymd : undefined}
+                        style={{
+                          WebkitUserSelect: 'none',
+                          userSelect: 'none',
+                          WebkitTouchCallout: 'none',
+                        }}
+                        onClick={isActive ? () => onDateCellClick?.(cell.ymd) : undefined}
+                        onContextMenu={isActive ? (e) => onDateContextMenu?.(e, cell.ymd) : undefined}
+                        onPointerDown={isActive ? (e) => onDatePointerDown?.(e, cell.ymd) : undefined}
+                        onPointerMove={isActive ? onPointerMoveLongPress : undefined}
+                        onPointerUp={isActive ? onClearLongPress : undefined}
+                        onPointerCancel={isActive ? onClearLongPress : undefined}
+                        onPointerLeave={isActive ? onClearLongPress : undefined}
+                        onDragOver={
+                          isActive && isDraggingEvent ? (e) => onDateDragOver?.(e, cell.ymd) : undefined
+                        }
+                        onDragLeave={isActive && isDraggingEvent ? () => onDateDragLeave?.(cell.ymd) : undefined}
+                        onDrop={isActive && isDraggingEvent ? (e) => onDateDrop?.(e, cell.ymd) : undefined}
+                        className={`p-1 sm:p-1.5 transition cursor-pointer flex flex-col justify-between ${
+                          !cell.inCurrentMonth ? 'bg-ivory-50/70' : 'bg-white'
+                        } ${isSelected ? 'ring-2 ring-inset ring-forest-700 bg-forest-50/40' : 'hover:bg-ivory-50'} ${
+                          isDragOver ? 'ring-2 ring-inset ring-sky-600 bg-sky-50' : ''
+                        } ${hasPendingAction ? 'hover:bg-emerald-50 hover:ring-2 hover:ring-inset hover:ring-emerald-600' : ''}`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span
+                            className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-[11px] font-bold ${
+                              isToday
+                                ? 'bg-forest-800 text-white'
+                                : !cell.inCurrentMonth
+                                  ? 'text-charcoal-300'
+                                  : cIdx === 0
+                                    ? 'text-rose-600'
+                                    : cIdx === 6
+                                      ? 'text-sky-700'
+                                      : 'text-charcoal-800'
+                            }`}
+                          >
+                            {cell.day}
+                          </span>
+                        </div>
+
+                        {overflowByCol[cIdx] > 0 && (
+                          <div className="text-[10px] font-bold text-charcoal-500 px-1 truncate">
+                            +{overflowByCol[cIdx]}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Spanning Event Bars Overlay */}
+                <div className="relative pt-7 sm:pt-8 pb-4 pointer-events-none">
+                  <div className="grid grid-cols-7 gap-y-0.5 px-0.5">
+                    {Array.from({
+                      length: Math.min(MAX_VISIBLE_LANES, Math.max(0, ...visibleBars.map((b) => b.lane + 1))),
+                    }).map((_, laneIdx) => {
+                      const laneBars = visibleBars.filter((b) => b.lane === laneIdx);
+                      return (
+                        <div key={laneIdx} className="col-span-7 grid grid-cols-7 h-[20px] sm:h-[22px] items-center">
+                          {laneBars.map((bar) => {
+                            const ev = bar.instance.event;
+                            const isProposed = ev.event_status === 'PROPOSED';
+
+                            return (
+                              <div
+                                key={bar.instance.instanceKey}
+                                style={{
+                                  gridColumn: `${bar.colStart + 1} / span ${bar.colSpan}`,
+                                  WebkitUserSelect: 'none',
+                                  userSelect: 'none',
+                                  WebkitTouchCallout: 'none',
+                                  ...(isProposed
+                                    ? {
+                                        borderColor: ev.color,
+                                        backgroundColor: `${ev.color}18`,
+                                        color:
+                                          ev.text_color && ev.text_color.toUpperCase() !== '#FFFFFF'
+                                            ? ev.text_color
+                                            : ev.color,
+                                      }
+                                    : {
+                                        backgroundColor: ev.color,
+                                        color: ev.text_color || '#ffffff',
+                                      }),
+                                }}
+                                draggable={isActive && !hasPendingAction && !isCoarsePointer}
+                                onDragStart={isActive ? (e) => onEventDragStart?.(e, ev) : undefined}
+                                onDragEnd={isActive ? onEventDragEnd : undefined}
+                                onClick={
+                                  isActive
+                                    ? (e) => onEventClick?.(e, ev, bar.instance.startDate, week[bar.colStart]?.ymd)
+                                    : undefined
+                                }
+                                onContextMenu={isActive ? (e) => onEventContextMenu?.(e, ev) : undefined}
+                                onPointerDown={isActive ? (e) => onEventPointerDown?.(e, ev) : undefined}
+                                onPointerMove={isActive ? onPointerMoveLongPress : undefined}
+                                onPointerUp={isActive ? onClearLongPress : undefined}
+                                onPointerCancel={isActive ? onClearLongPress : undefined}
+                                onPointerLeave={isActive ? onClearLongPress : undefined}
+                                title={isActive ? `${ev.title}${ev.is_all_day ? '' : ` (${ev.start_time})`}` : undefined}
+                                className={`${isActive ? 'pointer-events-auto cursor-pointer hover:brightness-95' : 'pointer-events-none'} mx-[1px] px-1 h-[19px] sm:h-[20px] flex items-center gap-0.5 text-[10px] sm:text-[11px] font-bold overflow-hidden whitespace-nowrap [text-overflow:clip] transition ${
+                                  bar.continuesBefore ? 'rounded-l-none' : 'rounded-l-md'
+                                } ${bar.continuesAfter ? 'rounded-r-none' : 'rounded-r-md'} ${
+                                  isProposed ? 'border border-dashed' : ''
+                                }`}
+                              >
+                                {isProposed && <span className="shrink-0">?</span>}
+                                {!ev.is_all_day && ev.start_time && !bar.continuesBefore && (
+                                  <span className="opacity-85 shrink-0 hidden sm:inline text-[9px]">
+                                    {ev.start_time}
+                                  </span>
+                                )}
+                                <span className="min-w-0 flex-1 overflow-hidden whitespace-nowrap [text-overflow:clip]">
+                                  {ev.title}
+                                </span>
+                                {ev.recurrence_type !== 'NONE' && (
+                                  <Repeat className="w-2.5 h-2.5 shrink-0 opacity-80 hidden sm:inline" />
+                                )}
+                                {ev.comment_count > 0 && (
+                                  <span className="ml-auto shrink-0 hidden sm:inline-flex items-center gap-0.5 text-[9px] opacity-90">
+                                    <MessageSquare className="w-2.5 h-2.5" />
+                                    {ev.comment_count}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </>
+    );
+  }
+);
+CalendarMonthPane.displayName = 'CalendarMonthPane';
 
 export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
   spaces,
@@ -140,6 +401,35 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
   const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
   const longPressFiredRef = useRef(false);
 
+  // Month touch-swipe & slide-fade transition refs / state
+  const swipeViewportRef = useRef<HTMLDivElement | null>(null);
+  const prevPaneRef = useRef<HTMLDivElement | null>(null);
+  const currPaneRef = useRef<HTMLDivElement | null>(null);
+  const nextPaneRef = useRef<HTMLDivElement | null>(null);
+  const viewYMRef = useRef<YearMonth>({ year: viewYear, month0: viewMonth0 });
+  viewYMRef.current = { year: viewYear, month0: viewMonth0 };
+
+  const [animTargetYM, setAnimTargetYM] = useState<YearMonth | null>(null);
+  const animRef = useRef<{
+    type: 'commit' | 'snapback';
+    delta: -1 | 0 | 1;
+    targetYM: YearMonth;
+    timerId: number;
+    cleanupTransitionEnd: (() => void) | null;
+  } | null>(null);
+  const queuedDeltaRef = useRef<number>(0);
+  const swipeActiveRef = useRef<boolean>(false);
+  const lastSwipeEndedAtRef = useRef<number>(0);
+  const touchSessionRef = useRef<{
+    touchId: number;
+    startX: number;
+    startY: number;
+    lastX: number;
+    width: number;
+    lock: 'undecided' | 'horizontal' | 'vertical';
+    samples: Array<{ x: number; t: number }>;
+  } | null>(null);
+
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
     window.setTimeout(() => {
@@ -172,12 +462,63 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
     }
   }, [realtimeTick, activeSpace?.id, loadEvents]);
 
+  const resetPaneStylesImmediate = useCallback(() => {
+    const prevEl = prevPaneRef.current;
+    const currEl = currPaneRef.current;
+    const nextEl = nextPaneRef.current;
+
+    if (currEl) {
+      currEl.style.transition = 'none';
+      currEl.style.transform = '';
+      currEl.style.opacity = '1';
+      currEl.style.willChange = '';
+    }
+    if (prevEl) {
+      prevEl.style.transition = 'none';
+      prevEl.style.transform = 'translate3d(-100%, 0, 0)';
+      prevEl.style.opacity = '0';
+      prevEl.style.visibility = 'hidden';
+      prevEl.style.willChange = '';
+    }
+    if (nextEl) {
+      nextEl.style.transition = 'none';
+      nextEl.style.transform = 'translate3d(100%, 0, 0)';
+      nextEl.style.opacity = '0';
+      nextEl.style.visibility = 'hidden';
+      nextEl.style.willChange = '';
+    }
+  }, []);
+
+  const clearActiveAnimation = useCallback(() => {
+    const active = animRef.current;
+    if (!active) return;
+    window.clearTimeout(active.timerId);
+    active.cleanupTransitionEnd?.();
+    animRef.current = null;
+  }, []);
+
+  const jumpToYearMonth = useCallback(
+    (year: number, month0: number) => {
+      clearActiveAnimation();
+      queuedDeltaRef.current = 0;
+      touchSessionRef.current = null;
+      swipeActiveRef.current = false;
+      setAnimTargetYM(null);
+      if (viewYMRef.current.year === year && viewYMRef.current.month0 === month0) {
+        resetPaneStylesImmediate();
+      } else {
+        setViewYear(year);
+        setViewMonth0(month0);
+      }
+    },
+    [clearActiveAnimation, resetPaneStylesImmediate]
+  );
+
   // Handle deep link / jump from Shared Thought or Activity Feed
   useEffect(() => {
     if (initialFocusDate && /^\d{4}-\d{2}-\d{2}$/.test(initialFocusDate)) {
       const parsed = parseYmd(initialFocusDate);
-      setViewYear(parsed.year);
-      setViewMonth0(parsed.month - 1);
+      jumpToYearMonth(parsed.year, parsed.month - 1);
       setSelectedDate(initialFocusDate);
     }
     if (initialFocusEventId) {
@@ -186,15 +527,26 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
     if (initialFocusDate || initialFocusEventId) {
       onConsumeInitialFocus?.();
     }
-  }, [initialFocusEventId, initialFocusDate, onConsumeInitialFocus]);
+  }, [initialFocusEventId, initialFocusDate, onConsumeInitialFocus, jumpToYearMonth]);
 
+  const prevYM = useMemo(() => shiftYearMonth(viewYear, viewMonth0, -1), [viewYear, viewMonth0]);
+  const nextYM = useMemo(() => shiftYearMonth(viewYear, viewMonth0, 1), [viewYear, viewMonth0]);
+
+  const prevWeeks = useMemo(() => buildMonthGrid(prevYM.year, prevYM.month0), [prevYM.year, prevYM.month0]);
   const weeks = useMemo(() => buildMonthGrid(viewYear, viewMonth0), [viewYear, viewMonth0]);
-  const rangeStart = weeks[0][0].ymd;
-  const rangeEnd = weeks[weeks.length - 1][6].ymd;
+  const nextWeeks = useMemo(() => buildMonthGrid(nextYM.year, nextYM.month0), [nextYM.year, nextYM.month0]);
 
+  const prevExpandedInstances = useMemo(
+    () => expandEventsForRange(events, prevWeeks[0][0].ymd, prevWeeks[prevWeeks.length - 1][6].ymd),
+    [events, prevWeeks]
+  );
   const expandedInstances = useMemo(
-    () => expandEventsForRange(events, rangeStart, rangeEnd),
-    [events, rangeStart, rangeEnd]
+    () => expandEventsForRange(events, weeks[0][0].ymd, weeks[weeks.length - 1][6].ymd),
+    [events, weeks]
+  );
+  const nextExpandedInstances = useMemo(
+    () => expandEventsForRange(events, nextWeeks[0][0].ymd, nextWeeks[nextWeeks.length - 1][6].ymd),
+    [events, nextWeeks]
   );
 
   const selectedDayEvents = useMemo(() => {
@@ -214,27 +566,264 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
     [events]
   );
 
-  const goPrevMonth = () => {
-    if (viewMonth0 === 0) {
-      setViewYear((y) => y - 1);
-      setViewMonth0(11);
-    } else {
-      setViewMonth0((m) => m - 1);
-    }
-  };
+  const applyDragFrame = useCallback((dx: number, width: number) => {
+    const prevEl = prevPaneRef.current;
+    const currEl = currPaneRef.current;
+    const nextEl = nextPaneRef.current;
+    if (!currEl || !prevEl || !nextEl) return;
 
-  const goNextMonth = () => {
-    if (viewMonth0 === 11) {
-      setViewYear((y) => y + 1);
-      setViewMonth0(0);
+    const clampedDx = Math.max(-width, Math.min(width, dx));
+    const progress = Math.min(1, Math.abs(clampedDx) / Math.max(1, width));
+    const currOpacity = Math.max(0.12, 1 - progress * 0.88);
+    const incomingOpacity = Math.min(1, 0.18 + progress * 0.82);
+
+    currEl.style.transition = 'none';
+    currEl.style.willChange = 'transform, opacity';
+    currEl.style.transform = `translate3d(${clampedDx}px, 0, 0)`;
+    currEl.style.opacity = String(currOpacity);
+
+    if (clampedDx > 0) {
+      prevEl.style.transition = 'none';
+      prevEl.style.willChange = 'transform, opacity';
+      prevEl.style.visibility = 'visible';
+      prevEl.style.transform = `translate3d(${clampedDx - width}px, 0, 0)`;
+      prevEl.style.opacity = String(incomingOpacity);
+
+      nextEl.style.transition = 'none';
+      nextEl.style.visibility = 'hidden';
+      nextEl.style.opacity = '0';
+      nextEl.style.transform = `translate3d(${width}px, 0, 0)`;
+    } else if (clampedDx < 0) {
+      nextEl.style.transition = 'none';
+      nextEl.style.willChange = 'transform, opacity';
+      nextEl.style.visibility = 'visible';
+      nextEl.style.transform = `translate3d(${clampedDx + width}px, 0, 0)`;
+      nextEl.style.opacity = String(incomingOpacity);
+
+      prevEl.style.transition = 'none';
+      prevEl.style.visibility = 'hidden';
+      prevEl.style.opacity = '0';
+      prevEl.style.transform = `translate3d(${-width}px, 0, 0)`;
     } else {
-      setViewMonth0((m) => m + 1);
+      prevEl.style.transition = 'none';
+      prevEl.style.visibility = 'hidden';
+      prevEl.style.opacity = '0';
+      prevEl.style.transform = `translate3d(${-width}px, 0, 0)`;
+
+      nextEl.style.transition = 'none';
+      nextEl.style.visibility = 'hidden';
+      nextEl.style.opacity = '0';
+      nextEl.style.transform = `translate3d(${width}px, 0, 0)`;
     }
-  };
+  }, []);
+
+  const startCommitSlide = useCallback(
+    (delta: -1 | 1, durationMs: number, fromScratch: boolean) => {
+      const viewport = swipeViewportRef.current;
+      const prevEl = prevPaneRef.current;
+      const currEl = currPaneRef.current;
+      const nextEl = nextPaneRef.current;
+      const targetYM = shiftYearMonth(viewYMRef.current.year, viewYMRef.current.month0, delta);
+
+      const width = viewport?.offsetWidth || 0;
+      const reducedMotion =
+        typeof window !== 'undefined' &&
+        Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+
+      if (!currEl || !prevEl || !nextEl || width <= 0 || reducedMotion) {
+        clearActiveAnimation();
+        setAnimTargetYM(null);
+        setViewYear(targetYM.year);
+        setViewMonth0(targetYM.month0);
+        resetPaneStylesImmediate();
+        return;
+      }
+
+      clearActiveAnimation();
+
+      const incomingEl = delta === -1 ? prevEl : nextEl;
+      const otherEl = delta === -1 ? nextEl : prevEl;
+      const exitX = delta === -1 ? width : -width;
+      const enterStartX = delta === -1 ? -width : width;
+
+      if (fromScratch) {
+        currEl.style.transition = 'none';
+        currEl.style.willChange = 'transform, opacity';
+        currEl.style.transform = 'translate3d(0px, 0, 0)';
+        currEl.style.opacity = '1';
+
+        incomingEl.style.transition = 'none';
+        incomingEl.style.willChange = 'transform, opacity';
+        incomingEl.style.visibility = 'visible';
+        incomingEl.style.transform = `translate3d(${enterStartX}px, 0, 0)`;
+        incomingEl.style.opacity = '0.18';
+
+        otherEl.style.transition = 'none';
+        otherEl.style.visibility = 'hidden';
+        otherEl.style.opacity = '0';
+        otherEl.style.transform = `translate3d(${-enterStartX}px, 0, 0)`;
+
+        // Force reflow so the browser registers the starting frame before transitioning
+        void currEl.offsetWidth;
+      } else {
+        otherEl.style.transition = 'none';
+        otherEl.style.visibility = 'hidden';
+        otherEl.style.opacity = '0';
+        incomingEl.style.visibility = 'visible';
+      }
+
+      const easing = `transform ${durationMs}ms cubic-bezier(0.22, 1, 0.36, 1), opacity ${durationMs}ms ease-out`;
+      currEl.style.transition = easing;
+      incomingEl.style.transition = easing;
+
+      currEl.style.transform = `translate3d(${exitX}px, 0, 0)`;
+      currEl.style.opacity = '0.12';
+      incomingEl.style.transform = 'translate3d(0px, 0, 0)';
+      incomingEl.style.opacity = '1';
+
+      setAnimTargetYM(targetYM);
+
+      let finished = false;
+      const complete = () => {
+        if (finished) return;
+        finished = true;
+        clearActiveAnimation();
+        setAnimTargetYM(null);
+        setViewYear(targetYM.year);
+        setViewMonth0(targetYM.month0);
+      };
+
+      const onTransitionEnd = (e: TransitionEvent) => {
+        if (e.target === currEl && e.propertyName === 'transform') {
+          complete();
+        }
+      };
+      currEl.addEventListener('transitionend', onTransitionEnd);
+      const timerId = window.setTimeout(complete, durationMs + 50);
+
+      animRef.current = {
+        type: 'commit',
+        delta,
+        targetYM,
+        timerId,
+        cleanupTransitionEnd: () => currEl.removeEventListener('transitionend', onTransitionEnd),
+      };
+    },
+    [clearActiveAnimation, resetPaneStylesImmediate]
+  );
+
+  const startSnapBackSlide = useCallback(
+    (width: number, dxSign: number) => {
+      const prevEl = prevPaneRef.current;
+      const currEl = currPaneRef.current;
+      const nextEl = nextPaneRef.current;
+      if (!currEl || !prevEl || !nextEl || width <= 0 || dxSign === 0) {
+        clearActiveAnimation();
+        resetPaneStylesImmediate();
+        return;
+      }
+
+      clearActiveAnimation();
+
+      const durationMs = 220;
+      const easing = `transform ${durationMs}ms cubic-bezier(0.22, 1, 0.36, 1), opacity ${durationMs}ms ease-out`;
+
+      currEl.style.transition = easing;
+      currEl.style.transform = 'translate3d(0px, 0, 0)';
+      currEl.style.opacity = '1';
+
+      if (dxSign > 0) {
+        prevEl.style.transition = easing;
+        prevEl.style.transform = `translate3d(${-width}px, 0, 0)`;
+        prevEl.style.opacity = '0.18';
+      } else {
+        nextEl.style.transition = easing;
+        nextEl.style.transform = `translate3d(${width}px, 0, 0)`;
+        nextEl.style.opacity = '0.18';
+      }
+
+      let finished = false;
+      const complete = () => {
+        if (finished) return;
+        finished = true;
+        clearActiveAnimation();
+        resetPaneStylesImmediate();
+      };
+
+      const onTransitionEnd = (e: TransitionEvent) => {
+        if (e.target === currEl && e.propertyName === 'transform') {
+          complete();
+        }
+      };
+      currEl.addEventListener('transitionend', onTransitionEnd);
+      const timerId = window.setTimeout(complete, durationMs + 50);
+
+      animRef.current = {
+        type: 'snapback',
+        delta: 0,
+        targetYM: viewYMRef.current,
+        timerId,
+        cleanupTransitionEnd: () => currEl.removeEventListener('transitionend', onTransitionEnd),
+      };
+    },
+    [clearActiveAnimation, resetPaneStylesImmediate]
+  );
+
+  // Synchronously reset pane transforms right after React commits a new month (zero flicker)
+  useLayoutEffect(() => {
+    resetPaneStylesImmediate();
+
+    if (queuedDeltaRef.current !== 0) {
+      const nextStep: -1 | 1 = queuedDeltaRef.current > 0 ? 1 : -1;
+      queuedDeltaRef.current -= nextStep;
+      startCommitSlide(nextStep, 200, true);
+    }
+  }, [viewYear, viewMonth0, resetPaneStylesImmediate, startCommitSlide]);
+
+  useEffect(() => {
+    return () => {
+      clearActiveAnimation();
+      queuedDeltaRef.current = 0;
+    };
+  }, [clearActiveAnimation]);
+
+  const triggerMonthStep = useCallback(
+    (delta: -1 | 1) => {
+      if (swipeActiveRef.current) return;
+      const active = animRef.current;
+      if (active) {
+        if (active.type === 'commit') {
+          if (delta === -active.delta) {
+            // Reversing mid-flight smoothly snaps back to current month
+            const width = swipeViewportRef.current?.offsetWidth || 360;
+            queuedDeltaRef.current = 0;
+            setAnimTargetYM(null);
+            startSnapBackSlide(width, active.delta === -1 ? 1 : -1);
+            return;
+          }
+          // Rapid repeated click in same direction: commit in-flight month and queue follow-up
+          const target = active.targetYM;
+          clearActiveAnimation();
+          queuedDeltaRef.current = delta;
+          setAnimTargetYM(shiftYearMonth(target.year, target.month0, delta));
+          setViewYear(target.year);
+          setViewMonth0(target.month0);
+          return;
+        }
+        clearActiveAnimation();
+        resetPaneStylesImmediate();
+      }
+      startCommitSlide(delta, 260, true);
+    },
+    [clearActiveAnimation, resetPaneStylesImmediate, startCommitSlide, startSnapBackSlide]
+  );
+
+  const goPrevMonth = () => triggerMonthStep(-1);
+
+  const goNextMonth = () => triggerMonthStep(1);
 
   const goToday = () => {
-    setViewYear(todayParsed.year);
-    setViewMonth0(todayParsed.month - 1);
+    jumpToYearMonth(todayParsed.year, todayParsed.month - 1);
     setSelectedDate(todayStr);
   };
 
@@ -284,19 +873,179 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
   };
 
   // Long-press helpers
-  const clearLongPress = () => {
+  const clearLongPress = useCallback(() => {
     if (longPressTimerRef.current !== null) {
       window.clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
     longPressStartRef.current = null;
-  };
+  }, []);
 
-  const isCardDragBlocking = () =>
-    Boolean(cardDragRef.current) || performance.now() - cardDragEndedAtRef.current < 400;
+  const isCardDragBlocking = useCallback(
+    () => Boolean(cardDragRef.current) || performance.now() - cardDragEndedAtRef.current < 400,
+    []
+  );
+
+  const isSwipeBlocking = useCallback(
+    () => swipeActiveRef.current || performance.now() - lastSwipeEndedAtRef.current < 350,
+    []
+  );
+
+  // Native touch-swipe listeners on calendar viewport (non-passive touchmove for iOS Safari / Android Chrome)
+  useEffect(() => {
+    const viewport = swipeViewportRef.current;
+    if (!viewport) return;
+
+    const findTouchById = (list: TouchList, id: number): Touch | null => {
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].identifier === id) return list[i];
+      }
+      return null;
+    };
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      if (isCardDragBlocking() || animRef.current) return;
+
+      const t = e.touches[0];
+      const now = performance.now();
+      touchSessionRef.current = {
+        touchId: t.identifier,
+        startX: t.clientX,
+        startY: t.clientY,
+        lastX: t.clientX,
+        width: viewport.offsetWidth || 360,
+        lock: 'undecided',
+        samples: [{ x: t.clientX, t: now }],
+      };
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      const session = touchSessionRef.current;
+      if (!session) return;
+
+      if (e.touches.length !== 1 || isCardDragBlocking()) {
+        if (session.lock === 'horizontal') {
+          const dx = session.lastX - session.startX;
+          swipeActiveRef.current = false;
+          lastSwipeEndedAtRef.current = performance.now();
+          startSnapBackSlide(session.width, dx);
+        }
+        touchSessionRef.current = null;
+        return;
+      }
+
+      const t = findTouchById(e.touches, session.touchId);
+      if (!t) return;
+
+      const dx = t.clientX - session.startX;
+      const dy = t.clientY - session.startY;
+
+      if (session.lock === 'undecided') {
+        if (longPressFiredRef.current) {
+          touchSessionRef.current = null;
+          return;
+        }
+        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+
+        if (Math.abs(dx) > Math.abs(dy) * 1.15) {
+          session.lock = 'horizontal';
+          swipeActiveRef.current = true;
+          clearLongPress();
+        } else {
+          session.lock = 'vertical';
+          return;
+        }
+      }
+
+      if (session.lock !== 'horizontal') return;
+
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+
+      const now = performance.now();
+      session.lastX = t.clientX;
+      session.samples.push({ x: t.clientX, t: now });
+      while (session.samples.length > 6 || (session.samples.length > 1 && now - session.samples[0].t > 120)) {
+        session.samples.shift();
+      }
+
+      applyDragFrame(dx, session.width);
+    };
+
+    const finishTouch = (e: TouchEvent, cancelled: boolean) => {
+      const session = touchSessionRef.current;
+      if (!session) return;
+
+      // Ignore if tracked finger is still touching
+      if (findTouchById(e.touches, session.touchId)) return;
+
+      touchSessionRef.current = null;
+      if (session.lock !== 'horizontal') return;
+
+      const endedTouch = findTouchById(e.changedTouches, session.touchId);
+      const endX = endedTouch ? endedTouch.clientX : session.lastX;
+      const dx = endX - session.startX;
+      const width = session.width;
+
+      swipeActiveRef.current = false;
+      lastSwipeEndedAtRef.current = performance.now();
+
+      if (cancelled) {
+        startSnapBackSlide(width, dx);
+        return;
+      }
+
+      const now = performance.now();
+      const lastSample = session.samples[session.samples.length - 1];
+      let velocityPxPerMs = 0;
+      if (lastSample && now - lastSample.t <= 90) {
+        const recent = session.samples.filter((s) => now - s.t <= 120);
+        const oldest = recent[0] ?? lastSample;
+        const dt = Math.max(8, now - oldest.t);
+        velocityPxPerMs = (endX - oldest.x) / dt;
+      }
+
+      const absDx = Math.abs(dx);
+      const absV = Math.abs(velocityPxPerMs);
+      const sameDir = velocityPxPerMs === 0 || Math.sign(velocityPxPerMs) === Math.sign(dx);
+      const reversingFlick = absV >= 0.35 && Math.sign(velocityPxPerMs) !== Math.sign(dx);
+
+      const passDistance = absDx >= width * 0.25 && !reversingFlick;
+      const passFlick = absDx >= 35 && absV >= 0.35 && sameDir;
+
+      if (passDistance || passFlick) {
+        const delta: -1 | 1 = dx > 0 ? -1 : 1;
+        const remaining = 1 - Math.min(1, absDx / Math.max(1, width));
+        let durationMs = Math.round(Math.max(170, Math.min(270, 140 + remaining * 140)));
+        if (absV > 0.7) {
+          durationMs = Math.min(durationMs, 210);
+        }
+        startCommitSlide(delta, durationMs, false);
+      } else {
+        startSnapBackSlide(width, dx);
+      }
+    };
+
+    const onTouchEnd = (e: TouchEvent) => finishTouch(e, false);
+    const onTouchCancel = (e: TouchEvent) => finishTouch(e, true);
+
+    viewport.addEventListener('touchstart', onTouchStart, { passive: true });
+    viewport.addEventListener('touchmove', onTouchMove, { passive: false });
+    viewport.addEventListener('touchend', onTouchEnd, { passive: true });
+    viewport.addEventListener('touchcancel', onTouchCancel, { passive: true });
+
+    return () => {
+      viewport.removeEventListener('touchstart', onTouchStart);
+      viewport.removeEventListener('touchmove', onTouchMove);
+      viewport.removeEventListener('touchend', onTouchEnd);
+      viewport.removeEventListener('touchcancel', onTouchCancel);
+    };
+  }, [Boolean(activeSpace), applyDragFrame, clearLongPress, isCardDragBlocking, startCommitSlide, startSnapBackSlide]);
 
   const startLongPress = (e: React.PointerEvent, onTrigger: () => void) => {
-    if (isCardDragBlocking()) return;
+    if (isCardDragBlocking() || isSwipeBlocking()) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if ((e.target as HTMLElement).closest('button')) return;
     clearLongPress();
@@ -467,7 +1216,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
   }, [cardDragState]);
 
   const handleDateCellClick = (ymd: string) => {
-    if (isCardDragBlocking()) return;
+    if (isCardDragBlocking() || isSwipeBlocking()) return;
     if (longPressFiredRef.current) {
       longPressFiredRef.current = false;
       return;
@@ -482,6 +1231,85 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
     }
   };
 
+  const handleDateContextMenu = (e: React.MouseEvent, ymd: string) => {
+    e.preventDefault();
+    if (isCardDragBlocking() || isSwipeBlocking()) return;
+    setSelectedDate(ymd);
+    setQuickAddDate(ymd);
+  };
+
+  const handleDatePointerDown = (e: React.PointerEvent, ymd: string) => {
+    startLongPress(e, () => {
+      setSelectedDate(ymd);
+      setQuickAddDate(ymd);
+    });
+  };
+
+  const handleDateDragOver = (e: React.DragEvent, ymd: string) => {
+    if (!draggingEvent) return;
+    e.preventDefault();
+    if (dragOverDate !== ymd) setDragOverDate(ymd);
+  };
+
+  const handleDateDragLeave = (ymd: string) => {
+    if (dragOverDate === ymd) setDragOverDate(null);
+  };
+
+  const handleDateDrop = (e: React.DragEvent, ymd: string) => {
+    e.preventDefault();
+    setDragOverDate(null);
+    if (draggingEvent && draggingEvent.start_date !== ymd) {
+      openDropChoiceAtDate(draggingEvent, ymd);
+    }
+    setDraggingEvent(null);
+  };
+
+  const handleEventDragStart = (e: React.DragEvent, ev: CalendarEventItem) => {
+    clearLongPress();
+    setDraggingEvent(ev);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(ev.id));
+  };
+
+  const handleEventDragEnd = () => {
+    setDraggingEvent(null);
+    setDragOverDate(null);
+  };
+
+  const handleEventClick = (
+    e: React.MouseEvent,
+    ev: CalendarEventItem,
+    startDate: string,
+    colYmd: string | undefined
+  ) => {
+    e.stopPropagation();
+    if (isCardDragBlocking() || isSwipeBlocking()) return;
+    if (longPressFiredRef.current) {
+      longPressFiredRef.current = false;
+      return;
+    }
+    if (pendingAction) {
+      if (colYmd) {
+        void executeMoveOrCopy(pendingAction.type, pendingAction.event, colYmd);
+      }
+      return;
+    }
+    setSelectedDate(startDate);
+    setDetailEventId(ev.id);
+  };
+
+  const handleEventContextMenu = (e: React.MouseEvent, ev: CalendarEventItem) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isCardDragBlocking() || isSwipeBlocking()) return;
+    setEventActionTarget(ev);
+  };
+
+  const handleEventPointerDown = (e: React.PointerEvent, ev: CalendarEventItem) => {
+    e.stopPropagation();
+    startLongPress(e, () => setEventActionTarget(ev));
+  };
+
   const openNewEventForDate = (ymd: string) => {
     setEditingEvent(null);
     setEditorInitialDate(ymd);
@@ -489,6 +1317,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
   };
 
   const weekdays = language === 'ja' ? WEEKDAYS_JA : language === 'en' ? WEEKDAYS_EN : WEEKDAYS_KO;
+  const headerYM = animTargetYM ?? { year: viewYear, month0: viewMonth0 };
 
   if (!activeSpace) {
     return (
@@ -544,8 +1373,8 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
             </button>
             <span className="px-2 text-xs sm:text-sm font-bold text-charcoal-900 tabular-nums whitespace-nowrap">
               {language === 'en'
-                ? `${viewYear}-${String(viewMonth0 + 1).padStart(2, '0')}`
-                : `${viewYear}년 ${viewMonth0 + 1}월`}
+                ? `${headerYM.year}-${String(headerYM.month0 + 1).padStart(2, '0')}`
+                : `${headerYM.year}년 ${headerYM.month0 + 1}월`}
             </span>
             <button
               type="button"
@@ -645,8 +1474,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
                 type="button"
                 onClick={() => {
                   const p = parseYmd(pe.start_date);
-                  setViewYear(p.year);
-                  setViewMonth0(p.month - 1);
+                  jumpToYearMonth(p.year, p.month - 1);
                   setSelectedDate(pe.start_date);
                   setDetailEventId(pe.id);
                 }}
@@ -665,234 +1493,96 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
       <div className="grid grid-cols-1 xl:grid-cols-[min(1100px,calc(100%_-_436px))_minmax(420px,1fr)] gap-4 items-start">
         {/* Monthly Calendar Grid Card */}
         <div className="bg-white rounded-2xl border border-ivory-300 overflow-hidden shadow-2xs select-none">
-          {/* Weekday Header */}
-          <div className="grid grid-cols-7 border-b border-ivory-200 bg-ivory-50">
-            {weekdays.map((wd, idx) => (
-              <div
-                key={wd}
-                className={`py-2 text-center text-[11px] font-bold ${
-                  idx === 0 ? 'text-rose-600' : idx === 6 ? 'text-sky-700' : 'text-charcoal-600'
-                }`}
-              >
-                {wd}
-              </div>
-            ))}
-          </div>
+          {/* Swipeable 3-Pane Viewport (Weekday Header + Week Rows) */}
+          <div
+            ref={swipeViewportRef}
+            className="relative overflow-hidden bg-white"
+            style={{ touchAction: 'pan-y' }}
+          >
+            {/* Previous Month Preview Pane */}
+            <div
+              ref={prevPaneRef}
+              aria-hidden="true"
+              className="absolute inset-x-0 top-0 pointer-events-none bg-white"
+              style={{
+                transform: 'translate3d(-100%, 0, 0)',
+                opacity: 0,
+                visibility: 'hidden',
+              }}
+            >
+              <CalendarMonthPane
+                weeks={prevWeeks}
+                expandedInstances={prevExpandedInstances}
+                weekdays={weekdays}
+                todayStr={todayStr}
+                selectedDate={selectedDate}
+                isActive={false}
+                dragOverDate={null}
+                cardDragHoveredDate={null}
+                dropChoiceTargetDate={null}
+                hasPendingAction={false}
+                isCoarsePointer={isCoarsePointer}
+                isDraggingEvent={false}
+              />
+            </div>
 
-          {/* Week Rows with Multi-day Spanning Bars */}
-          <div className="divide-y divide-ivory-200">
-            {weeks.map((week, wIdx) => {
-              const barPlacements = layoutWeekBars(week, expandedInstances);
-              const MAX_VISIBLE_LANES = 4;
-              const visibleBars = barPlacements.filter((b) => b.lane < MAX_VISIBLE_LANES);
-              const overflowByCol = [0, 0, 0, 0, 0, 0, 0];
-              for (const b of barPlacements) {
-                if (b.lane >= MAX_VISIBLE_LANES) {
-                  for (let c = b.colStart; c < b.colStart + b.colSpan; c++) {
-                    overflowByCol[c]++;
-                  }
-                }
-              }
+            {/* Active Current Month Pane */}
+            <div ref={currPaneRef} className="relative bg-white">
+              <CalendarMonthPane
+                weeks={weeks}
+                expandedInstances={expandedInstances}
+                weekdays={weekdays}
+                todayStr={todayStr}
+                selectedDate={selectedDate}
+                isActive={true}
+                dragOverDate={dragOverDate}
+                cardDragHoveredDate={cardDragState?.hoveredDate ?? null}
+                dropChoiceTargetDate={dropChoice?.targetDate ?? null}
+                hasPendingAction={Boolean(pendingAction)}
+                isCoarsePointer={isCoarsePointer}
+                isDraggingEvent={Boolean(draggingEvent)}
+                onDateCellClick={handleDateCellClick}
+                onDateContextMenu={handleDateContextMenu}
+                onDatePointerDown={handleDatePointerDown}
+                onPointerMoveLongPress={handlePointerMoveLongPress}
+                onClearLongPress={clearLongPress}
+                onDateDragOver={handleDateDragOver}
+                onDateDragLeave={handleDateDragLeave}
+                onDateDrop={handleDateDrop}
+                onEventDragStart={handleEventDragStart}
+                onEventDragEnd={handleEventDragEnd}
+                onEventClick={handleEventClick}
+                onEventContextMenu={handleEventContextMenu}
+                onEventPointerDown={handleEventPointerDown}
+              />
+            </div>
 
-              return (
-                <div key={wIdx} className="relative min-h-[104px] sm:min-h-[124px]">
-                  {/* Background 7 Date Cells */}
-                  <div className="grid grid-cols-7 divide-x divide-ivory-200 absolute inset-0">
-                    {week.map((cell, cIdx) => {
-                      const isToday = cell.ymd === todayStr;
-                      const isSelected = cell.ymd === selectedDate;
-                      const isDragOver =
-                        dragOverDate === cell.ymd ||
-                        cardDragState?.hoveredDate === cell.ymd ||
-                        dropChoice?.targetDate === cell.ymd;
-
-                      return (
-                        <div
-                          key={cell.ymd}
-                          data-calendar-date={cell.ymd}
-                          style={{
-                            WebkitUserSelect: 'none',
-                            userSelect: 'none',
-                            WebkitTouchCallout: 'none',
-                          }}
-                          onClick={() => handleDateCellClick(cell.ymd)}
-                          onContextMenu={(e) => {
-                            e.preventDefault();
-                            if (isCardDragBlocking()) return;
-                            setSelectedDate(cell.ymd);
-                            setQuickAddDate(cell.ymd);
-                          }}
-                          onPointerDown={(e) =>
-                            startLongPress(e, () => {
-                              setSelectedDate(cell.ymd);
-                              setQuickAddDate(cell.ymd);
-                            })
-                          }
-                          onPointerMove={handlePointerMoveLongPress}
-                          onPointerUp={clearLongPress}
-                          onPointerCancel={clearLongPress}
-                          onPointerLeave={clearLongPress}
-                          onDragOver={(e) => {
-                            if (!draggingEvent) return;
-                            e.preventDefault();
-                            if (dragOverDate !== cell.ymd) setDragOverDate(cell.ymd);
-                          }}
-                          onDragLeave={() => {
-                            if (dragOverDate === cell.ymd) setDragOverDate(null);
-                          }}
-                          onDrop={(e) => {
-                            e.preventDefault();
-                            setDragOverDate(null);
-                            if (draggingEvent && draggingEvent.start_date !== cell.ymd) {
-                              openDropChoiceAtDate(draggingEvent, cell.ymd);
-                            }
-                            setDraggingEvent(null);
-                          }}
-                          className={`p-1 sm:p-1.5 transition cursor-pointer flex flex-col justify-between ${
-                            !cell.inCurrentMonth ? 'bg-ivory-50/70' : 'bg-white'
-                          } ${isSelected ? 'ring-2 ring-inset ring-forest-700 bg-forest-50/40' : 'hover:bg-ivory-50'} ${
-                            isDragOver ? 'ring-2 ring-inset ring-sky-600 bg-sky-50' : ''
-                          } ${pendingAction ? 'hover:bg-emerald-50 hover:ring-2 hover:ring-inset hover:ring-emerald-600' : ''}`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <span
-                              className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-[11px] font-bold ${
-                                isToday
-                                  ? 'bg-forest-800 text-white'
-                                  : !cell.inCurrentMonth
-                                    ? 'text-charcoal-300'
-                                    : cIdx === 0
-                                      ? 'text-rose-600'
-                                      : cIdx === 6
-                                        ? 'text-sky-700'
-                                        : 'text-charcoal-800'
-                              }`}
-                            >
-                              {cell.day}
-                            </span>
-                          </div>
-
-                          {overflowByCol[cIdx] > 0 && (
-                            <div className="text-[10px] font-bold text-charcoal-500 px-1 truncate">
-                              +{overflowByCol[cIdx]}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* Spanning Event Bars Overlay */}
-                  <div className="relative pt-7 sm:pt-8 pb-4 pointer-events-none">
-                    <div className="grid grid-cols-7 gap-y-0.5 px-0.5">
-                      {Array.from({ length: Math.min(MAX_VISIBLE_LANES, Math.max(0, ...visibleBars.map((b) => b.lane + 1))) }).map(
-                        (_, laneIdx) => {
-                          const laneBars = visibleBars.filter((b) => b.lane === laneIdx);
-                          return (
-                            <div key={laneIdx} className="col-span-7 grid grid-cols-7 h-[20px] sm:h-[22px] items-center">
-                              {laneBars.map((bar) => {
-                                const ev = bar.instance.event;
-                                const isProposed = ev.event_status === 'PROPOSED';
-
-                                return (
-                                  <div
-                                    key={bar.instance.instanceKey}
-                                    style={{
-                                      gridColumn: `${bar.colStart + 1} / span ${bar.colSpan}`,
-                                      WebkitUserSelect: 'none',
-                                      userSelect: 'none',
-                                      WebkitTouchCallout: 'none',
-                                      ...(isProposed
-                                        ? {
-                                            borderColor: ev.color,
-                                            backgroundColor: `${ev.color}18`,
-                                            color:
-                                              ev.text_color && ev.text_color.toUpperCase() !== '#FFFFFF'
-                                                ? ev.text_color
-                                                : ev.color,
-                                          }
-                                        : {
-                                            backgroundColor: ev.color,
-                                            color: ev.text_color || '#ffffff',
-                                          }),
-                                    }}
-                                    draggable={!pendingAction && !isCoarsePointer}
-                                    onDragStart={(e) => {
-                                      clearLongPress();
-                                      setDraggingEvent(ev);
-                                      e.dataTransfer.effectAllowed = 'move';
-                                      e.dataTransfer.setData('text/plain', String(ev.id));
-                                    }}
-                                    onDragEnd={() => {
-                                      setDraggingEvent(null);
-                                      setDragOverDate(null);
-                                    }}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      if (isCardDragBlocking()) return;
-                                      if (longPressFiredRef.current) {
-                                        longPressFiredRef.current = false;
-                                        return;
-                                      }
-                                      if (pendingAction) {
-                                        const clickedCell = week[bar.colStart];
-                                        if (clickedCell) {
-                                          void executeMoveOrCopy(pendingAction.type, pendingAction.event, clickedCell.ymd);
-                                        }
-                                        return;
-                                      }
-                                      setSelectedDate(bar.instance.startDate);
-                                      setDetailEventId(ev.id);
-                                    }}
-                                    onContextMenu={(e) => {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      if (isCardDragBlocking()) return;
-                                      setEventActionTarget(ev);
-                                    }}
-                                    onPointerDown={(e) => {
-                                      e.stopPropagation();
-                                      startLongPress(e, () => setEventActionTarget(ev));
-                                    }}
-                                    onPointerMove={handlePointerMoveLongPress}
-                                    onPointerUp={clearLongPress}
-                                    onPointerCancel={clearLongPress}
-                                    onPointerLeave={clearLongPress}
-                                    title={`${ev.title}${ev.is_all_day ? '' : ` (${ev.start_time})`}`}
-                                    className={`pointer-events-auto mx-[1px] px-1 h-[19px] sm:h-[20px] flex items-center gap-0.5 text-[10px] sm:text-[11px] font-bold overflow-hidden whitespace-nowrap [text-overflow:clip] cursor-pointer transition hover:brightness-95 ${
-                                      bar.continuesBefore ? 'rounded-l-none' : 'rounded-l-md'
-                                    } ${bar.continuesAfter ? 'rounded-r-none' : 'rounded-r-md'} ${
-                                      isProposed ? 'border border-dashed' : ''
-                                    }`}
-                                  >
-                                    {isProposed && <span className="shrink-0">?</span>}
-                                    {!ev.is_all_day && ev.start_time && !bar.continuesBefore && (
-                                      <span className="opacity-85 shrink-0 hidden sm:inline text-[9px]">
-                                        {ev.start_time}
-                                      </span>
-                                    )}
-                                    <span className="min-w-0 flex-1 overflow-hidden whitespace-nowrap [text-overflow:clip]">{ev.title}</span>
-                                    {ev.recurrence_type !== 'NONE' && (
-                                      <Repeat className="w-2.5 h-2.5 shrink-0 opacity-80 hidden sm:inline" />
-                                    )}
-                                    {ev.comment_count > 0 && (
-                                      <span className="ml-auto shrink-0 hidden sm:inline-flex items-center gap-0.5 text-[9px] opacity-90">
-                                        <MessageSquare className="w-2.5 h-2.5" />
-                                        {ev.comment_count}
-                                      </span>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          );
-                        }
-                      )}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+            {/* Next Month Preview Pane */}
+            <div
+              ref={nextPaneRef}
+              aria-hidden="true"
+              className="absolute inset-x-0 top-0 pointer-events-none bg-white"
+              style={{
+                transform: 'translate3d(100%, 0, 0)',
+                opacity: 0,
+                visibility: 'hidden',
+              }}
+            >
+              <CalendarMonthPane
+                weeks={nextWeeks}
+                expandedInstances={nextExpandedInstances}
+                weekdays={weekdays}
+                todayStr={todayStr}
+                selectedDate={selectedDate}
+                isActive={false}
+                dragOverDate={null}
+                cardDragHoveredDate={null}
+                dropChoiceTargetDate={null}
+                hasPendingAction={false}
+                isCoarsePointer={isCoarsePointer}
+                isDraggingEvent={false}
+              />
+            </div>
           </div>
 
           {/* Subtle TimeTree Gesture Hint Footer */}
