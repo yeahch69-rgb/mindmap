@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Bell, BookMarked, Download, LogOut, Shield, SlidersHorizontal } from 'lucide-react';
+import { api, getStoredToken } from './api/client';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { LanguageProvider, useLanguage } from './context/LanguageContext';
 import { AuthScreen } from './components/auth/AuthScreen';
@@ -8,7 +9,17 @@ import {
   BeforeInstallPromptEvent,
   ProfileModal,
 } from './components/common/ProfileModal';
+import { DesktopSidebar, MobileBottomNav } from './components/layout/AppNavigation';
+import { SpaceSettingsModal } from './components/spaces/SpaceSettingsModal';
+import { ActivityFeedModal } from './components/spaces/ActivityFeedModal';
+import { SharedCalendarPage } from './components/calendar/SharedCalendarPage';
+import { SharedThoughtsPage } from './components/thoughts/SharedThoughtsPage';
 import { ProjectJournal } from './pages/ProjectJournal';
+import { CollabSpace, MainNavTab } from './types/spaces';
+
+const ACTIVE_TAB_KEY = 'pj_active_tab';
+const ACTIVE_SPACE_KEY = 'pj_active_space_id';
+const SIDEBAR_COLLAPSED_KEY = 'pj_sidebar_collapsed';
 
 const AppShell: React.FC = () => {
   const { user, isLoading, logout } = useAuth();
@@ -16,8 +27,15 @@ const AppShell: React.FC = () => {
 
   const [pendingInviteToken, setPendingInviteToken] = useState<string | null>(() => {
     try {
-      const params = new URLSearchParams(window.location.search);
-      return params.get('invite');
+      return new URLSearchParams(window.location.search).get('invite');
+    } catch {
+      return null;
+    }
+  });
+
+  const [pendingSpaceInviteToken, setPendingSpaceInviteToken] = useState<string | null>(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('spaceInvite');
     } catch {
       return null;
     }
@@ -25,8 +43,7 @@ const AppShell: React.FC = () => {
 
   const [initialProjectId, setInitialProjectId] = useState<number | null>(() => {
     try {
-      const params = new URLSearchParams(window.location.search);
-      const raw = params.get('project');
+      const raw = new URLSearchParams(window.location.search).get('project');
       const parsed = raw ? Number(raw) : NaN;
       return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
     } catch {
@@ -34,28 +51,221 @@ const AppShell: React.FC = () => {
     }
   });
 
+  const [activeTab, setActiveTabState] = useState<MainNavTab>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const urlTab = params.get('tab');
+      if (urlTab === 'calendar' || urlTab === 'thoughts' || urlTab === 'mindmap') {
+        return urlTab;
+      }
+      if (params.get('spaceInvite')) return 'calendar';
+      const saved = localStorage.getItem(ACTIVE_TAB_KEY);
+      if (saved === 'calendar' || saved === 'thoughts' || saved === 'mindmap') return saved;
+    } catch {}
+    return 'mindmap';
+  });
+
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  const [spaces, setSpaces] = useState<CollabSpace[]>([]);
+  const [activeSpaceId, setActiveSpaceIdState] = useState<number | null>(() => {
+    try {
+      const urlSpace = Number(new URLSearchParams(window.location.search).get('space'));
+      if (Number.isFinite(urlSpace) && urlSpace > 0) return urlSpace;
+      const saved = Number(localStorage.getItem(ACTIVE_SPACE_KEY));
+      if (Number.isFinite(saved) && saved > 0) return saved;
+    } catch {}
+    return null;
+  });
+
+  // Bidirectional jump focus targets (Calendar <-> Thoughts <-> Activity Feed <-> Push)
+  const [calendarFocusEventId, setCalendarFocusEventId] = useState<number | null>(() => {
+    try {
+      const raw = Number(new URLSearchParams(window.location.search).get('event'));
+      return Number.isFinite(raw) && raw > 0 ? raw : null;
+    } catch {
+      return null;
+    }
+  });
+  const [calendarFocusDate, setCalendarFocusDate] = useState<string | null>(null);
+  const [thoughtFocusId, setThoughtFocusId] = useState<number | null>(() => {
+    try {
+      const raw = Number(new URLSearchParams(window.location.search).get('thought'));
+      return Number.isFinite(raw) && raw > 0 ? raw : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // SSE realtime tick
+  const [realtimeTick, setRealtimeTick] = useState(0);
+
+  // Modals
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isAdminUsersOpen, setIsAdminUsersOpen] = useState(false);
+  const [spaceModalMode, setSpaceModalMode] = useState<'create' | 'edit' | null>(null);
+  const [spaceModalTarget, setSpaceModalTarget] = useState<CollabSpace | null>(null);
+  const [activityFeedOpen, setActivityFeedOpen] = useState(false);
+  const [spaceJoinBanner, setSpaceJoinBanner] = useState('');
+
   const [deferredInstallPrompt, setDeferredInstallPrompt] =
     useState<BeforeInstallPromptEvent | null>(null);
 
-  useEffect(() => {
-    if (pendingInviteToken || initialProjectId) {
-      const url = new URL(window.location.href);
-      url.searchParams.delete('invite');
-      url.searchParams.delete('project');
-      window.history.replaceState({}, '', url.pathname + url.search);
-    }
-  }, [pendingInviteToken, initialProjectId]);
+  const setActiveTab = useCallback((tab: MainNavTab) => {
+    setActiveTabState(tab);
+    try {
+      localStorage.setItem(ACTIVE_TAB_KEY, tab);
+    } catch {}
+  }, []);
 
+  const setActiveSpaceId = useCallback((spaceId: number | null) => {
+    setActiveSpaceIdState(spaceId);
+    try {
+      if (spaceId) localStorage.setItem(ACTIVE_SPACE_KEY, String(spaceId));
+      else localStorage.removeItem(ACTIVE_SPACE_KEY);
+    } catch {}
+  }, []);
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? '1' : '0');
+      } catch {}
+      return next;
+    });
+  }, []);
+
+  // Clean URL params after initial capture
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href);
+      const keys = ['invite', 'spaceInvite', 'project', 'tab', 'space', 'event', 'thought'];
+      let changed = false;
+      for (const k of keys) {
+        if (url.searchParams.has(k)) {
+          url.searchParams.delete(k);
+          changed = true;
+        }
+      }
+      if (changed) {
+        window.history.replaceState({}, '', url.pathname + url.search);
+      }
+    } catch {}
+  }, []);
+
+  // Load spaces whenever logged in
+  const loadSpaces = useCallback(
+    async (preferSpaceId?: number) => {
+      if (!user) return;
+      try {
+        const res = await api.get<{ spaces: CollabSpace[] }>('/spaces');
+        const list = res.spaces || [];
+        setSpaces(list);
+        setActiveSpaceIdState((cur) => {
+          const desired = preferSpaceId || cur;
+          if (desired && list.some((s) => s.id === desired)) {
+            try {
+              localStorage.setItem(ACTIVE_SPACE_KEY, String(desired));
+            } catch {}
+            return desired;
+          }
+          const fallback = list[0]?.id ?? null;
+          if (fallback) {
+            try {
+              localStorage.setItem(ACTIVE_SPACE_KEY, String(fallback));
+            } catch {}
+          }
+          return fallback;
+        });
+      } catch {
+        // ignore transient error
+      }
+    },
+    [user?.id]
+  );
+
+  useEffect(() => {
+    if (user) {
+      void loadSpaces();
+    } else {
+      setSpaces([]);
+    }
+  }, [user?.id, loadSpaces]);
+
+  // Handle pending Space Invite Token right after login
+  useEffect(() => {
+    if (!user || !pendingSpaceInviteToken) return;
+    let active = true;
+    const joinSpace = async () => {
+      try {
+        const res = await api.post<{ spaceId: number; name: string }>(
+          `/spaces/join/${encodeURIComponent(pendingSpaceInviteToken)}`
+        );
+        if (!active) return;
+        setPendingSpaceInviteToken(null);
+        await loadSpaces(res.spaceId);
+        setActiveTab('calendar');
+        setSpaceJoinBanner(
+          L(
+            `'${res.name}' 공유 스페이스에 참여했습니다!`,
+            `「${res.name}」共有スペースに参加しました！`,
+            `Joined shared space '${res.name}'!`
+          )
+        );
+        window.setTimeout(() => setSpaceJoinBanner(''), 4000);
+      } catch (err: any) {
+        if (!active) return;
+        setPendingSpaceInviteToken(null);
+        setSpaceJoinBanner(err.message || L('스페이스 초대에 실패했습니다.', '招待の参加に失敗しました。', 'Invite failed.'));
+        window.setTimeout(() => setSpaceJoinBanner(''), 4000);
+      }
+    };
+    void joinSpace();
+    return () => {
+      active = false;
+    };
+  }, [user?.id, pendingSpaceInviteToken, loadSpaces, setActiveTab, L]);
+
+  // Subscribe to SSE realtime stream for the active space
+  useEffect(() => {
+    if (!user || !activeSpaceId) return;
+    const token = getStoredToken();
+    if (!token) return;
+
+    const es = new EventSource(`/api/spaces/${activeSpaceId}/stream?token=${encodeURIComponent(token)}`);
+    const onSpaceUpdate = () => {
+      setRealtimeTick((t) => t + 1);
+      void loadSpaces();
+    };
+    es.addEventListener('space_update', onSpaceUpdate);
+
+    const onWindowFocus = () => {
+      setRealtimeTick((t) => t + 1);
+      void loadSpaces();
+    };
+    window.addEventListener('focus', onWindowFocus);
+
+    return () => {
+      es.removeEventListener('space_update', onSpaceUpdate);
+      es.close();
+      window.removeEventListener('focus', onWindowFocus);
+    };
+  }, [user?.id, activeSpaceId, loadSpaces]);
+
+  // PWA Install Prompt
   useEffect(() => {
     const onBeforeInstallPrompt = (e: Event) => {
       e.preventDefault();
       setDeferredInstallPrompt(e as BeforeInstallPromptEvent);
     };
-    const onAppInstalled = () => {
-      setDeferredInstallPrompt(null);
-    };
+    const onAppInstalled = () => setDeferredInstallPrompt(null);
     window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt);
     window.addEventListener('appinstalled', onAppInstalled);
     return () => {
@@ -64,6 +274,7 @@ const AppShell: React.FC = () => {
     };
   }, []);
 
+  // Service Worker Push Notification Click Navigation
   useEffect(() => {
     if (!('serviceWorker' in navigator)) return;
     const onSwMessage = (event: MessageEvent) => {
@@ -71,7 +282,18 @@ const AppShell: React.FC = () => {
         try {
           const parsedUrl = new URL(event.data.url, window.location.origin);
           const pid = Number(parsedUrl.searchParams.get('project'));
-          if (Number.isFinite(pid) && pid > 0) {
+          const tab = parsedUrl.searchParams.get('tab');
+          const space = Number(parsedUrl.searchParams.get('space'));
+          const evId = Number(parsedUrl.searchParams.get('event'));
+          const thId = Number(parsedUrl.searchParams.get('thought'));
+
+          if (tab === 'calendar' || tab === 'thoughts') {
+            setActiveTab(tab);
+            if (Number.isFinite(space) && space > 0) setActiveSpaceId(space);
+            if (Number.isFinite(evId) && evId > 0) setCalendarFocusEventId(evId);
+            if (Number.isFinite(thId) && thId > 0) setThoughtFocusId(thId);
+          } else if (Number.isFinite(pid) && pid > 0) {
+            setActiveTab('mindmap');
             setInitialProjectId(pid);
           }
         } catch {
@@ -83,7 +305,7 @@ const AppShell: React.FC = () => {
     return () => {
       navigator.serviceWorker.removeEventListener('message', onSwMessage);
     };
-  }, []);
+  }, [setActiveTab, setActiveSpaceId]);
 
   const handleInstallPwa = useCallback(async (): Promise<boolean> => {
     if (!deferredInstallPrompt) return false;
@@ -100,13 +322,65 @@ const AppShell: React.FC = () => {
     }
   }, [deferredInstallPrompt]);
 
-  const handleConsumePendingInvite = useCallback(() => {
-    setPendingInviteToken(null);
+  const handleConsumePendingInvite = useCallback(() => setPendingInviteToken(null), []);
+  const handleConsumeInitialProjectId = useCallback(() => setInitialProjectId(null), []);
+  const handleConsumeCalendarFocus = useCallback(() => {
+    setCalendarFocusEventId(null);
+    setCalendarFocusDate(null);
   }, []);
+  const handleConsumeThoughtFocus = useCallback(() => setThoughtFocusId(null), []);
 
-  const handleConsumeInitialProjectId = useCallback(() => {
-    setInitialProjectId(null);
-  }, []);
+  const handleJumpToCalendarEvent = useCallback(
+    (eventId: number, startDate?: string) => {
+      if (startDate) setCalendarFocusDate(startDate);
+      setCalendarFocusEventId(eventId);
+      setActiveTab('calendar');
+    },
+    [setActiveTab]
+  );
+
+  const handleJumpToSpaceEvent = useCallback(
+    (spaceId: number, eventId: number, startDate?: string) => {
+      setActiveSpaceId(spaceId);
+      if (startDate) setCalendarFocusDate(startDate);
+      setCalendarFocusEventId(eventId);
+      setActiveTab('calendar');
+    },
+    [setActiveSpaceId, setActiveTab]
+  );
+
+  const handleJumpToThought = useCallback(
+    (thoughtId: number) => {
+      setThoughtFocusId(thoughtId);
+      setActiveTab('thoughts');
+    },
+    [setActiveTab]
+  );
+
+  const handleJumpToSpaceThought = useCallback(
+    (spaceId: number, thoughtId: number) => {
+      setActiveSpaceId(spaceId);
+      setThoughtFocusId(thoughtId);
+      setActiveTab('thoughts');
+    },
+    [setActiveSpaceId, setActiveTab]
+  );
+
+  const handleJumpToMindmapProject = useCallback(
+    (projectId: number) => {
+      setInitialProjectId(projectId);
+      setActiveTab('mindmap');
+    },
+    [setActiveTab]
+  );
+
+  const activeSpace = useMemo(
+    () => spaces.find((s) => s.id === activeSpaceId) || spaces[0] || null,
+    [spaces, activeSpaceId]
+  );
+
+  const totalUnread = useMemo(() => spaces.reduce((sum, s) => sum + (s.unread_count || 0), 0), [spaces]);
+  const totalProposed = useMemo(() => spaces.reduce((sum, s) => sum + (s.proposed_event_count || 0), 0), [spaces]);
 
   if (isLoading) {
     return (
@@ -117,20 +391,29 @@ const AppShell: React.FC = () => {
   }
 
   if (!user) {
-    return <AuthScreen pendingInviteToken={pendingInviteToken} />;
+    return (
+      <AuthScreen
+        pendingInviteToken={pendingInviteToken}
+        pendingSpaceInviteToken={pendingSpaceInviteToken}
+      />
+    );
   }
 
   return (
     <div className="min-h-screen bg-white lg:bg-ivory-100 flex flex-col">
       {/* Top Navbar */}
       <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-ivory-300">
-        <div className="max-w-7xl mx-auto px-3 sm:px-6 h-12 flex items-center justify-between gap-2 sm:gap-3">
+        <div className="px-3 sm:px-5 h-12 flex items-center justify-between gap-2 sm:gap-3">
           <div className="flex items-center gap-2 min-w-0">
             <div className="w-7 h-7 rounded-lg bg-forest-800 text-white flex items-center justify-center shrink-0">
               <BookMarked className="w-4 h-4" />
             </div>
             <span className="font-bold text-sm text-charcoal-900 truncate">
-              {L('프로젝트 마인드맵', 'プロジェクトマインドマップ', 'Project Mindmap')}
+              {activeTab === 'calendar'
+                ? L('공유 캘린더', '共有カレンダー', 'Shared Calendar')
+                : activeTab === 'thoughts'
+                  ? L('공유 메모장', '共有メモ帳', 'Shared Thought Pad')
+                  : L('프로젝트 마인드맵', 'プロジェクトマインドマップ', 'Project Mindmap')}
             </span>
           </div>
 
@@ -209,16 +492,111 @@ const AppShell: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-2 sm:px-3 lg:px-6 py-3 lg:py-4">
-        <ProjectJournal
-          pendingInviteToken={pendingInviteToken}
-          onConsumePendingInvite={handleConsumePendingInvite}
-          initialProjectId={initialProjectId}
-          onConsumeInitialProjectId={handleConsumeInitialProjectId}
-        />
-      </main>
+      {/* Space Invite Join Banner */}
+      {spaceJoinBanner && (
+        <div className="bg-emerald-700 text-white text-xs font-bold text-center py-2 px-4">
+          {spaceJoinBanner}
+        </div>
+      )}
 
+      {/* Body: PC Left Sidebar + Main Workspace */}
+      <div className="flex-1 flex min-w-0">
+        <DesktopSidebar
+          activeTab={activeTab}
+          onSelectTab={setActiveTab}
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={toggleSidebar}
+          spaces={spaces}
+          activeSpaceId={activeSpace?.id ?? null}
+          onSelectSpace={(sid) => setActiveSpaceId(sid)}
+          onOpenCreateSpace={() => {
+            setSpaceModalTarget(null);
+            setSpaceModalMode('create');
+          }}
+          onOpenSpaceSettings={(sp) => {
+            setSpaceModalTarget(sp);
+            setSpaceModalMode('edit');
+          }}
+        />
+
+        <main
+          className={`flex-1 min-w-0 w-full px-2 sm:px-3 lg:px-5 py-3 lg:py-4 pb-20 lg:pb-6 ${
+            activeTab === 'mindmap' ? 'max-w-7xl mx-auto' : ''
+          }`}
+        >
+          {activeTab === 'mindmap' && (
+            <ProjectJournal
+              pendingInviteToken={pendingInviteToken}
+              onConsumePendingInvite={handleConsumePendingInvite}
+              initialProjectId={initialProjectId}
+              onConsumeInitialProjectId={handleConsumeInitialProjectId}
+              spaces={spaces}
+              activeSpaceId={activeSpace?.id ?? null}
+              onJumpToSpaceThought={handleJumpToSpaceThought}
+              onJumpToSpaceEvent={handleJumpToSpaceEvent}
+              onSpacesNeedRefresh={() => void loadSpaces()}
+              realtimeTick={realtimeTick}
+            />
+          )}
+
+          {activeTab === 'calendar' && (
+            <SharedCalendarPage
+              spaces={spaces}
+              activeSpace={activeSpace}
+              onSelectSpace={(sid) => setActiveSpaceId(sid)}
+              onOpenCreateSpace={() => {
+                setSpaceModalTarget(null);
+                setSpaceModalMode('create');
+              }}
+              onOpenSpaceSettings={(sp) => {
+                setSpaceModalTarget(sp);
+                setSpaceModalMode('edit');
+              }}
+              onOpenActivityFeed={() => setActivityFeedOpen(true)}
+              onJumpToThought={handleJumpToThought}
+              onJumpToMindmapProject={handleJumpToMindmapProject}
+              onSpacesNeedRefresh={() => void loadSpaces()}
+              realtimeTick={realtimeTick}
+              initialFocusEventId={calendarFocusEventId}
+              initialFocusDate={calendarFocusDate}
+              onConsumeInitialFocus={handleConsumeCalendarFocus}
+            />
+          )}
+
+          {activeTab === 'thoughts' && (
+            <SharedThoughtsPage
+              spaces={spaces}
+              activeSpace={activeSpace}
+              onSelectSpace={(sid) => setActiveSpaceId(sid)}
+              onOpenCreateSpace={() => {
+                setSpaceModalTarget(null);
+                setSpaceModalMode('create');
+              }}
+              onOpenSpaceSettings={(sp) => {
+                setSpaceModalTarget(sp);
+                setSpaceModalMode('edit');
+              }}
+              onOpenActivityFeed={() => setActivityFeedOpen(true)}
+              onJumpToCalendarEvent={handleJumpToCalendarEvent}
+              onJumpToMindmapProject={handleJumpToMindmapProject}
+              onSpacesNeedRefresh={() => void loadSpaces()}
+              realtimeTick={realtimeTick}
+              initialFocusThoughtId={thoughtFocusId}
+              onConsumeInitialFocus={handleConsumeThoughtFocus}
+            />
+          )}
+        </main>
+      </div>
+
+      {/* Tablet / Mobile Fixed Bottom Quick-Access Panel */}
+      <MobileBottomNav
+        activeTab={activeTab}
+        onSelectTab={setActiveTab}
+        unreadCount={totalUnread}
+        proposedCount={totalProposed}
+      />
+
+      {/* Global Modals */}
       <ProfileModal
         isOpen={isProfileOpen}
         onClose={() => setIsProfileOpen(false)}
@@ -233,6 +611,32 @@ const AppShell: React.FC = () => {
       <AdminUsersModal
         isOpen={isAdminUsersOpen}
         onClose={() => setIsAdminUsersOpen(false)}
+      />
+
+      <SpaceSettingsModal
+        isOpen={Boolean(spaceModalMode)}
+        onClose={() => setSpaceModalMode(null)}
+        mode={spaceModalMode || 'create'}
+        space={spaceModalTarget}
+        onSaved={async (sid) => {
+          await loadSpaces(sid);
+          if (spaceModalMode === 'create' && sid && activeTab === 'mindmap') {
+            setActiveTab('calendar');
+          }
+        }}
+        onDeleted={async () => {
+          setActiveSpaceId(null);
+          await loadSpaces();
+        }}
+      />
+
+      <ActivityFeedModal
+        isOpen={activityFeedOpen}
+        onClose={() => setActivityFeedOpen(false)}
+        space={activeSpace}
+        onJumpToEvent={(eventId, startDate) => handleJumpToCalendarEvent(eventId, startDate)}
+        onJumpToThought={(thoughtId) => handleJumpToThought(thoughtId)}
+        onMarkedRead={() => void loadSpaces()}
       />
     </div>
   );

@@ -6,9 +6,13 @@ import { Button } from '../common/Button';
 
 interface AuthScreenProps {
   pendingInviteToken?: string | null;
+  pendingSpaceInviteToken?: string | null;
 }
 
-export const AuthScreen: React.FC<AuthScreenProps> = ({ pendingInviteToken }) => {
+export const AuthScreen: React.FC<AuthScreenProps> = ({
+  pendingInviteToken,
+  pendingSpaceInviteToken,
+}) => {
   const { login, register, loginDemo } = useAuth();
   const { L, language, setLanguage } = useLanguage();
 
@@ -86,15 +90,21 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ pendingInviteToken }) =>
             </p>
           </div>
 
-          {pendingInviteToken && (
+          {(pendingInviteToken || pendingSpaceInviteToken) && (
             <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-900 flex items-center gap-2 font-bold">
               <KeyRound className="w-4 h-4 shrink-0 text-sky-700" />
               <span>
-                {L(
-                  '프로젝트 협업 초대가 도착했습니다! 로그인 또는 가입하면 자동으로 참여됩니다.',
-                  'プロジェクト招待が届いています。ログイン・登録すると自動で参加します。',
-                  'You have a project invite! Sign in or register to join automatically.'
-                )}
+                {pendingSpaceInviteToken
+                  ? L(
+                      '공유 캘린더 · 메모장 스페이스 초대가 도착했습니다! 로그인 또는 가입하면 자동으로 참여됩니다.',
+                      '共有カレンダー・メモ帳の招待が届いています。ログイン・登録すると自動で参加します。',
+                      'You have a Shared Space invite! Sign in or register to join automatically.'
+                    )
+                  : L(
+                      '프로젝트 협업 초대가 도착했습니다! 로그인 또는 가입하면 자동으로 참여됩니다.',
+                      'プロジェクト招待が届いています。ログイン・登録すると自動で参加します。',
+                      'You have a project invite! Sign in or register to join automatically.'
+                    )}
               </span>
             </div>
           )}

@@ -18,6 +18,7 @@ import authRoutes, { ensureAdminAccount } from './routes/auth.js';
 import adminRoutes from './routes/admin.js';
 import journalRoutes from './routes/journal.js';
 import pushRoutes from './routes/push.js';
+import spacesRoutes from './routes/spaces.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4100;
@@ -63,6 +64,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/journal', journalRoutes);
 app.use('/api/push', pushRoutes);
+app.use('/api/spaces', spacesRoutes);
 
 // Serve built client bundle in production when present
 const __filename = fileURLToPath(import.meta.url);

@@ -3,6 +3,7 @@ import { db, generateInviteToken } from '../db/database.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { getJstDateStr, getJstTimeStr, getJstDateTimeStr, getJstDateStrWithDayOffset } from '../utils/jstTime.js';
 import { sendPushToUsers } from '../utils/webPush.js';
+import { removeLinksForEntity, syncContentAcrossLinkedEntities } from '../utils/crossLinkSync.js';
 
 const router = Router();
 
@@ -1445,11 +1446,20 @@ router.patch('/projects/:id', authenticateToken, (req: Request, res: Response) =
       }
     }
 
-    res.json({
-      ...updated,
-      participants: parseParticipants(updated?.participants_json),
-      members,
-    });
+      if (nextTitle !== existing.title || nextIntent !== existing.intent_summary) {
+        syncContentAcrossLinkedEntities(
+          'PROJECT',
+          projectId,
+          { title: nextTitle, content: nextIntent || '' },
+          userId
+        );
+      }
+
+      res.json({
+        ...updated,
+        participants: parseParticipants(updated?.participants_json),
+        members,
+      });
   } catch (err: any) {
     res.status(500).json({ error: '프로젝트 수정 실패: ' + err.message });
   }
@@ -1479,6 +1489,7 @@ router.delete('/projects/:id', authenticateToken, (req: Request, res: Response) 
           ].filter((id) => id > 0 && id !== userId)
         : [];
 
+    removeLinksForEntity('PROJECT', projectId);
     db.prepare('DELETE FROM journal_projects WHERE id = ?').run(projectId);
     if (peerIds.length > 0) {
       void sendPushToUsers(peerIds, {
@@ -2060,6 +2071,10 @@ router.patch('/entries/:entryId', authenticateToken, (req: Request, res: Respons
       );
     }
 
+    if (String(content).trim() !== String(existing.content || '').trim()) {
+      syncContentAcrossLinkedEntities('ENTRY', entryId, { content: String(content).trim() }, userId);
+    }
+
     res.json({ ...mapEntryForViewer(updated, userId), revision_requests: [] });
   } catch (err: any) {
     res.status(500).json({ error: '기록 수정 실패: ' + err.message });
@@ -2214,6 +2229,7 @@ router.delete('/entries/:entryId', authenticateToken, (req: Request, res: Respon
     }
 
     db.transaction(() => {
+      removeLinksForEntity('ENTRY', entryId);
       db.prepare('DELETE FROM journal_entries WHERE id = ?').run(entryId);
       cleanupDeletedNodeFromMindMapLayout(Number(entry.project_id), `entry-${entryId}`, userId);
     })();
@@ -2489,6 +2505,10 @@ router.patch('/ideas/:ideaId', authenticateToken, (req: Request, res: Response) 
       );
     }
 
+    if (nextTitle !== existing.title || nextNote !== existing.note) {
+      syncContentAcrossLinkedEntities('IDEA', ideaId, { title: nextTitle, content: nextNote || '' }, userId);
+    }
+
     res.json(formatIdeaRow(updated));
   } catch (err: any) {
     res.status(500).json({ error: '아이디어 수정 실패: ' + err.message });
@@ -2519,6 +2539,7 @@ router.delete('/ideas/:ideaId', authenticateToken, (req: Request, res: Response)
 
     const projectId = Number(existing.project_id);
     db.transaction(() => {
+      removeLinksForEntity('IDEA', ideaId);
       db.prepare('DELETE FROM journal_ideas WHERE id = ?').run(ideaId);
       cleanupDeletedNodeFromMindMapLayout(projectId, `idea-${ideaId}`, userId);
       const remaining = db

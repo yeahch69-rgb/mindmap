@@ -68,6 +68,8 @@ import {
   JournalIdea,
   MindMapLayoutData,
 } from '../components/journal/types';
+import { CollabSpace, CrossLinkBadge } from '../types/spaces';
+import { MindmapSendSource, SendFromMindmapModal } from '../components/spaces/SendFromMindmapModal';
 
 /** Format timeline date/time compactly as YY.MM.DD HH:MM. */
 function formatCompactTimelineDateTime(
@@ -105,6 +107,12 @@ interface ProjectJournalProps {
   onConsumePendingInvite?: () => void;
   initialProjectId?: number | null;
   onConsumeInitialProjectId?: () => void;
+  spaces?: CollabSpace[];
+  activeSpaceId?: number | null;
+  onJumpToSpaceThought?: (spaceId: number, thoughtId: number) => void;
+  onJumpToSpaceEvent?: (spaceId: number, eventId: number, startDate?: string) => void;
+  onSpacesNeedRefresh?: () => void;
+  realtimeTick?: number;
 }
 
 export const ProjectJournal: React.FC<ProjectJournalProps> = ({
@@ -112,6 +120,12 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   onConsumePendingInvite,
   initialProjectId,
   onConsumeInitialProjectId,
+  spaces = [],
+  activeSpaceId = null,
+  onJumpToSpaceThought,
+  onJumpToSpaceEvent,
+  onSpacesNeedRefresh,
+  realtimeTick = 0,
 }) => {
   const { user } = useAuth();
   const { L, t } = useLanguage();
@@ -145,6 +159,11 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const [detailProject, setDetailProject] = useState<JournalProject | null>(null);
   const [detailEntries, setDetailEntries] = useState<JournalEntry[]>([]);
   const [detailIdeas, setDetailIdeas] = useState<JournalIdea[]>([]);
+  const [spaceBridgeSource, setSpaceBridgeSource] = useState<MindmapSendSource | null>(null);
+  const [spaceBridgeToast, setSpaceBridgeToast] = useState('');
+  const [projectSpaceLinks, setProjectSpaceLinks] = useState<CrossLinkBadge[]>([]);
+  const [ideaSpaceLinks, setIdeaSpaceLinks] = useState<Record<number, CrossLinkBadge[]>>({});
+  const [entrySpaceLinks, setEntrySpaceLinks] = useState<Record<number, CrossLinkBadge[]>>({});
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [detailSubTab, setDetailSubTab] = useState<'TIMELINE' | 'MINDMAP' | 'FREEMAP'>('TIMELINE');
   const [lastMindMapTab, setLastMindMapTab] = useState<'MINDMAP' | 'FREEMAP'>('MINDMAP');
@@ -227,6 +246,52 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [joinError, setJoinError] = useState('');
   const [isJoiningByCode, setIsJoiningByCode] = useState(false);
+
+  const loadProjectSpaceLinks = useCallback(async (pid: number | null) => {
+    if (!pid) {
+      setProjectSpaceLinks([]);
+      setIdeaSpaceLinks({});
+      setEntrySpaceLinks({});
+      return;
+    }
+    try {
+      const res = await api.get<{
+        projectLinks: CrossLinkBadge[];
+        ideaLinksById: Record<number, CrossLinkBadge[]>;
+        entryLinksById: Record<number, CrossLinkBadge[]>;
+      }>(`/spaces/links/project/${pid}`);
+      setProjectSpaceLinks(res.projectLinks || []);
+      setIdeaSpaceLinks(res.ideaLinksById || {});
+      setEntrySpaceLinks(res.entryLinksById || {});
+    } catch {
+      setProjectSpaceLinks([]);
+      setIdeaSpaceLinks({});
+      setEntrySpaceLinks({});
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadProjectSpaceLinks(selectedProjectId);
+    if (selectedProjectId && realtimeTick > 0) {
+      api
+        .get<{ project: JournalProject; entries: JournalEntry[]; ideas: JournalIdea[] }>(
+          `/journal/projects/${selectedProjectId}`
+        )
+        .then((res) => {
+          setDetailProject(res.project);
+          setDetailEntries(res.entries || []);
+          setDetailIdeas(res.ideas || []);
+        })
+        .catch(() => {});
+    }
+  }, [selectedProjectId, realtimeTick, loadProjectSpaceLinks]);
+
+  const showSpaceBridgeToast = useCallback((msg: string) => {
+    setSpaceBridgeToast(msg);
+    window.setTimeout(() => {
+      setSpaceBridgeToast((cur) => (cur === msg ? '' : cur));
+    }, 3000);
+  }, []);
 
   const fetchOverview = async (keepSelection = true) => {
     try {
@@ -2588,6 +2653,97 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                       );
                     })()}
 
+                    {/* 3-Way Space Bridge Bar (Shared Thought Pad & Shared Calendar) */}
+                    {spaces.length > 0 && (
+                      <div className="p-2.5 rounded-xl bg-indigo-50/60 border border-indigo-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                          <span className="font-bold text-indigo-950 text-[11px] shrink-0">
+                            {L('공유 스페이스 연동', '共有スペース連携', 'Space Sync')}:
+                          </span>
+                          {projectSpaceLinks.length === 0 ? (
+                            <span className="text-[11px] text-indigo-800/75">
+                              {L(
+                                '필요할 때 공유 메모장이나 공유 캘린더로 보내 실시간 동기화하세요',
+                                '共有メモや共有カレンダーへ送って双方向同期できます',
+                                'Send to Shared Thought Pad or Calendar for live two-way sync'
+                              )}
+                            </span>
+                          ) : (
+                            projectSpaceLinks.map((lnk) => (
+                              <button
+                                key={`${lnk.entity_type}-${lnk.entity_id}`}
+                                type="button"
+                                onClick={() => {
+                                  if (!lnk.space_id) return;
+                                  if (lnk.entity_type === 'THOUGHT') {
+                                    onJumpToSpaceThought?.(lnk.space_id, lnk.entity_id);
+                                  } else if (lnk.entity_type === 'EVENT') {
+                                    onJumpToSpaceEvent?.(lnk.space_id, lnk.entity_id, lnk.start_date);
+                                  }
+                                }}
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border transition ${
+                                  lnk.entity_type === 'THOUGHT'
+                                    ? 'bg-amber-50 hover:bg-amber-100 text-amber-950 border-amber-300'
+                                    : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-950 border-emerald-300'
+                                }`}
+                              >
+                                {lnk.entity_type === 'THOUGHT' ? (
+                                  <Lightbulb className="w-3 h-3 text-amber-700 shrink-0" />
+                                ) : (
+                                  <Calendar className="w-3 h-3 text-emerald-700 shrink-0" />
+                                )}
+                                <span className="truncate max-w-[160px]">
+                                  {lnk.entity_type === 'EVENT' && lnk.start_date ? `${lnk.start_date.slice(5)} ` : ''}
+                                  {lnk.title}
+                                </span>
+                              </button>
+                            ))
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSpaceBridgeSource({
+                                sourceType: 'PROJECT',
+                                sourceId: detailProject.id,
+                                projectId: detailProject.id,
+                                defaultTitle: detailProject.title,
+                                defaultContent: detailProject.intent_summary || detailProject.next_action || detailProject.title,
+                                defaultDate: detailProject.next_action_date,
+                                initialDestination: 'thought',
+                              })
+                            }
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-950 text-[11px] font-bold transition"
+                          >
+                            <Lightbulb className="w-3 h-3 text-amber-800" />
+                            <span>{L('공유 메모로 보내기', '共有メモへ', 'To Thought Pad')}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSpaceBridgeSource({
+                                sourceType: 'PROJECT',
+                                sourceId: detailProject.id,
+                                projectId: detailProject.id,
+                                defaultTitle: detailProject.next_action
+                                  ? `${detailProject.title} — ${detailProject.next_action}`
+                                  : detailProject.title,
+                                defaultContent: detailProject.intent_summary || '',
+                                defaultDate: detailProject.next_action_date,
+                                initialDestination: 'calendar',
+                              })
+                            }
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-forest-800 hover:bg-forest-900 text-white text-[11px] font-bold transition"
+                          >
+                            <Calendar className="w-3 h-3" />
+                            <span>{L('공유 캘린더 등록', 'カレンダーへ', 'To Calendar')}</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Detail Subtabs: Timeline (incl. Ideas) vs Tree Mind Map vs Free Mind Map */}
                     <div className="grid grid-cols-3 gap-1 bg-ivory-100 p-1 rounded-xl border border-ivory-300 text-xs font-bold">
                       <button
@@ -3181,6 +3337,44 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                         >
                                           <Edit2 className="w-4 h-4" />
                                         </button>
+                                        {spaces.length > 0 && (
+                                          <>
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                setSpaceBridgeSource({
+                                                  sourceType: 'IDEA',
+                                                  sourceId: idea.id,
+                                                  projectId: detailProject.id,
+                                                  defaultTitle: idea.title,
+                                                  defaultContent: idea.note || idea.title,
+                                                  initialDestination: 'thought',
+                                                })
+                                              }
+                                              className="p-1 rounded-lg bg-amber-50 border border-amber-300 text-amber-800 hover:bg-amber-100 inline-flex items-center justify-center transition"
+                                              title={L('공유 메모장으로 보내기', '共有メモ帳へ送る', 'Send to Shared Thought Pad')}
+                                            >
+                                              <Lightbulb className="w-4 h-4" />
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                setSpaceBridgeSource({
+                                                  sourceType: 'IDEA',
+                                                  sourceId: idea.id,
+                                                  projectId: detailProject.id,
+                                                  defaultTitle: idea.title,
+                                                  defaultContent: idea.note || '',
+                                                  initialDestination: 'calendar',
+                                                })
+                                              }
+                                              className="p-1 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-800 hover:bg-emerald-100 inline-flex items-center justify-center transition"
+                                              title={L('공유 캘린더에 등록', '共有カレンダーへ登録', 'Send to Shared Calendar')}
+                                            >
+                                              <Calendar className="w-4 h-4" />
+                                            </button>
+                                          </>
+                                        )}
                                         <button
                                           type="button"
                                           onClick={() => handleDeleteIdea(idea.id)}
@@ -3193,8 +3387,26 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                       </div>
                                     </div>
 
-                                    {(idea.status === 'PROMOTED' || idea.status === 'ARCHIVED' || (isCompleted && latestComp)) && (
+                                    {(idea.status === 'PROMOTED' || idea.status === 'ARCHIVED' || (isCompleted && latestComp) || (ideaSpaceLinks[idea.id]?.length || 0) > 0) && (
                                       <div className="flex items-center gap-1.5 flex-wrap">
+                                        {(ideaSpaceLinks[idea.id] || []).map((lnk) => (
+                                          <button
+                                            key={`idea-lnk-${lnk.entity_type}-${lnk.entity_id}`}
+                                            type="button"
+                                            onClick={() => {
+                                              if (!lnk.space_id) return;
+                                              if (lnk.entity_type === 'THOUGHT') onJumpToSpaceThought?.(lnk.space_id, lnk.entity_id);
+                                              else if (lnk.entity_type === 'EVENT') onJumpToSpaceEvent?.(lnk.space_id, lnk.entity_id, lnk.start_date);
+                                            }}
+                                            className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold border inline-flex items-center gap-1 ${
+                                              lnk.entity_type === 'THOUGHT'
+                                                ? 'bg-amber-50 text-amber-950 border-amber-300'
+                                                : 'bg-emerald-50 text-emerald-950 border-emerald-300'
+                                            }`}
+                                          >
+                                            {lnk.entity_type === 'THOUGHT' ? '💡' : '📅'} {lnk.entity_type === 'EVENT' && lnk.start_date ? `${lnk.start_date.slice(5)} ` : ''}{lnk.title}
+                                          </button>
+                                        ))}
                                         {idea.status === 'PROMOTED' && (
                                           <span className="px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-bold">
                                             {L('Next Step 반영됨', 'Next Step反映済', 'Promoted')}
@@ -3381,6 +3593,46 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                           <span>{L('수정 요청', '修正依頼', 'Request Edit')}</span>
                                         </button>
                                       )}
+                                      {spaces.length > 0 && (
+                                        <>
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setSpaceBridgeSource({
+                                                sourceType: 'ENTRY',
+                                                sourceId: en.id,
+                                                projectId: detailProject.id,
+                                                defaultTitle: en.content.slice(0, 42),
+                                                defaultContent: en.content,
+                                                defaultDate: en.due_date || en.entry_date,
+                                                initialDestination: 'thought',
+                                              })
+                                            }
+                                            className="p-1 rounded-lg bg-amber-50 border border-amber-300 text-amber-800 hover:bg-amber-100 inline-flex items-center justify-center transition"
+                                            title={L('공유 메모장으로 보내기', '共有メモ帳へ送る', 'Send to Shared Thought Pad')}
+                                          >
+                                            <Lightbulb className="w-4 h-4" />
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setSpaceBridgeSource({
+                                                sourceType: 'ENTRY',
+                                                sourceId: en.id,
+                                                projectId: detailProject.id,
+                                                defaultTitle: en.content.slice(0, 42),
+                                                defaultContent: en.content,
+                                                defaultDate: en.due_date || en.entry_date,
+                                                initialDestination: 'calendar',
+                                              })
+                                            }
+                                            className="p-1 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-800 hover:bg-emerald-100 inline-flex items-center justify-center transition"
+                                            title={L('공유 캘린더에 등록', '共有カレンダーへ登録', 'Send to Shared Calendar')}
+                                          >
+                                            <Calendar className="w-4 h-4" />
+                                          </button>
+                                        </>
+                                      )}
                                       {(Number(en.author_id) === Number(user?.id) || Number(detailProject.created_by) === Number(user?.id)) && (
                                         <button
                                           type="button"
@@ -3516,6 +3768,28 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                       ))}
                                     </div>
                                   )}
+                                    {(entrySpaceLinks[en.id]?.length || 0) > 0 && (
+                                      <div className="mt-1.5 flex flex-wrap gap-1">
+                                        {(entrySpaceLinks[en.id] || []).map((lnk) => (
+                                          <button
+                                            key={`en-lnk-${lnk.entity_type}-${lnk.entity_id}`}
+                                            type="button"
+                                            onClick={() => {
+                                              if (!lnk.space_id) return;
+                                              if (lnk.entity_type === 'THOUGHT') onJumpToSpaceThought?.(lnk.space_id, lnk.entity_id);
+                                              else if (lnk.entity_type === 'EVENT') onJumpToSpaceEvent?.(lnk.space_id, lnk.entity_id, lnk.start_date);
+                                            }}
+                                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold border inline-flex items-center gap-1 ${
+                                              lnk.entity_type === 'THOUGHT'
+                                                ? 'bg-amber-50 text-amber-950 border-amber-300'
+                                                : 'bg-emerald-50 text-emerald-950 border-emerald-300'
+                                            }`}
+                                          >
+                                            {lnk.entity_type === 'THOUGHT' ? '💡' : '📅'} {lnk.entity_type === 'EVENT' && lnk.start_date ? `${lnk.start_date.slice(5)} ` : ''}{lnk.title}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               );
@@ -4058,6 +4332,34 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
           </div>
         </Modal>
       )}
+
+      {spaceBridgeToast && (
+        <div className="fixed bottom-20 lg:bottom-6 right-4 z-50 px-4 py-2.5 rounded-xl bg-charcoal-900 text-white text-xs font-bold shadow-xl">
+          {spaceBridgeToast}
+        </div>
+      )}
+
+      <SendFromMindmapModal
+        isOpen={Boolean(spaceBridgeSource)}
+        onClose={() => setSpaceBridgeSource(null)}
+        source={spaceBridgeSource}
+        spaces={spaces}
+        activeSpaceId={activeSpaceId}
+        onSentThought={() => {
+          void loadProjectSpaceLinks(selectedProjectId);
+          onSpacesNeedRefresh?.();
+          showSpaceBridgeToast(
+            L('공유 메모장으로 보냈습니다! (실시간 양방향 동기화 연결됨)', '共有メモ帳へ送りました！（双方向同期）', 'Sent to Shared Thought Pad (live sync)!')
+          );
+        }}
+        onSentEvent={(_sid, ev) => {
+          void loadProjectSpaceLinks(selectedProjectId);
+          onSpacesNeedRefresh?.();
+          showSpaceBridgeToast(
+            L(`공유 캘린더(${ev.start_date})에 등록했습니다! (실시간 양방향 동기화 연결됨)`, `共有カレンダー(${ev.start_date})に登録しました！`, `Added to Shared Calendar (${ev.start_date})!`)
+          );
+        }}
+      />
     </div>
   );
 };

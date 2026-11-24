@@ -428,8 +428,117 @@ async function runJournalReminderChecks() {
     if (nowHHMM >= '07:00' && nowHHMM < '21:00') {
       await sendTurnWaitOverdueReminders(todayJst, nowJst);
     }
+
+    await sendCalendarEventReminders(todayJst, tomorrowJst, nowMin, nowJst);
   } catch (err: any) {
     console.warn('Mindmap push reminder check error:', err?.message || err);
+  }
+}
+
+function eventOccursOnDate(ev: any, targetYmd: string): boolean {
+  const start = String(ev.start_date || '').slice(0, 10);
+  if (!start || targetYmd < start) return false;
+  const rec = String(ev.recurrence_type || 'NONE');
+  const until = ev.recurrence_until ? String(ev.recurrence_until).slice(0, 10) : '';
+  if (rec === 'NONE') {
+    return targetYmd === start;
+  }
+  if (until && targetYmd > until) return false;
+  const [sy, sm, sd] = start.split('-').map(Number);
+  const [ty, tm, td] = targetYmd.split('-').map(Number);
+  if (!sy || !sm || !sd || !ty || !tm || !td) return false;
+  if (rec === 'DAILY') return true;
+  if (rec === 'WEEKLY') {
+    const sDow = new Date(Date.UTC(sy, sm - 1, sd)).getUTCDay();
+    const tDow = new Date(Date.UTC(ty, tm - 1, td)).getUTCDay();
+    return sDow === tDow;
+  }
+  if (rec === 'MONTHLY') {
+    const lastDay = new Date(Date.UTC(ty, tm, 0)).getUTCDate();
+    return td === Math.min(sd, lastDay);
+  }
+  if (rec === 'YEARLY') {
+    const lastDay = new Date(Date.UTC(ty, sm, 0)).getUTCDate();
+    return tm === sm && td === Math.min(sd, lastDay);
+  }
+  return false;
+}
+
+async function sendCalendarEventReminders(
+  todayJst: string,
+  tomorrowJst: string,
+  nowMin: number | null,
+  nowJst: string
+) {
+  if (nowMin === null) return;
+
+  const events = db
+    .prepare(`
+      SELECT e.id, e.space_id, e.title, e.start_date, e.start_time, e.is_all_day,
+             e.attendee_ids_json, e.recurrence_type, e.recurrence_until, e.reminder_minutes,
+             s.name as space_name
+      FROM calendar_events e
+      INNER JOIN collab_spaces s ON s.id = e.space_id
+      WHERE e.event_status = 'CONFIRMED'
+        AND e.reminder_minutes IS NOT NULL
+        AND e.start_date <= ?
+    `)
+    .all(tomorrowJst) as any[];
+
+  for (const ev of events) {
+    const remMin = Number(ev.reminder_minutes);
+    if (!Number.isFinite(remMin) || remMin < 0) continue;
+
+    const eventTimeMin = ev.is_all_day ? 9 * 60 : (parseMinutes(ev.start_time) ?? 9 * 60);
+    const candidateDates = [todayJst, tomorrowJst];
+
+    for (const occDate of candidateDates) {
+      if (!eventOccursOnDate(ev, occDate)) continue;
+
+      const dayDeltaMin = occDate === tomorrowJst ? 24 * 60 : 0;
+      const minsUntilEvent = dayDeltaMin + eventTimeMin - nowMin;
+
+      // Trigger if within [remMin - 5, remMin] window
+      if (minsUntilEvent <= remMin && minsUntilEvent >= remMin - 5) {
+        const dedupKey = `cal-rem:${ev.id}:${occDate}:${remMin}`;
+        if (hasPushLog(dedupKey)) continue;
+
+        let targetUserIds: number[] = [];
+        try {
+          const parsed = JSON.parse(ev.attendee_ids_json || '[]');
+          if (Array.isArray(parsed)) {
+            targetUserIds = parsed.map(Number).filter((id) => Number.isInteger(id) && id > 0);
+          }
+        } catch {}
+
+        if (targetUserIds.length === 0) {
+          const members = db
+            .prepare('SELECT user_id FROM collab_space_members WHERE space_id = ?')
+            .all(Number(ev.space_id)) as Array<{ user_id: number }>;
+          targetUserIds = members.map((m) => Number(m.user_id));
+        }
+
+        const timeLabel = ev.is_all_day ? '종일' : (ev.start_time || '09:00');
+        const remLabel =
+          remMin === 0
+            ? '지금 시작'
+            : remMin >= 1440
+              ? '하루 전 알림'
+              : remMin >= 60
+                ? `${Math.round(remMin / 60)}시간 전`
+                : `${remMin}분 전`;
+
+        const sent = await sendPushToUsers(targetUserIds, {
+          title: `📅 ${ev.space_name}`,
+          body: `⏰ [${remLabel}] ${truncateText(ev.title, 36)} (${occDate} ${timeLabel})`,
+          url: `/?tab=calendar&space=${ev.space_id}&event=${ev.id}`,
+          tag: `space-cal-rem-${ev.id}-${occDate}`,
+        });
+        if (sent > 0) {
+          recordPushLog(dedupKey, nowJst);
+        }
+      }
+    }
   }
 }
 

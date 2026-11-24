@@ -55,6 +55,59 @@ export function generateInviteToken(): string {
   return crypto.randomBytes(12).toString('hex');
 }
 
+export interface SpaceLabelPreset {
+  key: string;
+  color: string;
+  name: string;
+}
+
+export const DEFAULT_SPACE_LABELS: SpaceLabelPreset[] = [
+  { key: 'emerald', color: '#1B4D3E', name: '기본 일정' },
+  { key: 'sky', color: '#0369A1', name: '업무 · 미팅' },
+  { key: 'rose', color: '#BE123C', name: '중요 · 약속' },
+  { key: 'amber', color: '#B45309', name: '아이디어 · 제안' },
+  { key: 'violet', color: '#6D28D9', name: '개인 · 취미' },
+  { key: 'slate', color: '#475569', name: '기타 메모' },
+];
+
+export function ensureDefaultSpaceForUser(userId: number): number {
+  const existing = db
+    .prepare(`
+      SELECT s.id
+      FROM collab_spaces s
+      INNER JOIN collab_space_members m ON m.space_id = s.id
+      WHERE m.user_id = ?
+      ORDER BY s.is_personal DESC, s.id ASC
+      LIMIT 1
+    `)
+    .get(userId) as { id: number } | undefined;
+
+  if (existing?.id) return Number(existing.id);
+
+  const tx = db.transaction(() => {
+    const res = db
+      .prepare(`
+        INSERT INTO collab_spaces (name, description, color, is_personal, invite_token, labels_json, created_by)
+        VALUES (?, ?, '#1B4D3E', 1, ?, ?, ?)
+      `)
+      .run(
+        '내 공유 캘린더',
+        '개인 일정과 생각을 정리하고, 원할 때 멤버를 초대해 함께 공유할 수 있습니다.',
+        generateInviteToken(),
+        JSON.stringify(DEFAULT_SPACE_LABELS),
+        userId
+      );
+    const spaceId = Number(res.lastInsertRowid);
+    db.prepare(`
+      INSERT INTO collab_space_members (space_id, user_id, role, last_read_activity_id)
+      VALUES (?, ?, 'OWNER', 0)
+    `).run(spaceId, userId);
+    return spaceId;
+  });
+
+  return tx();
+}
+
 export function initDatabase() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -198,6 +251,162 @@ export function initDatabase() {
     );
     CREATE INDEX IF NOT EXISTS idx_journal_turn_waits_due
       ON journal_turn_waits(notified_at, target_date);
+
+    -- Shared Spaces (TimeTree-style groups pairing Calendar + Shared Thought Pad)
+    CREATE TABLE IF NOT EXISTS collab_spaces (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      color TEXT NOT NULL DEFAULT '#1B4D3E',
+      is_personal INTEGER NOT NULL DEFAULT 0,
+      invite_token TEXT UNIQUE,
+      labels_json TEXT NOT NULL DEFAULT '[]',
+      created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS collab_space_members (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      space_id INTEGER NOT NULL REFERENCES collab_spaces(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role TEXT NOT NULL DEFAULT 'MEMBER', -- 'OWNER' | 'MEMBER'
+      last_read_activity_id INTEGER NOT NULL DEFAULT 0,
+      joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(space_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS shared_thoughts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      space_id INTEGER NOT NULL REFERENCES collab_spaces(id) ON DELETE CASCADE,
+      title TEXT DEFAULT '',
+      content TEXT NOT NULL,
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'NEW', -- 'NEW' | 'DISCUSSING' | 'PROPOSED' | 'SCHEDULED' | 'ARCHIVED'
+      is_pinned INTEGER NOT NULL DEFAULT 0,
+      author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_shared_thoughts_space
+      ON shared_thoughts(space_id, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS thought_reactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thought_id INTEGER NOT NULL REFERENCES shared_thoughts(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      stance TEXT NOT NULL, -- 'GOOD' | 'THINK' | 'BAD'
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(thought_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS thought_comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thought_id INTEGER NOT NULL REFERENCES shared_thoughts(id) ON DELETE CASCADE,
+      author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      comment_type TEXT NOT NULL DEFAULT 'COMMENT', -- 'COMMENT' | 'EDIT_PROPOSAL' | 'ADD_PROPOSAL'
+      content TEXT NOT NULL,
+      applied_at TEXT,
+      applied_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_thought_comments_thought
+      ON thought_comments(thought_id, created_at ASC);
+
+    CREATE TABLE IF NOT EXISTS thought_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thought_id INTEGER NOT NULL REFERENCES shared_thoughts(id) ON DELETE CASCADE,
+      editor_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      source_comment_id INTEGER REFERENCES thought_comments(id) ON DELETE SET NULL,
+      change_type TEXT NOT NULL, -- 'EDIT_MERGE' | 'ADD_MERGE' | 'MANUAL_EDIT'
+      previous_content TEXT NOT NULL,
+      new_content TEXT NOT NULL,
+      note TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS calendar_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      space_id INTEGER NOT NULL REFERENCES collab_spaces(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      start_date TEXT NOT NULL,
+      end_date TEXT NOT NULL,
+      start_time TEXT,
+      end_time TEXT,
+      is_all_day INTEGER NOT NULL DEFAULT 1,
+      label_key TEXT NOT NULL DEFAULT 'emerald',
+      color TEXT NOT NULL DEFAULT '#1B4D3E',
+      text_color TEXT NOT NULL DEFAULT '#FFFFFF',
+      location TEXT DEFAULT '',
+      url TEXT DEFAULT '',
+      attendee_ids_json TEXT NOT NULL DEFAULT '[]',
+      recurrence_type TEXT NOT NULL DEFAULT 'NONE', -- 'NONE' | 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY'
+      recurrence_until TEXT,
+      reminder_minutes INTEGER,
+      event_status TEXT NOT NULL DEFAULT 'CONFIRMED', -- 'PROPOSED' | 'CONFIRMED' | 'CANCELLED'
+      linked_thought_id INTEGER REFERENCES shared_thoughts(id) ON DELETE SET NULL,
+      created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_calendar_events_space_dates
+      ON calendar_events(space_id, start_date, end_date);
+    CREATE INDEX IF NOT EXISTS idx_calendar_events_thought
+      ON calendar_events(linked_thought_id);
+
+    CREATE TABLE IF NOT EXISTS calendar_event_votes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id INTEGER NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      vote TEXT NOT NULL, -- 'AVAILABLE' | 'UNAVAILABLE'
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(event_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS calendar_event_comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id INTEGER NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
+      author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      is_system INTEGER NOT NULL DEFAULT 0,
+      content TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_calendar_event_comments_event
+      ON calendar_event_comments(event_id, created_at ASC);
+
+    CREATE TABLE IF NOT EXISTS space_activities (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      space_id INTEGER NOT NULL REFERENCES collab_spaces(id) ON DELETE CASCADE,
+      actor_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      activity_type TEXT NOT NULL,
+      target_type TEXT NOT NULL, -- 'EVENT' | 'THOUGHT' | 'SPACE'
+      target_id INTEGER,
+      summary TEXT NOT NULL,
+      meta_json TEXT DEFAULT '{}',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_space_activities_space
+      ON space_activities(space_id, id DESC);
+
+    -- 3-way cross-entity links (Mindmap Project/Idea/Entry <-> Shared Thought <-> Calendar Event)
+    CREATE TABLE IF NOT EXISTS cross_entity_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_type TEXT NOT NULL, -- 'THOUGHT' | 'EVENT' | 'PROJECT' | 'IDEA' | 'ENTRY'
+      source_id INTEGER NOT NULL,
+      target_type TEXT NOT NULL, -- 'THOUGHT' | 'EVENT' | 'PROJECT' | 'IDEA' | 'ENTRY'
+      target_id INTEGER NOT NULL,
+      space_id INTEGER REFERENCES collab_spaces(id) ON DELETE CASCADE,
+      project_id INTEGER REFERENCES journal_projects(id) ON DELETE CASCADE,
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(source_type, source_id, target_type, target_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cross_links_source ON cross_entity_links(source_type, source_id);
+    CREATE INDEX IF NOT EXISTS idx_cross_links_target ON cross_entity_links(target_type, target_id);
+    CREATE INDEX IF NOT EXISTS idx_cross_links_project ON cross_entity_links(project_id);
   `);
 
   const userCols = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
@@ -213,6 +422,9 @@ export function initDatabase() {
   }
   if (!userColNames.has('push_enabled')) {
     db.exec("ALTER TABLE users ADD COLUMN push_enabled INTEGER NOT NULL DEFAULT 1;");
+  }
+  if (!userColNames.has('calendar_palette_json')) {
+    db.exec('ALTER TABLE users ADD COLUMN calendar_palette_json TEXT;');
   }
 
   const projCols = db.prepare("PRAGMA table_info(journal_projects)").all() as { name: string }[];
@@ -235,6 +447,12 @@ export function initDatabase() {
   }
   if (!entryColNames.has('due_time')) {
     db.exec('ALTER TABLE journal_entries ADD COLUMN due_time TEXT;');
+  }
+
+  const calCols = db.prepare("PRAGMA table_info(calendar_events)").all() as { name: string }[];
+  const calColNames = new Set(calCols.map((c) => c.name));
+  if (!calColNames.has('text_color')) {
+    db.exec("ALTER TABLE calendar_events ADD COLUMN text_color TEXT NOT NULL DEFAULT '#FFFFFF';");
   }
 }
 
@@ -347,6 +565,177 @@ export function seedDemoDataForUser(userId: number) {
       INSERT INTO journal_inbox (content, author_id)
       VALUES (?, ?)
     `).run('다음 미팅 전에 마인드맵에 비용 항목 가지 하나 더 뻗어서 시뮬레이션해보기', userId);
+
+    // 4. Demo Shared Space (Calendar + Shared Thought Pad)
+    const dPlus1 = getJstDateStrWithDayOffset(1);
+    const dPlus2 = getJstDateStrWithDayOffset(2);
+    const dPlus3 = getJstDateStrWithDayOffset(3);
+    const dPlus5 = getJstDateStrWithDayOffset(5);
+
+    const spaceRes = db.prepare(`
+      INSERT INTO collab_spaces (name, description, color, is_personal, invite_token, labels_json, created_by)
+      VALUES (?, ?, '#1B4D3E', 0, ?, ?, ?)
+    `).run(
+      '우리 팀 공유 스페이스',
+      '서로의 생각을 자유롭게 던지고, 날짜를 제안해 함께 실행하는 공유 캘린더 & 의식체 메모장',
+      generateInviteToken(),
+      JSON.stringify(DEFAULT_SPACE_LABELS),
+      userId
+    );
+    const spaceId = Number(spaceRes.lastInsertRowid);
+
+    db.prepare(`
+      INSERT INTO collab_space_members (space_id, user_id, role, last_read_activity_id)
+      VALUES (?, ?, 'OWNER', 0)
+    `).run(spaceId, userId);
+
+    // Demo Thoughts
+    const t1 = db.prepare(`
+      INSERT INTO shared_thoughts (space_id, title, content, tags_json, status, is_pinned, author_id, updated_by)
+      VALUES (?, ?, ?, ?, 'PROPOSED', 1, ?, ?)
+    `).run(
+      spaceId,
+      '이번 달 팀 워크숍 겸 브레인스토밍 데이',
+      '하루 정도 사무실 벗어나서 조용한 카페나 공유오피스 빌려서 다음 분기 방향을 편하게 이야기하면 어떨까? 노트북 없이 아이디어만 쏟아내는 시간으로!',
+      JSON.stringify(['워크숍', '아이디어']),
+      userId,
+      userId
+    );
+    const t1Id = Number(t1.lastInsertRowid);
+
+    db.prepare(`
+      INSERT INTO thought_reactions (thought_id, user_id, stance)
+      VALUES (?, ?, 'GOOD')
+    `).run(t1Id, userId);
+
+    db.prepare(`
+      INSERT INTO thought_comments (thought_id, author_id, comment_type, content)
+      VALUES (?, ?, 'ADD_PROPOSAL', ?)
+    `).run(t1Id, userId, '오후에는 다 같이 맛있는 저녁 먹으면서 회고까지 묶으면 더 좋을 것 같아요!');
+
+    const t2 = db.prepare(`
+      INSERT INTO shared_thoughts (space_id, title, content, tags_json, status, is_pinned, author_id, updated_by)
+      VALUES (?, ?, ?, ?, 'NEW', 0, ?, ?)
+    `).run(
+      spaceId,
+      '매주 금요일 15분 퀵 싱크 제안',
+      '긴 회의 대신 매주 금요일 오후에 15분만 각자 머릿속 고민 하나씩 꺼내놓는 루틴을 만들어보면 어떨까요?',
+      JSON.stringify(['루틴', '소통']),
+      userId,
+      userId
+    );
+    void t2;
+
+    // Demo Calendar Events (Confirmed + Proposed linked to t1)
+    const ev1 = db.prepare(`
+      INSERT INTO calendar_events (
+        space_id, title, description, start_date, end_date, start_time, end_time,
+        is_all_day, label_key, color, location, attendee_ids_json, recurrence_type,
+        reminder_minutes, event_status, created_by, updated_by
+      )
+      VALUES (?, ?, ?, ?, ?, '10:00', '11:30', 0, 'sky', '#0369A1', '온라인 줌', ?, 'WEEKLY', 30, 'CONFIRMED', ?, ?)
+    `).run(
+      spaceId,
+      '주간 정기 싱크 미팅',
+      '이번 주 핵심 이슈와 각자 공유 메모장에 올려둔 생각을 10분간 같이 훑어봅니다.',
+      today,
+      today,
+      JSON.stringify([userId]),
+      userId,
+      userId
+    );
+    const ev1Id = Number(ev1.lastInsertRowid);
+
+    db.prepare(`
+      INSERT INTO calendar_event_comments (event_id, author_id, is_system, content)
+      VALUES (?, ?, 1, '일정을 생성했습니다.')
+    `).run(ev1Id, userId);
+
+    db.prepare(`
+      INSERT INTO calendar_event_comments (event_id, author_id, is_system, content)
+      VALUES (?, ?, 0, '회의 시작 전에 공유 메모장에 올라온 워크숍 날짜도 같이 확정해요!')
+    `).run(ev1Id, userId);
+
+    // Multi-day event
+    const ev2 = db.prepare(`
+      INSERT INTO calendar_events (
+        space_id, title, description, start_date, end_date, is_all_day,
+        label_key, color, location, attendee_ids_json, recurrence_type,
+        event_status, created_by, updated_by
+      )
+      VALUES (?, ?, ?, ?, ?, 1, 'emerald', '#1B4D3E', '서울 성수동', ?, 'NONE', 'CONFIRMED', ?, ?)
+    `).run(
+      spaceId,
+      '디자인 스프린트 집중 기간',
+      'UI 시안 확정 및 프로토타입 테스트 2일간 집중 진행',
+      dPlus1,
+      dPlus2,
+      JSON.stringify([userId]),
+      userId,
+      userId
+    );
+    db.prepare(`
+      INSERT INTO calendar_event_comments (event_id, author_id, is_system, content)
+      VALUES (?, ?, 1, '일정을 생성했습니다.')
+    `).run(Number(ev2.lastInsertRowid), userId);
+
+    // Proposed Calendar Event linked to thought t1
+    const evProp = db.prepare(`
+      INSERT INTO calendar_events (
+        space_id, title, description, start_date, end_date, start_time, end_time,
+        is_all_day, label_key, color, location, attendee_ids_json, recurrence_type,
+        reminder_minutes, event_status, linked_thought_id, created_by, updated_by
+      )
+      VALUES (?, ?, ?, ?, ?, '13:00', '18:00', 0, 'amber', '#B45309', '조용한 공유오피스 (미정)', ?, 'NONE', 60, 'PROPOSED', ?, ?, ?)
+    `).run(
+      spaceId,
+      '팀 워크숍 & 브레인스토밍 데이',
+      '공유 메모장의 생각에서 제안된 날짜 후보입니다. 가능 여부를 눌러주세요!',
+      dPlus3,
+      dPlus3,
+      JSON.stringify([userId]),
+      t1Id,
+      userId,
+      userId
+    );
+    const evPropId = Number(evProp.lastInsertRowid);
+    db.prepare(`
+      INSERT INTO calendar_event_votes (event_id, user_id, vote)
+      VALUES (?, ?, 'AVAILABLE')
+    `).run(evPropId, userId);
+    db.prepare(`
+      INSERT INTO calendar_event_comments (event_id, author_id, is_system, content)
+      VALUES (?, ?, 1, '공유 메모장의 생각에서 이 날짜를 제안했습니다.')
+    `).run(evPropId, userId);
+
+    // Second date proposal for t1 to demonstrate multi-proposal flow
+    const evProp2 = db.prepare(`
+      INSERT INTO calendar_events (
+        space_id, title, description, start_date, end_date, start_time, end_time,
+        is_all_day, label_key, color, attendee_ids_json, recurrence_type,
+        event_status, linked_thought_id, created_by, updated_by
+      )
+      VALUES (?, ?, ?, ?, ?, '14:00', '18:00', 0, 'amber', '#B45309', ?, 'NONE', 'PROPOSED', ?, ?, ?)
+    `).run(
+      spaceId,
+      '팀 워크숍 & 브레인스토밍 데이 (후보 2)',
+      '이 날짜가 더 편하시면 여기서 확정할 수 있습니다.',
+      dPlus5,
+      dPlus5,
+      JSON.stringify([userId]),
+      t1Id,
+      userId,
+      userId
+    );
+    db.prepare(`
+      INSERT INTO calendar_event_comments (event_id, author_id, is_system, content)
+      VALUES (?, ?, 1, '공유 메모장의 생각에서 이 날짜를 제안했습니다.')
+    `).run(Number(evProp2.lastInsertRowid), userId);
+
+    db.prepare(`
+      INSERT INTO space_activities (space_id, actor_id, activity_type, target_type, target_id, summary)
+      VALUES (?, ?, 'EVENT_PROPOSED', 'EVENT', ?, ?)
+    `).run(spaceId, userId, evPropId, `팀 워크숍 & 브레인스토밍 데이 (${dPlus3}) 날짜를 제안했습니다.`);
 
     void today;
   });
