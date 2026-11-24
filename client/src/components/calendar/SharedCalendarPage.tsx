@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
   BookMarked,
@@ -76,6 +76,10 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
   const { L, language } = useLanguage();
   const todayStr = useMemo(() => getJstTodayStr(), []);
   const todayParsed = useMemo(() => parseYmd(todayStr), [todayStr]);
+  const isCoarsePointer = useMemo(
+    () => typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)').matches),
+    []
+  );
 
   const [viewYear, setViewYear] = useState(todayParsed.year);
   const [viewMonth0, setViewMonth0] = useState(todayParsed.month - 1);
@@ -113,11 +117,14 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
     x: number;
     y: number;
     hoveredDate: string | null;
+    mode: 'touch' | 'pointer';
   } | null>(null);
   const cardDragRef = useRef<{
     event: CalendarEventItem;
     hoveredDate: string | null;
+    mode: 'touch' | 'pointer';
   } | null>(null);
+  const ghostPillRef = useRef<HTMLDivElement | null>(null);
 
   // Floating [Move / Copy] choice popover right above the dropped date cell
   const [dropChoice, setDropChoice] = useState<{
@@ -286,6 +293,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
 
   const startLongPress = (e: React.PointerEvent, onTrigger: () => void) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if ((e.target as HTMLElement).closest('button')) return;
     clearLongPress();
     longPressFiredRef.current = false;
     longPressStartRef.current = { x: e.clientX, y: e.clientY };
@@ -321,8 +329,9 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
     const cellEl = document.querySelector(`[data-calendar-date="${targetDate}"]`) as HTMLElement | null;
     if (cellEl) {
       const rect = cellEl.getBoundingClientRect();
-      const clampedX = Math.min(window.innerWidth - 115, Math.max(115, rect.left + rect.width / 2));
-      const clampedY = Math.max(84, rect.top);
+      const halfSafe = Math.min(120, Math.max(100, window.innerWidth / 2 - 12));
+      const clampedX = Math.min(window.innerWidth - halfSafe, Math.max(halfSafe, rect.left + rect.width / 2));
+      const clampedY = Math.max(104, rect.top);
       setDropChoice({ event, targetDate, x: clampedX, y: clampedY });
     } else {
       setDropChoice({
@@ -344,66 +353,105 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
   }, [dropChoice]);
 
   const handleStartCardDragMove = useCallback(
-    (event: CalendarEventItem, clientX: number, clientY: number) => {
+    (event: CalendarEventItem, clientX: number, clientY: number, mode: 'touch' | 'pointer') => {
       const initialHover = findCalendarDateAtPoint(clientX, clientY);
-      cardDragRef.current = { event, hoveredDate: initialHover };
-      setCardDragState({ event, x: clientX, y: clientY, hoveredDate: initialHover });
+      cardDragRef.current = { event, hoveredDate: initialHover, mode };
+      setCardDragState({ event, x: clientX, y: clientY, hoveredDate: initialHover, mode });
     },
     [findCalendarDateAtPoint]
   );
 
-  useEffect(() => {
-    if (!cardDragState) return;
+  const handleUpdateCardDragMove = useCallback(
+    (clientX: number, clientY: number) => {
+      if (!cardDragRef.current) return;
+      const hoveredDate = findCalendarDateAtPoint(clientX, clientY);
+      cardDragRef.current.hoveredDate = hoveredDate;
+      setCardDragState((prev) => (prev ? { ...prev, x: clientX, y: clientY, hoveredDate } : null));
+    },
+    [findCalendarDateAtPoint]
+  );
 
-    const updatePoint = (x: number, y: number) => {
-      const hoveredDate = findCalendarDateAtPoint(x, y);
-      if (cardDragRef.current) {
-        cardDragRef.current.hoveredDate = hoveredDate;
-      }
-      setCardDragState((prev) => (prev ? { ...prev, x, y, hoveredDate } : null));
-    };
-
-    const onPointerMove = (e: PointerEvent) => {
-      updatePoint(e.clientX, e.clientY);
-    };
-
-    const onTouchMove = (e: TouchEvent) => {
-      if (e.touches.length > 0) {
-        e.preventDefault();
-        updatePoint(e.touches[0].clientX, e.touches[0].clientY);
-      }
-    };
-
-    const finishDrag = () => {
+  const handleEndCardDragMove = useCallback(
+    (clientX?: number, clientY?: number) => {
       const current = cardDragRef.current;
       cardDragRef.current = null;
       setCardDragState(null);
-      if (current && current.hoveredDate && current.hoveredDate !== current.event.start_date) {
-        openDropChoiceAtDate(current.event, current.hoveredDate);
+      if (!current) return;
+      const finalHoveredDate =
+        typeof clientX === 'number' && typeof clientY === 'number'
+          ? findCalendarDateAtPoint(clientX, clientY) ?? current.hoveredDate
+          : current.hoveredDate;
+      if (finalHoveredDate && finalHoveredDate !== current.event.start_date) {
+        openDropChoiceAtDate(current.event, finalHoveredDate);
       }
+    },
+    [findCalendarDateAtPoint, openDropChoiceAtDate]
+  );
+
+  const handleCancelCardDragMove = useCallback(() => {
+    cardDragRef.current = null;
+    setCardDragState(null);
+  }, []);
+
+  // Pointer (mouse / pen) drag listeners — strictly ignore touch so spurious mobile pointercancel never cancels touch drag
+  useEffect(() => {
+    if (!cardDragState || cardDragState.mode !== 'pointer') return;
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (e.pointerType === 'touch') return;
+      handleUpdateCardDragMove(e.clientX, e.clientY);
     };
 
-    const cancelDrag = () => {
-      cardDragRef.current = null;
-      setCardDragState(null);
+    const onPointerUp = (e: PointerEvent) => {
+      if (e.pointerType === 'touch') return;
+      handleEndCardDragMove(e.clientX, e.clientY);
+    };
+
+    const onPointerCancel = (e: PointerEvent) => {
+      if (e.pointerType === 'touch') return;
+      handleCancelCardDragMove();
     };
 
     window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('touchmove', onTouchMove, { passive: false });
-    window.addEventListener('pointerup', finishDrag);
-    window.addEventListener('touchend', finishDrag);
-    window.addEventListener('pointercancel', cancelDrag);
-    window.addEventListener('touchcancel', cancelDrag);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
 
     return () => {
       window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('touchmove', onTouchMove);
-      window.removeEventListener('pointerup', finishDrag);
-      window.removeEventListener('touchend', finishDrag);
-      window.removeEventListener('pointercancel', cancelDrag);
-      window.removeEventListener('touchcancel', cancelDrag);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
     };
-  }, [Boolean(cardDragState), findCalendarDateAtPoint, openDropChoiceAtDate]);
+  }, [cardDragState?.mode, handleUpdateCardDragMove, handleEndCardDragMove, handleCancelCardDragMove]);
+
+  // Prevent background overscroll / pull-to-refresh while card drag is active
+  useEffect(() => {
+    if (!cardDragState) return;
+    const prevOverscroll = document.body.style.overscrollBehavior;
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.overscrollBehavior = 'none';
+    document.body.style.userSelect = 'none';
+    return () => {
+      document.body.style.overscrollBehavior = prevOverscroll;
+      document.body.style.userSelect = prevUserSelect;
+    };
+  }, [Boolean(cardDragState)]);
+
+  // Clamp ghost pill strictly inside viewport bounds with constant layout width (left:0; top:0 + translate3d)
+  useLayoutEffect(() => {
+    if (!cardDragState || !ghostPillRef.current) return;
+    const el = ghostPillRef.current;
+    const margin = 12;
+    const fingerOffsetY = 28;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const maxLeft = Math.max(margin, vw - w - margin);
+    const maxTop = Math.max(margin, vh - h - margin);
+    const clampedLeft = Math.min(Math.max(margin, cardDragState.x - w / 2), maxLeft);
+    const clampedTop = Math.min(Math.max(margin, cardDragState.y - h - fingerOffsetY), maxTop);
+    el.style.transform = `translate3d(${Math.round(clampedLeft)}px, ${Math.round(clampedTop)}px, 0)`;
+  }, [cardDragState]);
 
   const handleDateCellClick = (ymd: string) => {
     if (longPressFiredRef.current) {
@@ -440,7 +488,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
     <div className="space-y-3 pb-20 lg:pb-6">
       {/* Toast feedback */}
       {toastMsg && (
-        <div className="fixed bottom-20 lg:bottom-6 right-4 z-50 px-4 py-2.5 rounded-xl bg-charcoal-900 text-white text-xs font-bold shadow-xl flex items-center gap-2">
+        <div className="fixed bottom-20 lg:bottom-6 left-4 right-4 sm:left-auto sm:max-w-sm z-50 px-4 py-2.5 rounded-xl bg-charcoal-900 text-white text-xs font-bold shadow-xl flex items-center gap-2 break-words">
           <span>{toastMsg}</span>
         </div>
       )}
@@ -648,6 +696,11 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
                         <div
                           key={cell.ymd}
                           data-calendar-date={cell.ymd}
+                          style={{
+                            WebkitUserSelect: 'none',
+                            userSelect: 'none',
+                            WebkitTouchCallout: 'none',
+                          }}
                           onClick={() => handleDateCellClick(cell.ymd)}
                           onContextMenu={(e) => {
                             e.preventDefault();
@@ -731,6 +784,9 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
                                     key={bar.instance.instanceKey}
                                     style={{
                                       gridColumn: `${bar.colStart + 1} / span ${bar.colSpan}`,
+                                      WebkitUserSelect: 'none',
+                                      userSelect: 'none',
+                                      WebkitTouchCallout: 'none',
                                       ...(isProposed
                                         ? {
                                             borderColor: ev.color,
@@ -745,7 +801,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
                                             color: ev.text_color || '#ffffff',
                                           }),
                                     }}
-                                    draggable={!pendingAction}
+                                    draggable={!pendingAction && !isCoarsePointer}
                                     onDragStart={(e) => {
                                       clearLongPress();
                                       setDraggingEvent(ev);
@@ -1127,6 +1183,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
       {/* Mobile / Tablet Draggable Slide-Up Day Bottom Sheet */}
       <MobileDayBottomSheet
         isOpen={mobileDaySheetOpen}
+        isCardDragging={Boolean(cardDragState)}
         onClose={() => setMobileDaySheetOpen(false)}
         selectedDate={selectedDate}
         dayEvents={selectedDayEvents}
@@ -1136,33 +1193,24 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
         onStartMove={(ev) => setPendingAction({ type: 'move', event: ev })}
         onStartCopy={(ev) => setPendingAction({ type: 'copy', event: ev })}
         onStartCardDragMove={handleStartCardDragMove}
+        onUpdateCardDragMove={handleUpdateCardDragMove}
+        onEndCardDragMove={handleEndCardDragMove}
+        onCancelCardDragMove={handleCancelCardDragMove}
       />
 
       {/* Floating Ghost Pill during Mobile/Touch Card Drag-and-Drop */}
       {cardDragState && (
         <div
-          style={{
-            left: `${cardDragState.x}px`,
-            top: `${cardDragState.y}px`,
-            transform: 'translate(-50%, -140%)',
-          }}
-          className="fixed z-[70] pointer-events-none select-none max-w-[260px]"
+          ref={ghostPillRef}
+          style={{ left: 0, top: 0 }}
+          className="fixed z-[70] pointer-events-none select-none w-max max-w-[min(220px,calc(100vw-24px))]"
         >
-          <div className="px-3.5 py-2 rounded-2xl bg-charcoal-900/95 text-white shadow-2xl border border-white/20 space-y-0.5">
-            <div className="flex items-center gap-2 text-xs font-bold">
-              <span
-                className="w-2.5 h-2.5 rounded-full shrink-0"
-                style={{ backgroundColor: cardDragState.event.color }}
-              />
-              <span className="truncate">{cardDragState.event.title}</span>
-            </div>
-            <div className="text-[11px] font-bold text-amber-300">
-              {cardDragState.hoveredDate
-                ? cardDragState.hoveredDate === cardDragState.event.start_date
-                  ? L('다른 날짜 위로 드래그하세요', '別の日へドラッグしてください', 'Drag onto another date')
-                  : L(`→ ${cardDragState.hoveredDate} (놓으면 이동·복사 선택)`, `→ ${cardDragState.hoveredDate}（離すと移動・コピー選択）`, `→ Drop on ${cardDragState.hoveredDate} (Move / Copy)`)
-                : L('달력 날짜 위로 드래그하세요', 'カレンダーの日付へドラッグ', 'Drag over a calendar date')}
-            </div>
+          <div className="px-3.5 py-2 rounded-2xl bg-charcoal-900/95 text-white shadow-2xl border border-white/20 flex items-center gap-2 text-xs font-bold whitespace-nowrap">
+            <span
+              className="w-2.5 h-2.5 rounded-full shrink-0"
+              style={{ backgroundColor: cardDragState.event.color }}
+            />
+            <span className="truncate">{cardDragState.event.title}</span>
           </div>
         </div>
       )}
@@ -1177,11 +1225,11 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
           />
           <div
             style={{
-              left: `${dropChoice.x}px`,
-              top: `${dropChoice.y - 8}px`,
-              transform: 'translate(-50%, -100%)',
+              left: 0,
+              top: 0,
+              transform: `translate3d(calc(${dropChoice.x}px - 50%), calc(${dropChoice.y - 8}px - 100%), 0)`,
             }}
-            className="fixed z-[70] bg-white rounded-2xl shadow-2xl border border-ivory-300 px-3 py-2.5 min-w-[200px]"
+            className="fixed z-[70] bg-white rounded-2xl shadow-2xl border border-ivory-300 px-3 py-2.5 w-max min-w-[200px] max-w-[min(240px,calc(100vw-24px))]"
           >
             <div className="text-[11px] font-bold text-charcoal-500 text-center mb-2 truncate max-w-[210px]">
               {dropChoice.targetDate} · {dropChoice.event.title}

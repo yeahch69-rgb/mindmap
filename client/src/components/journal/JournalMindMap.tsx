@@ -1502,11 +1502,18 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
       }
     };
 
+    const handlePointerCancel = () => {
+      if (draggingNest) setDraggingNest(null);
+      if (connectingWire) setConnectingWire(null);
+    };
+
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerCancel);
     return () => {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerCancel);
     };
   }, [draggingNest, connectingWire, scale, applyNestChoice, createEdge]);
 
@@ -2658,9 +2665,10 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                       top: node.y,
                       width: node.w,
                       height: node.h,
+                      ...(nestMode && movable ? { WebkitTouchCallout: 'none' as const } : {}),
                     }}
                     onPointerDown={(e) => {
-                      if (!nestMode || !movable || e.button !== 0) return;
+                      if (!nestMode || !movable || (e.pointerType === 'mouse' && e.button !== 0)) return;
                       e.stopPropagation();
                       if (!canvasRef.current) return;
                       const rect = canvasRef.current.getBoundingClientRect();
@@ -2689,7 +2697,7 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                       node.bgClass
                     } ${node.borderClass} ${
                       nestMode && movable
-                        ? 'cursor-grab active:cursor-grabbing hover:border-emerald-500 hover:shadow-md'
+                        ? 'cursor-grab active:cursor-grabbing touch-none select-none hover:border-emerald-500 hover:shadow-md'
                         : isClickable
                         ? 'cursor-pointer hover:shadow-md hover:border-forest-500'
                         : ''
@@ -2791,7 +2799,7 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                               });
                             }}
                             onClick={(e) => e.stopPropagation()}
-                            className={`absolute ${posCls} w-3.5 h-3.5 rounded-full border-2 cursor-crosshair transition-all z-30 ${
+                            className={`absolute ${posCls} w-3.5 h-3.5 rounded-full border-2 cursor-crosshair touch-none transition-all z-30 ${
                               isHoveredPort || isWireSourcePort || isPendingPort
                                 ? 'bg-violet-600 border-white scale-125 opacity-100 ring-2 ring-violet-400'
                                 : connectingWire || connectPendingSource

@@ -4334,7 +4334,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       )}
 
       {spaceBridgeToast && (
-        <div className="fixed bottom-20 lg:bottom-6 right-4 z-50 px-4 py-2.5 rounded-xl bg-charcoal-900 text-white text-xs font-bold shadow-xl">
+        <div className="fixed bottom-20 lg:bottom-6 left-4 right-4 sm:left-auto sm:max-w-sm z-50 px-4 py-2.5 rounded-xl bg-charcoal-900 text-white text-xs font-bold shadow-xl break-words">
           {spaceBridgeToast}
         </div>
       )}

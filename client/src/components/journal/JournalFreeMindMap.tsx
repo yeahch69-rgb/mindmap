@@ -1313,11 +1313,19 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
       }
     };
 
+    const handlePointerCancel = () => {
+      if (draggingNode) setDraggingNode(null);
+      if (panning) setPanning(null);
+      if (connectingWire) setConnectingWire(null);
+    };
+
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerCancel);
     return () => {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerCancel);
     };
   }, [draggingNode, panning, connectingWire, nestMode, moveSubtreeWithParent, scale, project, persistLayout, pushUndoSnapshot, selectedNodeKey, selectAndSyncNode]);
 
@@ -2147,12 +2155,14 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
           if (e.target === viewportRef.current || e.target === canvasRef.current) {
             selectAndSyncNode(null);
             setSelectedEdgeId(null);
-            setPanning({
-              startClientX: e.clientX,
-              startClientY: e.clientY,
-              scrollLeft: viewportRef.current?.scrollLeft || 0,
-              scrollTop: viewportRef.current?.scrollTop || 0,
-            });
+            if (e.pointerType !== 'touch' && e.button === 0) {
+              setPanning({
+                startClientX: e.clientX,
+                startClientY: e.clientY,
+                scrollLeft: viewportRef.current?.scrollLeft || 0,
+                scrollTop: viewportRef.current?.scrollTop || 0,
+              });
+            }
           }
         }}
         style={{
@@ -2176,12 +2186,14 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
               if (e.target === canvasRef.current) {
                 selectAndSyncNode(null);
                 setSelectedEdgeId(null);
-                setPanning({
-                  startClientX: e.clientX,
-                  startClientY: e.clientY,
-                  scrollLeft: viewportRef.current?.scrollLeft || 0,
-                  scrollTop: viewportRef.current?.scrollTop || 0,
-                });
+                if (e.pointerType !== 'touch' && e.button === 0) {
+                  setPanning({
+                    startClientX: e.clientX,
+                    startClientY: e.clientY,
+                    scrollLeft: viewportRef.current?.scrollLeft || 0,
+                    scrollTop: viewportRef.current?.scrollTop || 0,
+                  });
+                }
               }
             }}
             style={{
@@ -2450,9 +2462,10 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                     top: node.y + offY,
                     width: node.w,
                     height: node.h,
+                    WebkitTouchCallout: 'none',
                   }}
                   onPointerDown={(e) => {
-                    if (e.button !== 0) return;
+                    if (e.pointerType === 'mouse' && e.button !== 0) return;
                     e.stopPropagation();
                     const descOrig: Record<string, { x: number; y: number }> = {};
                     for (const cand of resolvedNodes.allOrdered) {
@@ -2474,7 +2487,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                       preDragPositions: { ...positionsRef.current },
                     });
                   }}
-                  className={`group absolute rounded-xl border px-3 py-1.5 shadow-sm flex flex-col justify-center cursor-move transition-shadow ${
+                  className={`group absolute rounded-xl border px-3 py-1.5 shadow-sm flex flex-col justify-center cursor-move touch-none select-none transition-shadow ${
                     node.bgClass
                   } ${node.borderClass} ${
                     isSelected ? 'ring-2 ring-gold-500 shadow-md z-30' : 'hover:shadow-md z-20'
@@ -2545,7 +2558,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                               pointerY: pt.y,
                             });
                           }}
-                          className={`absolute ${posCls} w-3.5 h-3.5 rounded-full border-2 cursor-crosshair transition-all z-30 ${
+                          className={`absolute ${posCls} w-3.5 h-3.5 rounded-full border-2 cursor-crosshair touch-none transition-all z-30 ${
                             isHoveredPort || isSourcePort
                               ? 'bg-violet-600 border-white scale-125 opacity-100 ring-2 ring-violet-400'
                               : connectingWire
