@@ -124,6 +124,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
     hoveredDate: string | null;
     mode: 'touch' | 'pointer';
   } | null>(null);
+  const cardDragEndedAtRef = useRef<number>(0);
   const ghostPillRef = useRef<HTMLDivElement | null>(null);
 
   // Floating [Move / Copy] choice popover right above the dropped date cell
@@ -291,7 +292,11 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
     longPressStartRef.current = null;
   };
 
+  const isCardDragBlocking = () =>
+    Boolean(cardDragRef.current) || performance.now() - cardDragEndedAtRef.current < 400;
+
   const startLongPress = (e: React.PointerEvent, onTrigger: () => void) => {
+    if (isCardDragBlocking()) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if ((e.target as HTMLElement).closest('button')) return;
     clearLongPress();
@@ -375,6 +380,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
     (clientX?: number, clientY?: number) => {
       const current = cardDragRef.current;
       cardDragRef.current = null;
+      cardDragEndedAtRef.current = performance.now();
       setCardDragState(null);
       if (!current) return;
       const finalHoveredDate =
@@ -390,6 +396,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
 
   const handleCancelCardDragMove = useCallback(() => {
     cardDragRef.current = null;
+    cardDragEndedAtRef.current = performance.now();
     setCardDragState(null);
   }, []);
 
@@ -423,16 +430,22 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
     };
   }, [cardDragState?.mode, handleUpdateCardDragMove, handleEndCardDragMove, handleCancelCardDragMove]);
 
-  // Prevent background overscroll / pull-to-refresh while card drag is active
+  // Prevent background overscroll / pull-to-refresh and OS contextmenu while card drag is active
   useEffect(() => {
     if (!cardDragState) return;
     const prevOverscroll = document.body.style.overscrollBehavior;
     const prevUserSelect = document.body.style.userSelect;
     document.body.style.overscrollBehavior = 'none';
     document.body.style.userSelect = 'none';
+    const suppressContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    window.addEventListener('contextmenu', suppressContextMenu, true);
     return () => {
       document.body.style.overscrollBehavior = prevOverscroll;
       document.body.style.userSelect = prevUserSelect;
+      window.removeEventListener('contextmenu', suppressContextMenu, true);
     };
   }, [Boolean(cardDragState)]);
 
@@ -454,6 +467,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
   }, [cardDragState]);
 
   const handleDateCellClick = (ymd: string) => {
+    if (isCardDragBlocking()) return;
     if (longPressFiredRef.current) {
       longPressFiredRef.current = false;
       return;
@@ -704,6 +718,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
                           onClick={() => handleDateCellClick(cell.ymd)}
                           onContextMenu={(e) => {
                             e.preventDefault();
+                            if (isCardDragBlocking()) return;
                             setSelectedDate(cell.ymd);
                             setQuickAddDate(cell.ymd);
                           }}
@@ -814,6 +829,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
                                     }}
                                     onClick={(e) => {
                                       e.stopPropagation();
+                                      if (isCardDragBlocking()) return;
                                       if (longPressFiredRef.current) {
                                         longPressFiredRef.current = false;
                                         return;
@@ -831,6 +847,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
                                     onContextMenu={(e) => {
                                       e.preventDefault();
                                       e.stopPropagation();
+                                      if (isCardDragBlocking()) return;
                                       setEventActionTarget(ev);
                                     }}
                                     onPointerDown={(e) => {

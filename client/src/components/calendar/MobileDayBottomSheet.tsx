@@ -199,19 +199,20 @@ export const MobileDayBottomSheet: React.FC<MobileDayBottomSheetProps> = ({
     const onWindowContextMenu = (e: MouseEvent) => {
       if (touchDragSessionRef.current) {
         e.preventDefault();
+        e.stopPropagation();
       }
     };
 
     window.addEventListener('touchmove', onWindowTouchMove, { passive: false });
     window.addEventListener('touchend', onWindowTouchEnd, { passive: false });
     window.addEventListener('touchcancel', onWindowTouchCancel);
-    window.addEventListener('contextmenu', onWindowContextMenu);
+    window.addEventListener('contextmenu', onWindowContextMenu, true);
 
     return () => {
       window.removeEventListener('touchmove', onWindowTouchMove);
       window.removeEventListener('touchend', onWindowTouchEnd);
       window.removeEventListener('touchcancel', onWindowTouchCancel);
-      window.removeEventListener('contextmenu', onWindowContextMenu);
+      window.removeEventListener('contextmenu', onWindowContextMenu, true);
     };
   }, [mounted]);
 
