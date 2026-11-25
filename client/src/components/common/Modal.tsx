@@ -59,7 +59,10 @@ export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, 
           </button>
         </div>
 
-        <div className="flex-1 min-h-0 px-3.5 py-3.5 lg:p-6 lg:max-h-[calc(85vh-5rem)] overflow-y-auto overflow-x-hidden">
+        <div
+          data-modal-body="true"
+          className="flex-1 min-h-0 px-3.5 py-3.5 lg:p-6 lg:max-h-[calc(85vh-5rem)] overflow-y-auto overflow-x-hidden"
+        >
           {children}
         </div>
       </div>

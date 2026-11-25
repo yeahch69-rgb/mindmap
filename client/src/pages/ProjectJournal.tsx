@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { Button } from '../components/common/Button';
 import { Modal } from '../components/common/Modal';
+import { DraggableFab } from '../components/common/DraggableFab';
 import { TranslateButton } from '../components/common/TranslateButton';
 import { useContentTranslation } from '../hooks/useContentTranslation';
 import { loadFullWidthMap, setDocFullWidthPref, FullWidthMap } from '../utils/docWidthPrefs';
@@ -156,6 +157,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
 
   // Selected Project Detail State
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
+  const selectedProjectIdRef = useRef<number | null>(selectedProjectId);
+  selectedProjectIdRef.current = selectedProjectId;
+  const [edgeSwipeDx, setEdgeSwipeDx] = useState(0);
   const [fullWidthMap, setFullWidthMap] = useState<FullWidthMap>(() =>
     loadFullWidthMap('nygc_journal_full_width_map')
   );
@@ -366,6 +370,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
         }
         setSelectedProjectId(nextId);
       } else {
+        if (selectedProjectIdRef.current === null && currHistoryPid <= 0) {
+          return;
+        }
         if (currHistoryPid > 0) {
           window.history.back();
           return;
@@ -399,6 +406,102 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  // Smartphone (< 640px) left-edge swipe back gesture for iOS standalone PWA & mobile browsers
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setEdgeSwipeDx(0);
+      return;
+    }
+
+    let tracking = false;
+    let locked = false;
+    let startX = 0;
+    let startY = 0;
+    let startTime = 0;
+    let lastDx = 0;
+
+    const reset = () => {
+      tracking = false;
+      locked = false;
+      lastDx = 0;
+      setEdgeSwipeDx(0);
+    };
+
+    const handleTouchStart = (e: TouchEvent) => {
+      if (window.innerWidth >= 640) return;
+      if (e.touches.length !== 1) return;
+      if (document.querySelector('[data-modal-body="true"]')) return;
+
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      const touch = e.touches[0];
+      if (touch.clientX > 28) return;
+
+      tracking = true;
+      locked = false;
+      startX = touch.clientX;
+      startY = touch.clientY;
+      startTime = performance.now();
+      lastDx = 0;
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (!tracking || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+
+      if (!locked) {
+        if (dx < 0) {
+          reset();
+          return;
+        }
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+        if (Math.abs(dy) > dx * 0.75) {
+          reset();
+          return;
+        }
+        locked = true;
+      }
+
+      lastDx = Math.max(0, dx);
+      setEdgeSwipeDx(Math.min(110, lastDx));
+    };
+
+    const handleTouchEnd = () => {
+      if (!tracking) return;
+      const elapsed = Math.max(1, performance.now() - startTime);
+      const velocity = lastDx / elapsed;
+      const shouldNavigateBack = locked && (lastDx >= 72 || (lastDx >= 44 && velocity >= 0.4));
+      reset();
+      if (shouldNavigateBack && selectedProjectIdRef.current !== null) {
+        navigateProjectSelection(null);
+      }
+    };
+
+    window.addEventListener('touchstart', handleTouchStart, { passive: true });
+    window.addEventListener('touchmove', handleTouchMove, { passive: true });
+    window.addEventListener('touchend', handleTouchEnd, { passive: true });
+    window.addEventListener('touchcancel', reset, { passive: true });
+
+    return () => {
+      window.removeEventListener('touchstart', handleTouchStart);
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handleTouchEnd);
+      window.removeEventListener('touchcancel', reset);
+      setEdgeSwipeDx(0);
+    };
+  }, [selectedProjectId, navigateProjectSelection]);
 
   useEffect(() => {
     if (!initialProjectId || !user) return;
@@ -1616,8 +1719,38 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
 
   return (
     <div className="w-full max-w-full space-y-2.5 sm:space-y-3 overflow-x-hidden pb-6">
+      {/* Smartphone-only FAB (shown only on project list view) */}
+      {!selectedProjectId && (
+        <DraggableFab
+          label={L('새 프로젝트', '新規プロジェクト', 'New Project')}
+          onClick={handleOpenCreateModal}
+        />
+      )}
+
+      {/* Visual feedback pill for left-edge swipe back gesture on smartphone detail view */}
+      {selectedProjectId && edgeSwipeDx > 8 && (
+        <div
+          aria-hidden="true"
+          className="sm:hidden fixed left-0 top-1/2 -translate-y-1/2 z-30 pointer-events-none"
+          style={{
+            transform: `translate3d(${Math.min(28, edgeSwipeDx * 0.32 - 8)}px, -50%, 0)`,
+            opacity: Math.min(1, edgeSwipeDx / 60),
+          }}
+        >
+          <div
+            className={`w-10 h-10 rounded-full flex items-center justify-center shadow-lg border transition-colors ${
+              edgeSwipeDx >= 72
+                ? 'bg-forest-800 text-white border-forest-700'
+                : 'bg-white/95 text-charcoal-700 border-ivory-300'
+            }`}
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </div>
+        </div>
+      )}
+
       {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#E6E2D8]">
+      <div className="hidden sm:flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#E6E2D8]">
         <div>
           <div className="flex items-center gap-2">
             <BookMarked className="w-6 h-6 text-forest-700 shrink-0" />
@@ -1686,7 +1819,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       </div>
 
       {/* 3-Second Quick Capture Inbox Bar */}
-      <div className="space-y-2.5">
+      <div className="!mt-0 sm:!mt-3 space-y-2.5">
         <form onSubmit={handleAddInbox} className="flex items-center gap-2">
           <div className="relative flex-1 min-w-0">
             <Inbox className="w-4 h-4 text-forest-700 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
