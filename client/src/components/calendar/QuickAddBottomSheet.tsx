@@ -4,6 +4,7 @@ import { CalendarPlus, ChevronDown, ChevronUp, Copy, Plus, X } from 'lucide-reac
 import { useLanguage } from '../../context/LanguageContext';
 import { CalendarEventItem } from '../../types/spaces';
 import { Button } from '../common/Button';
+import { useModalBackHandler } from '../../utils/modalHistory';
 
 interface QuickAddBottomSheetProps {
   targetDate: string | null;
@@ -22,6 +23,7 @@ export const QuickAddBottomSheet: React.FC<QuickAddBottomSheetProps> = ({
 }) => {
   const { L } = useLanguage();
   const isOpen = Boolean(targetDate);
+  useModalBackHandler(isOpen, onClose);
   const [renderedDate, setRenderedDate] = useState<string>('');
   const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(false);

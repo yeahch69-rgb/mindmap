@@ -3,6 +3,7 @@ import {
   BookMarked,
   CalendarDays,
   Lightbulb,
+  Link2,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
@@ -195,14 +196,25 @@ export const DesktopSidebar: React.FC<DesktopSidebarProps> = ({
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1">
                         <span className="text-xs font-bold truncate">{space.name}</span>
+                        {space.linked_project && (
+                          <Link2
+                            className="w-3 h-3 text-indigo-600 shrink-0"
+                            aria-label={L('프로젝트 연동됨', 'プロジェクト連携中', 'Linked to project')}
+                          />
+                        )}
                         {space.members.length > 1 ? (
                           <Users className="w-3 h-3 text-charcoal-400 shrink-0" />
                         ) : (
                           <Lock className="w-2.5 h-2.5 text-charcoal-400 shrink-0" />
                         )}
                       </div>
-                      <div className="text-[10px] text-charcoal-400 flex items-center gap-1.5">
+                      <div className="text-[10px] text-charcoal-400 flex items-center gap-1.5 flex-wrap">
                         <span>{L(`${space.members.length}명`, `${space.members.length}人`, `${space.members.length}`)}</span>
+                        {(space.pending_join_request_count || 0) > 0 && (
+                          <span className="text-amber-700 font-bold">
+                            · {L(`승인대기 ${space.pending_join_request_count}`, `承認待ち ${space.pending_join_request_count}`, `${space.pending_join_request_count} pending`)}
+                          </span>
+                        )}
                         {space.proposed_event_count > 0 && (
                           <span className="text-amber-700 font-bold">
                             · {L(`제안 ${space.proposed_event_count}`, `提案 ${space.proposed_event_count}`, `${space.proposed_event_count} prop`)}

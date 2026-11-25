@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronUp, X } from 'lucide-react';
 import { useLanguage } from '../../context/LanguageContext';
+import { useModalBackHandler } from '../../utils/modalHistory';
 
 interface MobileNodeBottomSheetProps {
   isOpen: boolean;
@@ -17,6 +18,7 @@ export const MobileNodeBottomSheet: React.FC<MobileNodeBottomSheetProps> = ({
   children,
 }) => {
   const { L } = useLanguage();
+  useModalBackHandler(isOpen, onClose);
 
   const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(false);

@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
+import { useModalBackHandler } from '../../utils/modalHistory';
 
 interface ModalProps {
   isOpen: boolean;
@@ -13,6 +14,7 @@ interface ModalProps {
 
 export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, size, maxWidth }) => {
   const effectiveMaxWidth = maxWidth || size || 'lg';
+  useModalBackHandler(isOpen, onClose);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {

@@ -15,6 +15,7 @@ import { api } from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { formatJstTime, getJstDateKey } from '../../utils/dateTime';
+import { useModalBackHandler } from '../../utils/modalHistory';
 
 interface AdminUserRow {
   id: number;
@@ -58,6 +59,7 @@ interface AdminUsersModalProps {
 export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClose }) => {
   const { user } = useAuth();
   const { L } = useLanguage();
+  useModalBackHandler(isOpen && user?.role === 'ADMIN', onClose);
 
   const [users, setUsers] = useState<AdminUserRow[]>([]);
   const [usage, setUsage] = useState<TranslationUsageSummary | null>(null);

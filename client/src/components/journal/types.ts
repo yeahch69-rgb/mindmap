@@ -1,3 +1,5 @@
+import type { CollabJoinRequest } from '../../types/spaces';
+
 export type JournalMode = 'SOLO' | 'COLLAB';
 export type PartnerType = 'NONE' | 'SHARED' | 'EXTERNAL';
 export type TurnState = 'MY_TURN' | 'THEIR_TURN' | 'HOLD' | 'DONE';
@@ -89,6 +91,13 @@ export interface JournalTurnWait {
   notified_at: string | null;
 }
 
+export interface LinkedSpaceSummary {
+  id: number;
+  name: string;
+  color: string;
+  member_count: number;
+}
+
 export interface JournalProject {
   id: number;
   title: string;
@@ -97,6 +106,10 @@ export interface JournalProject {
   partner_type: PartnerType;
   partner_name: string | null;
   invite_token?: string | null;
+  member_invite_token?: string | null;
+  linked_space?: LinkedSpaceSummary | null;
+  pending_join_requests?: CollabJoinRequest[];
+  pending_join_request_count?: number;
   active_turn_user_id?: number | null;
   active_turn_user_name?: string | null;
   my_turn_wait?: JournalTurnWait | null;

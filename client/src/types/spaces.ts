@@ -14,13 +14,51 @@ export interface SpaceMember {
   joined_at: string;
 }
 
+export interface LinkedProjectSummary {
+  id: number;
+  title: string;
+  color: string;
+  mode: string;
+  created_by: number;
+}
+
+export interface CollabJoinRequest {
+  id: number;
+  project_id: number;
+  space_id: number | null;
+  target_user_id: number;
+  target_user_name: string;
+  target_user_email: string;
+  invited_by_user_id: number | null;
+  invited_by_name: string;
+  source: 'PROJECT' | 'SPACE';
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  created_at: string;
+}
+
+export interface MyPendingJoinRequest {
+  id: number;
+  project_id: number;
+  project_title: string;
+  space_id: number | null;
+  space_name: string | null;
+  invited_by_name: string;
+  source: 'PROJECT' | 'SPACE';
+  created_at: string;
+}
+
 export interface CollabSpace {
   id: number;
   name: string;
   description: string;
   color: string;
   is_personal: boolean;
-  invite_token: string;
+  linked_project_id?: number | null;
+  linked_project?: LinkedProjectSummary | null;
+  pending_join_requests?: CollabJoinRequest[];
+  pending_join_request_count?: number;
+  invite_token: string | null;
+  member_invite_token?: string | null;
   labels: SpaceLabelPreset[];
   created_by: number;
   my_role: 'OWNER' | 'MEMBER';

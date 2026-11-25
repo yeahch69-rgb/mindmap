@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { createPortal } from 'react-dom';
 import { Plus, X } from 'lucide-react';
 import { useLanguage } from '../../context/LanguageContext';
+import { useModalBackHandler } from '../../utils/modalHistory';
 
 export type DraggableFabTone =
   | 'default'
@@ -127,6 +128,7 @@ export const DraggableFab: React.FC<DraggableFabProps> = ({
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
+  useModalBackHandler(isOpen, () => setIsOpen(false));
   const [menuLayout, setMenuLayout] = useState<{
     vertical: 'up' | 'down';
     horizontal: 'left' | 'right';

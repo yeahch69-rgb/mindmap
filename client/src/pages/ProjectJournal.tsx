@@ -10,6 +10,12 @@ import { TranslateButton } from '../components/common/TranslateButton';
 import { useContentTranslation } from '../hooks/useContentTranslation';
 import { loadFullWidthMap, setDocFullWidthPref, FullWidthMap } from '../utils/docWidthPrefs';
 import {
+  consumePushedModalDepth,
+  hasActiveModalHistoryEntry,
+  hasOpenModal,
+  stripModalHistoryKey,
+} from '../utils/modalHistory';
+import {
   BookMarked,
   Plus,
   Lock,
@@ -34,6 +40,10 @@ import {
   ListOrdered,
   Sparkles,
   Calendar,
+  CalendarRange,
+  Clock,
+  ExternalLink,
+  Link2,
   Search,
   RefreshCw,
   GitBranch,
@@ -71,7 +81,7 @@ import {
   JournalIdea,
   MindMapLayoutData,
 } from '../components/journal/types';
-import { CollabSpace, CrossLinkBadge } from '../types/spaces';
+import { CollabSpace, CrossLinkBadge, MyPendingJoinRequest } from '../types/spaces';
 import { MindmapSendSource, SendFromMindmapModal } from '../components/spaces/SendFromMindmapModal';
 
 /** Format timeline date/time compactly as YY.MM.DD HH:MM. */
@@ -114,6 +124,7 @@ interface ProjectJournalProps {
   activeSpaceId?: number | null;
   onJumpToSpaceThought?: (spaceId: number, thoughtId: number) => void;
   onJumpToSpaceEvent?: (spaceId: number, eventId: number, startDate?: string) => void;
+  onJumpToLinkedSpace?: (spaceId: number) => void;
   onSpacesNeedRefresh?: () => void;
   realtimeTick?: number;
 }
@@ -127,6 +138,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   activeSpaceId = null,
   onJumpToSpaceThought,
   onJumpToSpaceEvent,
+  onJumpToLinkedSpace,
   onSpacesNeedRefresh,
   realtimeTick = 0,
 }) => {
@@ -241,6 +253,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const [formNextActionDate, setFormNextActionDate] = useState('');
   const [formThresholdDays, setFormThresholdDays] = useState(7);
   const [formColor, setFormColor] = useState('#1B4D3E');
+  const [formCreateLinkedSpace, setFormCreateLinkedSpace] = useState(true);
   const [isSubmittingProject, setIsSubmittingProject] = useState(false);
 
   // Modal Sub-Tabs (Join merged into New Project modal, Invite/Members merged into People modal)
@@ -248,11 +261,28 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const [participantsModalTab, setParticipantsModalTab] = useState<'STAKEHOLDERS' | 'COLLAB'>('STAKEHOLDERS');
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteError, setInviteError] = useState('');
+  const [inviteFeedback, setInviteFeedback] = useState('');
   const [isInvitingMember, setIsInvitingMember] = useState(false);
-  const [copiedInvite, setCopiedInvite] = useState(false);
+  const [copiedInviteKind, setCopiedInviteKind] = useState<'owner' | 'member' | null>(null);
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [joinError, setJoinError] = useState('');
   const [isJoiningByCode, setIsJoiningByCode] = useState(false);
+
+  // Linked Space & Join Approval State
+  const [myPendingJoinRequests, setMyPendingJoinRequests] = useState<MyPendingJoinRequest[]>([]);
+  const [isLinkSpaceModalOpen, setIsLinkSpaceModalOpen] = useState(false);
+  const [linkableSpaces, setLinkableSpaces] = useState<
+    Array<{ id: number; name: string; color: string; is_personal: boolean; member_count: number }>
+  >([]);
+  const [loadingLinkableSpaces, setLoadingLinkableSpaces] = useState(false);
+  const [selectedLinkSpaceId, setSelectedLinkSpaceId] = useState('');
+  const [isLinkingSpace, setIsLinkingSpace] = useState(false);
+  const [resolvingJoinReqId, setResolvingJoinReqId] = useState<number | null>(null);
+
+  // Project Delete Confirmation Modal
+  const [deleteTargetProject, setDeleteTargetProject] = useState<JournalProject | null>(null);
+  const [deleteWithLinkedSpace, setDeleteWithLinkedSpace] = useState(false);
+  const [isDeletingProject, setIsDeletingProject] = useState(false);
 
   const loadProjectSpaceLinks = useCallback(async (pid: number | null) => {
     if (!pid) {
@@ -303,10 +333,16 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const fetchOverview = async (keepSelection = true) => {
     try {
       setIsLoading(true);
-      const res = await api.get<{ projects: JournalProject[]; inbox: JournalInboxItem[]; todayJst: string }>('/journal/overview');
+      const res = await api.get<{
+        projects: JournalProject[];
+        inbox: JournalInboxItem[];
+        todayJst: string;
+        my_pending_join_requests?: MyPendingJoinRequest[];
+      }>('/journal/overview');
       const list = res?.projects || [];
       setProjects(list);
       setInbox(res?.inbox || []);
+      setMyPendingJoinRequests(res?.my_pending_join_requests || []);
       if (res?.todayJst) setTodayJst(res.todayJst);
       if (keepSelection && selectedProjectId) {
         const stillExists = list.some(p => p.id === selectedProjectId);
@@ -345,12 +381,14 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const navigateProjectSelection = useCallback((nextId: number | null) => {
     try {
       const currHistoryPid = Number(window.history.state?.journalProjectId || 0);
+      const baseState = stripModalHistoryKey(window.history.state);
       if (nextId !== null) {
         const nextUrl = new URL(window.location.href);
         nextUrl.searchParams.set('project', String(nextId));
-        if (currHistoryPid > 0) {
+        if (currHistoryPid > 0 || hasActiveModalHistoryEntry()) {
+          consumePushedModalDepth();
           window.history.replaceState(
-            { ...(window.history.state || {}), journalProjectId: nextId },
+            { ...baseState, journalProjectId: nextId },
             '',
             nextUrl.pathname + nextUrl.search
           );
@@ -358,12 +396,12 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
           const listUrl = new URL(window.location.href);
           listUrl.searchParams.delete('project');
           window.history.replaceState(
-            { ...(window.history.state || {}), journalProjectId: null },
+            { ...baseState, journalProjectId: null },
             '',
             listUrl.pathname + listUrl.search
           );
           window.history.pushState(
-            { ...(window.history.state || {}), journalProjectId: nextId },
+            { ...baseState, journalProjectId: nextId },
             '',
             nextUrl.pathname + nextUrl.search
           );
@@ -374,13 +412,19 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
           return;
         }
         if (currHistoryPid > 0) {
-          window.history.back();
+          const modalDepth = consumePushedModalDepth();
+          if (modalDepth > 0) {
+            window.history.go(-(modalDepth + 1));
+          } else {
+            window.history.back();
+          }
           return;
         }
+        consumePushedModalDepth();
         const listUrl = new URL(window.location.href);
         listUrl.searchParams.delete('project');
         window.history.replaceState(
-          { ...(window.history.state || {}), journalProjectId: null },
+          { ...baseState, journalProjectId: null },
           '',
           listUrl.pathname + listUrl.search
         );
@@ -429,9 +473,10 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     };
 
     const handleTouchStart = (e: TouchEvent) => {
-      if (window.innerWidth >= 640) return;
+      const isIosStandalone = Boolean((window.navigator as { standalone?: boolean }).standalone);
+      if (window.innerWidth >= 640 && !isIosStandalone) return;
       if (e.touches.length !== 1) return;
-      if (document.querySelector('[data-modal-body="true"]')) return;
+      if (hasOpenModal() || document.querySelector('[data-modal-body="true"]')) return;
 
       const target = e.target as HTMLElement | null;
       if (
@@ -513,10 +558,32 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     if (!pendingInviteToken || !user) return;
     const acceptInvite = async () => {
       try {
-        const res = await api.post<{ project_id: number }>('/journal/invites/accept', {
+        const res = await api.post<{
+          project_id: number;
+          title?: string;
+          pendingApproval?: boolean;
+          alreadyPending?: boolean;
+        }>('/journal/invites/accept', {
           token: pendingInviteToken,
         });
         await fetchOverview();
+        onSpacesNeedRefresh?.();
+        if (res?.pendingApproval) {
+          showSpaceBridgeToast(
+            res.alreadyPending
+              ? L(
+                  `'${res.title || ''}' 프로젝트 참여 요청이 이미 방장 승인 대기 중입니다.`,
+                  `「${res.title || ''}」への参加申請はすでにオーナー承認待ちです。`,
+                  `Your join request for '${res.title || ''}' is already pending owner approval.`
+                )
+              : L(
+                  `'${res.title || ''}' 참여 요청을 보냈습니다! 방장 승인 후 프로젝트와 공유 스페이스에 함께 합류됩니다.`,
+                  `「${res.title || ''}」への参加申請を送信しました！オーナー承認後に同時参加します。`,
+                  `Join request sent for '${res.title || ''}'! You'll join both project & space after owner approval.`
+                )
+          );
+          return;
+        }
         if (res?.project_id) {
           navigateProjectSelection(res.project_id);
         }
@@ -674,6 +741,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     setFormNextActionDate('');
     setFormThresholdDays(7);
     setFormColor('#1B4D3E');
+    setFormCreateLinkedSpace(true);
     setIsProjectModalOpen(true);
   };
 
@@ -708,6 +776,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
         next_action_date: formNextActionDate || null,
         stale_threshold_days: formThresholdDays,
         color: formColor,
+        ...(!editingProject && formMode === 'COLLAB' && formPartnerType === 'SHARED'
+          ? { create_linked_space: formCreateLinkedSpace }
+          : {}),
       };
 
       if (editingProject) {
@@ -716,9 +787,11 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
         if (selectedProjectId === editingProject.id) {
           await fetchProjectDetail(editingProject.id);
         }
+        onSpacesNeedRefresh?.();
       } else {
         const created = await api.post<JournalProject>('/journal/projects', payload);
         await fetchOverview();
+        onSpacesNeedRefresh?.();
         if (created?.id) navigateProjectSelection(created.id);
       }
       setIsProjectModalOpen(false);
@@ -735,24 +808,29 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     return `${window.location.origin}/?invite=${token}`;
   };
 
-  const handleCopyInviteLink = async (token?: string | null) => {
+  const handleCopyInviteLink = async (token?: string | null, kind: 'owner' | 'member' = 'owner') => {
     const url = getInviteUrl(token);
     if (!url) return;
     try {
       await navigator.clipboard.writeText(url);
-      setCopiedInvite(true);
-      setTimeout(() => setCopiedInvite(false), 1800);
+      setCopiedInviteKind(kind);
+      setTimeout(() => setCopiedInviteKind(null), 1800);
     } catch {
       prompt(L('아래 초대 링크를 복사해 주세요:', '招待リンクをコピー:', 'Copy invite link:'), url);
     }
   };
 
-  const handleRegenerateInvite = async () => {
+  const handleRegenerateInvite = async (kind: 'owner' | 'member' = 'owner') => {
     if (!detailProject) return;
     try {
-      await api.post(`/journal/projects/${detailProject.id}/invite/regenerate`);
+      await api.post(`/journal/projects/${detailProject.id}/invite/regenerate`, { kind });
       await fetchOverview();
       await fetchProjectDetail(detailProject.id);
+      setInviteFeedback(
+        kind === 'member'
+          ? L('새 멤버용 초대 링크가 발급되었습니다.', '新しいメンバー用招待リンクを発行しました。', 'Member invite link regenerated.')
+          : L('새 방장 전용 초대 링크가 발급되었습니다.', '新しいオーナー専用招待リンクを発行しました。', 'Owner invite link regenerated.')
+      );
     } catch (err: any) {
       alert(err.message || t('common.error'));
     }
@@ -762,12 +840,37 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     e.preventDefault();
     if (!detailProject || !inviteEmail.trim()) return;
     setInviteError('');
+    setInviteFeedback('');
     try {
       setIsInvitingMember(true);
-      await api.post(`/journal/projects/${detailProject.id}/members`, { email: inviteEmail.trim() });
+      const res = await api.post<{
+        pendingApproval?: boolean;
+        alreadyPending?: boolean;
+        request?: { target_user_name?: string };
+      }>(`/journal/projects/${detailProject.id}/members`, { email: inviteEmail.trim() });
       setInviteEmail('');
       await fetchOverview();
       await fetchProjectDetail(detailProject.id);
+      onSpacesNeedRefresh?.();
+      if (res?.pendingApproval) {
+        setInviteFeedback(
+          res.alreadyPending
+            ? L('이미 방장 승인 대기 중인 사용자입니다.', 'すでにオーナー承認待ちのユーザーです。', 'Already awaiting owner approval.')
+            : L(
+                '방장에게 초대 승인 요청을 보냈습니다! 방장이 승인하면 프로젝트와 공유 스페이스에 함께 합류됩니다.',
+                'オーナーへ招待承認リクエストを送信しました！承認後にプロジェクトとスペースへ同時参加します。',
+                'Invite approval request sent to the owner!'
+              )
+        );
+      } else {
+        setInviteFeedback(
+          L(
+            '멤버를 초대했습니다! 연동된 공유 스페이스에도 자동 반영됩니다.',
+            'メンバーを招待しました！連携共有スペースにも自動反映されます。',
+            'Member invited and synced with linked Shared Space!'
+          )
+        );
+      }
     } catch (err: any) {
       setInviteError(err.message || t('common.error'));
     } finally {
@@ -780,6 +883,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     try {
       await api.delete(`/journal/projects/${detailProject.id}/members/${memberUserId}`);
       await fetchOverview();
+      onSpacesNeedRefresh?.();
       if (memberUserId === Number(user?.id)) {
         setIsParticipantsModalOpen(false);
         navigateProjectSelection(null);
@@ -797,12 +901,34 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     setJoinError('');
     try {
       setIsJoiningByCode(true);
-      const res = await api.post<{ project_id: number }>('/journal/invites/accept', {
+      const res = await api.post<{
+        project_id: number;
+        title?: string;
+        pendingApproval?: boolean;
+        alreadyPending?: boolean;
+      }>('/journal/invites/accept', {
         token: joinCodeInput.trim(),
       });
       setIsProjectModalOpen(false);
       setJoinCodeInput('');
       await fetchOverview();
+      onSpacesNeedRefresh?.();
+      if (res?.pendingApproval) {
+        showSpaceBridgeToast(
+          res.alreadyPending
+            ? L(
+                `'${res.title || ''}' 프로젝트 참여 요청이 이미 방장 승인 대기 중입니다.`,
+                `「${res.title || ''}」への参加申請はすでに承認待ちです。`,
+                `Join request for '${res.title || ''}' is already pending approval.`
+              )
+            : L(
+                `'${res.title || ''}' 참여 요청을 보냈습니다! 방장 승인 후 합류됩니다.`,
+                `「${res.title || ''}」への参加申請を送信しました！オーナー承認後に参加します。`,
+                `Join request sent for '${res.title || ''}'! Waiting for owner approval.`
+              )
+        );
+        return;
+      }
       if (res?.project_id) {
         navigateProjectSelection(res.project_id);
       }
@@ -810,6 +936,75 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       setJoinError(err.message || t('common.error'));
     } finally {
       setIsJoiningByCode(false);
+    }
+  };
+
+  const handleOpenLinkSpaceModal = async () => {
+    if (!detailProject) return;
+    setSelectedLinkSpaceId('');
+    setIsLinkSpaceModalOpen(true);
+    try {
+      setLoadingLinkableSpaces(true);
+      const res = await api.get<{
+        spaces: Array<{ id: number; name: string; color: string; is_personal: boolean; member_count: number }>;
+      }>(`/journal/projects/${detailProject.id}/linkable-spaces`);
+      setLinkableSpaces(res.spaces || []);
+      if (res.spaces && res.spaces.length > 0) {
+        setSelectedLinkSpaceId(String(res.spaces[0].id));
+      }
+    } catch {
+      setLinkableSpaces([]);
+    } finally {
+      setLoadingLinkableSpaces(false);
+    }
+  };
+
+  const handleLinkSpaceAction = async (mode: 'create' | 'link') => {
+    if (!detailProject || isLinkingSpace) return;
+    if (mode === 'link' && !selectedLinkSpaceId) return;
+    try {
+      setIsLinkingSpace(true);
+      await api.post(`/journal/projects/${detailProject.id}/linked-space`, {
+        mode,
+        ...(mode === 'link' ? { space_id: Number(selectedLinkSpaceId) } : {}),
+      });
+      setIsLinkSpaceModalOpen(false);
+      await fetchOverview();
+      await fetchProjectDetail(detailProject.id);
+      onSpacesNeedRefresh?.();
+      showSpaceBridgeToast(
+        mode === 'create'
+          ? L('새 연동 공유 스페이스를 만들었습니다!', '新しい連携共有スペースを作成しました！', 'Created a new linked Shared Space!')
+          : L('기존 공유 스페이스를 1:1 연동하고 양쪽 멤버를 병합했습니다!', '既存スペースを連携しメンバーを統合しました！', 'Linked existing space & merged members!')
+      );
+    } catch (err: any) {
+      alert(err.message || t('common.error'));
+    } finally {
+      setIsLinkingSpace(false);
+    }
+  };
+
+  const handleResolveProjectJoinRequest = async (requestId: number, decision: 'approve' | 'reject') => {
+    if (!detailProject || resolvingJoinReqId !== null) return;
+    try {
+      setResolvingJoinReqId(requestId);
+      await api.post(`/journal/projects/${detailProject.id}/join-requests/${requestId}/${decision}`);
+      await fetchOverview();
+      await fetchProjectDetail(detailProject.id);
+      onSpacesNeedRefresh?.();
+      showSpaceBridgeToast(
+        decision === 'approve'
+          ? L(
+              '초대 요청을 승인했습니다! 프로젝트와 연동 스페이스에 함께 합류되었습니다.',
+              '招待申請を承認しました！プロジェクトと連携スペースに同時参加しました。',
+              'Approved! Joined both project & linked space.'
+            )
+          : L('초대 요청을 거절했습니다.', '招待申請を却下しました。', 'Declined invite request.')
+      );
+    } catch (err: any) {
+      alert(err.message || t('common.error'));
+    } finally {
+      setResolvingJoinReqId(null);
     }
   };
 
@@ -940,21 +1135,28 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     }
   };
 
-  const handleDeleteProject = async (proj: JournalProject) => {
-    const msg = L(
-      `'${proj.title}' 프로젝트와 모든 기록을 삭제하시겠습니까?`,
-      `「${proj.title}」とすべての記録を削除しますか？`,
-      `Delete '${proj.title}' and all its logs?`
-    );
-    if (!confirm(msg)) return;
+  const handleDeleteProject = (proj: JournalProject) => {
+    setDeleteTargetProject(proj);
+    setDeleteWithLinkedSpace(false);
+  };
+
+  const handleConfirmDeleteProject = async () => {
+    if (!deleteTargetProject || isDeletingProject) return;
+    const proj = deleteTargetProject;
     try {
-      await api.delete(`/journal/projects/${proj.id}`);
+      setIsDeletingProject(true);
+      const q = proj.linked_space ? `?deleteLinkedSpace=${deleteWithLinkedSpace ? 'true' : 'false'}` : '';
+      await api.delete(`/journal/projects/${proj.id}${q}`);
+      setDeleteTargetProject(null);
       if (selectedProjectId === proj.id) {
         navigateProjectSelection(null);
       }
       await fetchOverview();
+      onSpacesNeedRefresh?.();
     } catch (err: any) {
       alert(err.message || t('common.error'));
+    } finally {
+      setIsDeletingProject(false);
     }
   };
 
@@ -1390,6 +1592,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     setNewParticipantRole('');
     setInviteEmail('');
     setInviteError('');
+    setInviteFeedback('');
     setParticipantsModalTab(initialTab);
     setIsParticipantsModalOpen(true);
   };
@@ -1632,6 +1835,20 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                 {p.my_turn_wait.is_overdue
                   ? L(`대기초과 (${p.my_turn_wait.wait_days}일)`, `待機超過 (${p.my_turn_wait.wait_days}日)`, `Overdue (${p.my_turn_wait.wait_days}d)`)
                   : `~${p.my_turn_wait.target_date.slice(5)} (D-${p.my_turn_wait.days_remaining})`}
+              </span>
+            )}
+            {p.linked_space && (
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 whitespace-nowrap">
+                <Link2 className="w-2.5 h-2.5 shrink-0" />
+                <span>{L('스페이스 연동', 'スペース連携', 'Linked Space')}</span>
+              </span>
+            )}
+            {(p.pending_join_request_count || 0) > 0 && (
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 whitespace-nowrap">
+                <Clock className="w-2.5 h-2.5 shrink-0" />
+                <span>
+                  {L(`승인대기 ${p.pending_join_request_count}`, `承認待ち ${p.pending_join_request_count}`, `Pending ${p.pending_join_request_count}`)}
+                </span>
               </span>
             )}
           </div>
@@ -1928,6 +2145,18 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
 
       {!selectedProjectId && (
         <>
+      {myPendingJoinRequests.length > 0 && (
+        <div className="px-3.5 py-2.5 rounded-xl bg-sky-50 border border-sky-200 flex items-center gap-2 text-xs font-bold text-sky-950">
+          <Clock className="w-4 h-4 text-sky-700 shrink-0" />
+          <span>
+            {L(
+              `방장 승인 대기 중인 협업 프로젝트 초대 ${myPendingJoinRequests.length}건: ${myPendingJoinRequests.map((r) => r.project_title).join(', ')}`,
+              `オーナー承認待ちの協業プロジェクト招待 ${myPendingJoinRequests.length}件: ${myPendingJoinRequests.map((r) => r.project_title).join('・')}`,
+              `${myPendingJoinRequests.length} project invite(s) pending owner approval: ${myPendingJoinRequests.map((r) => r.project_title).join(', ')}`
+            )}
+          </span>
+        </div>
+      )}
       {/* 4-Card Forget-Prevention Dashboard */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
         <button
@@ -2337,6 +2566,41 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                       {L('상대:', '相手:', 'With:')} {detailProject.resolved_partner_name}
                     </span>
                   )}
+
+                  {detailProject?.linked_space && (
+                    <button
+                      type="button"
+                      onClick={() => onJumpToLinkedSpace?.(detailProject.linked_space!.id)}
+                      className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 transition whitespace-nowrap"
+                      title={L(
+                        `연동 공유 스페이스 열기: ${detailProject.linked_space.name}`,
+                        `連携共有スペースを開く: ${detailProject.linked_space.name}`,
+                        `Open linked Shared Space: ${detailProject.linked_space.name}`
+                      )}
+                    >
+                      <span
+                        className="w-2 h-2 rounded-full shrink-0"
+                        style={{ backgroundColor: detailProject.linked_space.color }}
+                      />
+                      <CalendarRange className="w-3 h-3 text-emerald-700 shrink-0" />
+                      <span>{L('연동 공유 스페이스 열기', '連携スペースを開く', 'Open Linked Space')}</span>
+                      <ExternalLink className="w-2.5 h-2.5 text-emerald-600 shrink-0" />
+                    </button>
+                  )}
+
+                  {detailProject &&
+                    detailProject.mode === 'COLLAB' &&
+                    !detailProject.linked_space &&
+                    Number(detailProject.created_by) === Number(user?.id) && (
+                      <button
+                        type="button"
+                        onClick={() => void handleOpenLinkSpaceModal()}
+                        className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-white hover:bg-emerald-50 text-emerald-800 border border-dashed border-emerald-400 transition whitespace-nowrap"
+                      >
+                        <Link2 className="w-3 h-3 shrink-0" />
+                        <span>{L('공유 스페이스 연동', '共有スペース連携', 'Link Shared Space')}</span>
+                      </button>
+                    )}
                 </div>
 
                 {detailProject && (
@@ -2368,7 +2632,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                     <button
                       type="button"
                       onClick={() => handleOpenParticipantsModal('STAKEHOLDERS')}
-                      className="px-2.5 py-1.5 rounded-lg bg-sky-50 text-sky-900 border border-sky-200 hover:bg-sky-100 text-xs font-bold inline-flex items-center gap-1 transition whitespace-nowrap"
+                      className="relative px-2.5 py-1.5 rounded-lg bg-sky-50 text-sky-900 border border-sky-200 hover:bg-sky-100 text-xs font-bold inline-flex items-center gap-1 transition whitespace-nowrap"
                       title={L('관계자 명단 및 협업 초대·멤버 관리', '関係者・招待・メンバー管理', 'Configure stakeholders & invite members')}
                     >
                       <Users className="w-3.5 h-3.5" />
@@ -2379,6 +2643,11 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                           `People (${detailProject.participants?.length || 0})`
                         )}
                       </span>
+                      {(detailProject.pending_join_requests?.length || 0) > 0 && (
+                        <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-amber-500 text-white text-[10px] font-bold">
+                          {detailProject.pending_join_requests?.length}
+                        </span>
+                      )}
                     </button>
                     <button
                       type="button"
@@ -2407,6 +2676,68 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                   ? tr.getText(`jproj-${detailProject.id}`, 'title', detailProject.title)
                   : '...'}
               </h2>
+
+              {detailProject && (detailProject.pending_join_requests?.length || 0) > 0 && (
+                <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 space-y-2 text-xs">
+                  <div className="font-bold text-amber-950 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                    <span>
+                      {L(
+                        `초대 승인 대기 요청 (${detailProject.pending_join_requests!.length}건)`,
+                        `招待承認待ちリクエスト (${detailProject.pending_join_requests!.length}件)`,
+                        `Pending Invite Approvals (${detailProject.pending_join_requests!.length})`
+                      )}
+                    </span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {detailProject.pending_join_requests!.map((req) => (
+                      <div
+                        key={`hdr-req-${req.id}`}
+                        className="px-2.5 py-1.5 rounded-lg bg-white border border-amber-200 flex flex-wrap items-center justify-between gap-2"
+                      >
+                        <div className="min-w-0">
+                          <span className="font-bold text-charcoal-900">{req.target_user_name}</span>
+                          {req.invited_by_name ? (
+                            <span className="ml-1.5 text-[11px] text-charcoal-500">
+                              ({L(`요청자: ${req.invited_by_name}`, `申請者: ${req.invited_by_name}`, `By: ${req.invited_by_name}`)})
+                            </span>
+                          ) : (
+                            <span className="ml-1.5 text-[11px] text-charcoal-500">
+                              ({L('멤버용 초대 링크', 'メンバー用招待リンク', 'Member link')})
+                            </span>
+                          )}
+                        </div>
+                        {Number(detailProject.created_by) === Number(user?.id) ? (
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              disabled={resolvingJoinReqId === req.id}
+                              onClick={() => void handleResolveProjectJoinRequest(req.id, 'approve')}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold disabled:opacity-50"
+                            >
+                              <Check className="w-3 h-3" />
+                              <span>{L('승인', '承認', 'Approve')}</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={resolvingJoinReqId === req.id}
+                              onClick={() => void handleResolveProjectJoinRequest(req.id, 'reject')}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-bold disabled:opacity-50"
+                            >
+                              <X className="w-3 h-3" />
+                              <span>{L('거절', '却下', 'Decline')}</span>
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-[11px] font-bold text-amber-700">
+                            {L('방장 승인 대기 중', 'オーナー承認待ち', 'Awaiting owner')}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Detail Body */}
@@ -4259,21 +4590,59 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                 </div>
 
                 {formPartnerType === 'EXTERNAL' ? (
-                  <input
-                    type="text"
-                    value={formPartnerName}
-                    onChange={(e) => setFormPartnerName(e.target.value)}
-                    placeholder={L('상대방 이름 또는 업체명', '相手名・会社名', 'Partner name or company')}
-                    className="w-full p-2 bg-white border border-sky-300 rounded-lg font-bold"
-                  />
-                ) : (
-                  <p className="text-[11px] text-sky-900 bg-white/80 border border-sky-200 rounded-lg p-2 font-medium">
-                    {L(
-                      '생성 후 상단의 [관계자] 버튼 안 [초대·멤버] 탭에서 초대 링크를 복사하거나 이메일로 바로 초대할 수 있습니다.',
-                      '作成後、上部の[関係者]ボタン内の[招待・メンバー]タブから招待リンクやメール招待を行えます。',
-                      'After creation, open [People] → [Invite & Members] to share an invite link or invite by email.'
+                  <div className="space-y-1.5">
+                    <input
+                      type="text"
+                      value={formPartnerName}
+                      onChange={(e) => setFormPartnerName(e.target.value)}
+                      placeholder={L('상대방 이름 또는 업체명', '相手名・会社名', 'Partner name or company')}
+                      className="w-full p-2 bg-white border border-sky-300 rounded-lg font-bold"
+                    />
+                    {!editingProject && (
+                      <p className="text-[11px] text-sky-900/80">
+                        {L(
+                          '※ 외부인 기록용 프로젝트는 생성 시 공유 스페이스를 자동 생성하지 않으며, 추후 실제 앱 계정 멤버가 합류하면 자동으로 연동 스페이스가 생성됩니다.',
+                          '※ 外部記録用プロジェクトは作成時に共有スペースを自動作成せず、後からアプリ会員が参加した際に自動作成されます。',
+                          'Note: External-only projects do not auto-create a space at creation; one is created automatically when a real app user joins later.'
+                        )}
+                      </p>
                     )}
-                  </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-sky-900 bg-white/80 border border-sky-200 rounded-lg p-2 font-medium">
+                      {L(
+                        '생성 후 상단의 [관계자] 버튼 안 [초대·멤버] 탭에서 초대 링크를 복사하거나 이메일로 바로 초대할 수 있습니다.',
+                        '作成後、上部の[関係者]ボタン内の[招待・メンバー]タブから招待リンクやメール招待を行えます。',
+                        'After creation, open [People] → [Invite & Members] to share an invite link or invite by email.'
+                      )}
+                    </p>
+                    {!editingProject && (
+                      <div className="pt-1.5 border-t border-sky-200/80 space-y-1">
+                        <label className="inline-flex items-center gap-2 font-bold text-emerald-900 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={formCreateLinkedSpace}
+                            onChange={(e) => setFormCreateLinkedSpace(e.target.checked)}
+                          />
+                          <span>
+                            {L(
+                              '연동 공유 스페이스 함께 만들기 (공유 캘린더 · 공유 메모장)',
+                              '連携共有スペースを一緒に作成（共有カレンダー・共有メモ）',
+                              'Also create linked Shared Space (Calendar & Thoughts)'
+                            )}
+                          </span>
+                        </label>
+                        <p className="text-[11px] text-charcoal-600 pl-5">
+                          {L(
+                            '초기 이름과 색상은 프로젝트에서 복사되며, 생성 후에는 각각 독립적으로 수정할 수 있습니다. 참여 멤버는 양방향 자동 동기화됩니다.',
+                            '初期の名前と色はプロジェクトからコピーされ、作成後はそれぞれ個別に編集できます。メンバーは双方向で自動同期されます。',
+                            'Initial name and color are copied from this project and can be edited independently later. Members sync bidirectionally.'
+                          )}
+                        </p>
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             )}
@@ -4485,73 +4854,204 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               </>
             ) : (
               <>
-                {/* Shareable Invite Link */}
-                <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-2">
-                  <div className="font-bold text-indigo-950 flex items-center justify-between gap-2">
-                    <span>{L('초대 링크로 참여시키기', '招待リンクで招待', 'Shareable Invite Link')}</span>
-                    {Number(detailProject.created_by) === Number(user?.id) && (
+                {/* Linked Space Banner */}
+                {detailProject.linked_space && (
+                  <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-2 text-[11px] font-bold text-emerald-950">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <Link2 className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                      <span className="truncate">
+                        {L(
+                          `공유 스페이스 '${detailProject.linked_space.name}'와 1:1 멤버 양방향 연동 중`,
+                          `共有スペース「${detailProject.linked_space.name}」と1:1メンバー双方向連携中`,
+                          `1:1 synced with Shared Space '${detailProject.linked_space.name}'`
+                        )}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsParticipantsModalOpen(false);
+                        onJumpToLinkedSpace?.(detailProject.linked_space!.id);
+                      }}
+                      className="text-emerald-800 hover:underline shrink-0"
+                    >
+                      {L('열기 →', '開く →', 'Open →')}
+                    </button>
+                  </div>
+                )}
+
+                {inviteFeedback && (
+                  <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-bold">
+                    {inviteFeedback}
+                  </div>
+                )}
+
+                {/* 1. Owner Instant Invite Link (Owner Only) */}
+                {Number(detailProject.created_by) === Number(user?.id) && (
+                  <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-2">
+                    <div className="font-bold text-indigo-950 flex items-center justify-between gap-2">
+                      <span>{L('방장 전용 초대 링크 (즉시 합류)', 'オーナー専用招待リンク（即時参加）', 'Owner Invite Link (Instant Join)')}</span>
                       <button
                         type="button"
-                        onClick={handleRegenerateInvite}
+                        onClick={() => void handleRegenerateInvite('owner')}
                         className="text-[11px] font-bold text-indigo-700 hover:underline"
                       >
                         {detailProject.invite_token
-                          ? L('링크 재발급', '再発行', 'Regenerate')
+                          ? L('재발급', '再発行', 'Regenerate')
                           : L('링크 생성', 'リンク作成', 'Generate Link')}
                       </button>
+                    </div>
+
+                    {detailProject.invite_token ? (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          readOnly
+                          value={getInviteUrl(detailProject.invite_token)}
+                          className="flex-1 p-2 bg-white border border-indigo-200 rounded-lg font-mono text-[11px] text-charcoal-800"
+                        />
+                        <Button
+                          type="button"
+                          variant="primary"
+                          size="sm"
+                          onClick={() => void handleCopyInviteLink(detailProject.invite_token, 'owner')}
+                        >
+                          {copiedInviteKind === 'owner' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                          <span>{copiedInviteKind === 'owner' ? L('복사됨', 'コピー済', 'Copied') : L('복사', 'コピー', 'Copy')}</span>
+                        </Button>
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-indigo-800">
+                        {L(
+                          '현재 개인 비공개 프로젝트입니다. [링크 생성]을 누르면 초대 링크를 받아 협업 프로젝트로 전환됩니다.',
+                          '現在非公開プロジェクトです。[リンク作成]で招待リンクを発行し協業に切替えられます。',
+                          'Currently solo private. Click Generate Link to create an invite URL.'
+                        )}
+                      </p>
                     )}
                   </div>
+                )}
 
-                  {detailProject.invite_token ? (
+                {/* 2. Member Approval-Required Invite Link (Visible to Owner & Members on COLLAB) */}
+                {detailProject.member_invite_token && (
+                  <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 space-y-2">
+                    <div className="font-bold text-amber-950 flex items-center justify-between gap-2">
+                      <span>{L('멤버용 초대 링크 (방장 승인 후 합류)', 'メンバー用招待リンク（オーナー承認制）', 'Member Invite Link (Owner Approval)')}</span>
+                      {Number(detailProject.created_by) === Number(user?.id) && (
+                        <button
+                          type="button"
+                          onClick={() => void handleRegenerateInvite('member')}
+                          className="text-[11px] font-bold text-amber-800 hover:underline"
+                        >
+                          {L('재발급', '再発行', 'Regenerate')}
+                        </button>
+                      )}
+                    </div>
                     <div className="flex items-center gap-1.5">
                       <input
                         type="text"
                         readOnly
-                        value={getInviteUrl(detailProject.invite_token)}
-                        className="flex-1 p-2 bg-white border border-indigo-200 rounded-lg font-mono text-[11px] text-charcoal-800"
+                        value={getInviteUrl(detailProject.member_invite_token)}
+                        className="flex-1 p-2 bg-white border border-amber-200 rounded-lg font-mono text-[11px] text-charcoal-800"
                       />
                       <Button
                         type="button"
-                        variant="primary"
+                        variant="secondary"
                         size="sm"
-                        onClick={() => handleCopyInviteLink(detailProject.invite_token)}
+                        onClick={() => void handleCopyInviteLink(detailProject.member_invite_token, 'member')}
                       >
-                        {copiedInvite ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                        <span>{copiedInvite ? L('복사됨', 'コピー済', 'Copied') : L('복사', 'コピー', 'Copy')}</span>
+                        {copiedInviteKind === 'member' ? <Check className="w-3.5 h-3.5 text-emerald-700" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedInviteKind === 'member' ? L('복사됨', 'コピー済', 'Copied') : L('복사', 'コピー', 'Copy')}</span>
                       </Button>
                     </div>
-                  ) : (
-                    <p className="text-[11px] text-indigo-800">
-                      {L(
-                        '현재 개인 비공개 프로젝트입니다. [링크 생성]을 누르면 초대 링크를 받아 협업 프로젝트로 전환됩니다.',
-                        '現在非公開プロジェクトです。[リンク作成]で招待リンクを発行し協業に切替えられます。',
-                        'Currently solo private. Click Generate Link to create an invite URL.'
-                      )}
-                    </p>
-                  )}
-                </div>
+                  </div>
+                )}
 
-                {/* Invite by exact ID or email */}
-                {Number(detailProject.created_by) === Number(user?.id) && (
-                  <form onSubmit={handleInviteMemberByEmail} className="space-y-1.5">
-                    <label className="block font-bold text-charcoal-800">
-                      {L('가입된 상대 아이디(또는 이메일)로 바로 초대', '登録済みID（またはメール）で直接招待', 'Invite Registered User by ID or Email')}
-                    </label>
-                    <div className="flex items-center gap-1.5">
-                      <input
-                        type="text"
-                        value={inviteEmail}
-                        onChange={(e) => setInviteEmail(e.target.value)}
-                        placeholder={L('상대 아이디 또는 이메일', '相手のIDまたはメール', 'Partner ID or email')}
-                        className="flex-1 p-2 bg-ivory-50 border border-ivory-300 rounded-lg text-charcoal-900"
-                      />
-                      <Button type="submit" variant="secondary" size="sm" isLoading={isInvitingMember}>
-                        <UserPlus className="w-3.5 h-3.5" />
-                        <span>{L('초대', '招待', 'Invite')}</span>
-                      </Button>
+                {/* Invite by exact ID or email (Owner = instant, Member = approval request) */}
+                <form onSubmit={handleInviteMemberByEmail} className="space-y-1.5">
+                  <label className="block font-bold text-charcoal-800">
+                    {Number(detailProject.created_by) === Number(user?.id)
+                      ? L('가입된 상대 아이디(또는 이메일)로 바로 초대', '登録済みID（またはメール）で直接招待', 'Direct Invite by ID or Email')
+                      : L('가입된 상대 아이디(또는 이메일)로 초대 요청 (방장 승인 필요)', '登録済みID（またはメール）で招待申請（オーナー承認制）', 'Request Invite by ID or Email (Owner Approval)')}
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={inviteEmail}
+                      onChange={(e) => setInviteEmail(e.target.value)}
+                      placeholder={L('상대 아이디 또는 이메일', '相手のIDまたはメール', 'Partner ID or email')}
+                      className="flex-1 p-2 bg-ivory-50 border border-ivory-300 rounded-lg text-charcoal-900"
+                    />
+                    <Button type="submit" variant="secondary" size="sm" isLoading={isInvitingMember}>
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>
+                        {Number(detailProject.created_by) === Number(user?.id)
+                          ? L('초대', '招待', 'Invite')
+                          : L('승인 요청', '承認申請', 'Request')}
+                      </span>
+                    </Button>
+                  </div>
+                  {inviteError && <p className="text-rose-600 font-bold">{inviteError}</p>}
+                </form>
+
+                {/* Pending Join Requests List */}
+                {(detailProject.pending_join_requests?.length || 0) > 0 && (
+                  <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
+                    <div className="font-bold text-amber-950 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-amber-700" />
+                      <span>
+                        {L(
+                          `방장 승인 대기 목록 (${detailProject.pending_join_requests!.length}건)`,
+                          `オーナー承認待ち (${detailProject.pending_join_requests!.length}件)`,
+                          `Pending Owner Approval (${detailProject.pending_join_requests!.length})`
+                        )}
+                      </span>
                     </div>
-                    {inviteError && <p className="text-rose-600 font-bold">{inviteError}</p>}
-                  </form>
+                    <div className="space-y-1.5">
+                      {detailProject.pending_join_requests!.map((req) => (
+                        <div
+                          key={`collab-req-${req.id}`}
+                          className="px-2.5 py-2 rounded-lg bg-white border border-amber-200 flex items-center justify-between gap-2"
+                        >
+                          <div className="min-w-0">
+                            <div className="font-bold text-charcoal-900 truncate">{req.target_user_name}</div>
+                            <div className="text-[11px] text-charcoal-500 truncate">
+                              {req.invited_by_name
+                                ? L(`요청자: ${req.invited_by_name}`, `申請者: ${req.invited_by_name}`, `Requested by: ${req.invited_by_name}`)
+                                : L('멤버용 초대 링크 신청', 'メンバー用リンク経由', 'Via member link')}
+                              {req.target_user_email ? ` · ${req.target_user_email}` : ''}
+                            </div>
+                          </div>
+                          {Number(detailProject.created_by) === Number(user?.id) ? (
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                disabled={resolvingJoinReqId === req.id}
+                                onClick={() => void handleResolveProjectJoinRequest(req.id, 'approve')}
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold disabled:opacity-50"
+                              >
+                                <Check className="w-3 h-3" />
+                                <span>{L('승인', '承認', 'Approve')}</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={resolvingJoinReqId === req.id}
+                                onClick={() => void handleResolveProjectJoinRequest(req.id, 'reject')}
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-bold disabled:opacity-50"
+                              >
+                                <X className="w-3 h-3" />
+                                <span>{L('거절', '却下', 'Decline')}</span>
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-[11px] font-bold text-amber-700 shrink-0">
+                              {L('승인 대기 중', '承認待ち', 'Pending')}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 )}
 
                 {/* Members list */}
@@ -4592,6 +5092,177 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                 </div>
               </>
             )}
+          </div>
+        </Modal>
+      )}
+
+      {/* LINK SHARED SPACE MODAL (Owner Only, Unlinked Collab Project) */}
+      {isLinkSpaceModalOpen && detailProject && (
+        <Modal
+          isOpen={true}
+          onClose={() => setIsLinkSpaceModalOpen(false)}
+          title={L('공유 스페이스 1:1 연동', '共有スペース 1:1 連携', 'Link Shared Space (1:1)')}
+          maxWidth="lg"
+        >
+          <div className="space-y-4 text-xs">
+            <p className="text-charcoal-600 leading-relaxed">
+              {L(
+                '협업 프로젝트와 전용 공유 스페이스(공유 캘린더·공유 메모장)를 1:1로 연동하면 참여 멤버가 양방향으로 자동 동기화됩니다.',
+                '協業プロジェクトと共有スペース（カレンダー・メモ帳）を1:1で連携すると、参加メンバーが双方向で自動同期されます。',
+                'Link this collaboration project 1:1 with a Shared Space (Calendar & Thoughts) to keep members synced bidirectionally.'
+              )}
+            </p>
+
+            {/* Option 1: Create New Linked Space */}
+            <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-2.5">
+              <div className="font-bold text-emerald-950 flex items-center gap-1.5">
+                <Plus className="w-4 h-4 text-emerald-700" />
+                <span>{L('새 연동 스페이스 만들기', '新しい連携スペースを作成', 'Create New Linked Space')}</span>
+              </div>
+              <p className="text-[11px] text-emerald-900/80">
+                {L(
+                  `'${detailProject.title}' 이름과 색상으로 전용 공유 스페이스를 새로 만들고 현재 참여 멤버를 자동으로 등록합니다.`,
+                  `「${detailProject.title}」の名前・色で専用スペースを新規作成し、現在の参加メンバーを自動登録します。`,
+                  `Create a new space named '${detailProject.title}' with its color and automatically sync current project members.`
+                )}
+              </p>
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                isLoading={isLinkingSpace}
+                onClick={() => void handleLinkSpaceAction('create')}
+              >
+                <Plus className="w-3.5 h-3.5 mr-1" />
+                <span>{L('새 연동 스페이스 만들기', '新規作成して連携', 'Create & Link')}</span>
+              </Button>
+            </div>
+
+            {/* Option 2: Link Existing Space */}
+            <div className="p-3.5 rounded-xl bg-ivory-50 border border-ivory-300 space-y-2.5">
+              <div className="font-bold text-charcoal-900 flex items-center gap-1.5">
+                <Link2 className="w-4 h-4 text-forest-700" />
+                <span>{L('기존 스페이스 연결 (1:1)', '既存スペースを連携 (1:1)', 'Link Existing Space (1:1)')}</span>
+              </div>
+              <p className="text-[11px] text-charcoal-600">
+                {L(
+                  '본인이 방장인 미연동 스페이스만 선택할 수 있으며, 연결 시 양쪽 멤버가 합집합으로 병합됩니다.',
+                  '自分がオーナーの未連携スペースのみ選択でき、連携時に双方のメンバーが統合（和集合）されます。',
+                  'Only unlinked spaces you own can be selected. Members from both sides will be merged as a union.'
+                )}
+              </p>
+              {loadingLinkableSpaces ? (
+                <div className="py-3 text-center text-charcoal-400">{t('common.loading')}</div>
+              ) : linkableSpaces.length === 0 ? (
+                <div className="py-3 text-center text-charcoal-400 bg-white rounded-lg border border-ivory-200">
+                  {L('연결 가능한 미연동 스페이스가 없습니다.', '連携可能な未連携スペースがありません。', 'No unlinked spaces available.')}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <select
+                    value={selectedLinkSpaceId}
+                    onChange={(e) => setSelectedLinkSpaceId(e.target.value)}
+                    className="w-full p-2 bg-white border border-ivory-300 rounded-lg font-bold text-charcoal-900"
+                  >
+                    {linkableSpaces.map((sp) => (
+                      <option key={sp.id} value={sp.id}>
+                        {sp.name} ({L(`${sp.member_count}명`, `${sp.member_count}名`, `${sp.member_count} members`)})
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={!selectedLinkSpaceId}
+                    isLoading={isLinkingSpace}
+                    onClick={() => void handleLinkSpaceAction('link')}
+                  >
+                    <Link2 className="w-3.5 h-3.5 mr-1" />
+                    <span>{L('선택한 스페이스 연결 및 멤버 병합', '選択スペースを連携・メンバー統合', 'Link Space & Merge Members')}</span>
+                  </Button>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-ivory-200">
+              <Button type="button" variant="secondary" onClick={() => setIsLinkSpaceModalOpen(false)}>
+                {L('닫기', '閉じる', 'Close')}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* DELETE PROJECT CONFIRMATION MODAL */}
+      {deleteTargetProject && (
+        <Modal
+          isOpen={true}
+          onClose={() => !isDeletingProject && setDeleteTargetProject(null)}
+          title={L('프로젝트 삭제 확인', 'プロジェクト削除確認', 'Confirm Project Deletion')}
+          maxWidth="md"
+        >
+          <div className="space-y-4 text-xs">
+            <p className="text-charcoal-800 font-bold leading-relaxed">
+              {L(
+                `'${deleteTargetProject.title}' 프로젝트와 모든 기록을 삭제하시겠습니까?`,
+                `「${deleteTargetProject.title}」プロジェクトとすべての記録を削除しますか？`,
+                `Delete '${deleteTargetProject.title}' and all its logs?`
+              )}
+            </p>
+
+            {deleteTargetProject.linked_space && (
+              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
+                <label className="inline-flex items-start gap-2 font-bold text-amber-950 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={deleteWithLinkedSpace}
+                    onChange={(e) => setDeleteWithLinkedSpace(e.target.checked)}
+                  />
+                  <span>
+                    {L(
+                      `연동된 공유 스페이스('${deleteTargetProject.linked_space.name}')도 함께 삭제`,
+                      `連携された共有スペース（「${deleteTargetProject.linked_space.name}」）も一緒に削除`,
+                      `Also delete linked Shared Space ('${deleteTargetProject.linked_space.name}')`
+                    )}
+                  </span>
+                </label>
+                <p className="text-[11px] text-amber-900/80 pl-5 leading-relaxed">
+                  {deleteWithLinkedSpace
+                    ? L(
+                        '⚠️ 체크됨: 연동된 공유 스페이스의 모든 일정과 공유 메모가 영구 삭제됩니다.',
+                        '⚠️ チェック済：連携スペースのすべての予定・共有メモが完全に削除されます。',
+                        '⚠️ Checked: All events and shared thoughts in the linked space will be permanently deleted.'
+                      )
+                    : L(
+                        '미체크(기본): 연동만 해제되며 공유 스페이스의 일정과 메모는 그대로 보존됩니다.',
+                        '未チェック（既定）：連携のみ解除され、共有スペースの予定・メモはそのまま保持されます。',
+                        'Unchecked (default): Only unlinks the space; all calendar events and thoughts are preserved.'
+                      )}
+                </p>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-3 border-t border-ivory-200">
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={isDeletingProject}
+                onClick={() => setDeleteTargetProject(null)}
+              >
+                {t('common.cancel')}
+              </Button>
+              <Button
+                type="button"
+                variant="danger"
+                isLoading={isDeletingProject}
+                onClick={() => void handleConfirmDeleteProject()}
+              >
+                <Trash2 className="w-3.5 h-3.5 mr-1" />
+                <span>{t('common.delete')}</span>
+              </Button>
+            </div>
           </div>
         </Modal>
       )}

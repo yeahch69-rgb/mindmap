@@ -31,6 +31,7 @@ import {
   isPushSupported,
   unsubscribeCurrentPush,
 } from '../../utils/pushSync';
+import { useModalBackHandler } from '../../utils/modalHistory';
 
 export interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -54,6 +55,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
 }) => {
   const { user, updatePreferences } = useAuth();
   const { L, language, setLanguage } = useLanguage();
+  useModalBackHandler(isOpen && Boolean(user), onClose);
 
   const [name, setName] = useState(user?.name || '');
   const [desktopPercent, setDesktopPercent] = useState<number>(() =>

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { X } from 'lucide-react';
 import { useLanguage } from '../../context/LanguageContext';
 import { getJstTodayStr } from '../../utils/dateTime';
+import { useModalBackHandler } from '../../utils/modalHistory';
 import {
   EntryType,
   JournalEntry,
@@ -43,6 +44,7 @@ export const MindMapNodeComposer: React.FC<MindMapNodeComposerProps> = ({
   onClose,
 }) => {
   const { L } = useLanguage();
+  useModalBackHandler(true, onClose);
   const isSettingUnsetNextStep =
     parentNodeKey === 'next-step' && !project.next_action && Boolean(onSetNextStep);
 

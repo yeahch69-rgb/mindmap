@@ -20,6 +20,7 @@ import { CalendarEventItem } from '../../types/spaces';
 import { ExpandedEventInstance, formatShortDate } from '../../utils/calendarUtils';
 import { TranslateButton } from '../common/TranslateButton';
 import { useContentTranslation } from '../../hooks/useContentTranslation';
+import { useModalBackHandler } from '../../utils/modalHistory';
 
 interface MobileDayBottomSheetProps {
   isOpen: boolean;
@@ -61,6 +62,13 @@ export const MobileDayBottomSheet: React.FC<MobileDayBottomSheetProps> = ({
 }) => {
   const { L } = useLanguage();
   const translator = useContentTranslation();
+  useModalBackHandler(isOpen || isCardDragging, () => {
+    if (isCardDragging) {
+      onCancelCardDragMove();
+    } else {
+      onClose();
+    }
+  });
   const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(false);
   const [expanded, setExpanded] = useState(false);

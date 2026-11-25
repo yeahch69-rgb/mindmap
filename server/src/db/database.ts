@@ -87,12 +87,13 @@ export function ensureDefaultSpaceForUser(userId: number): number {
   const tx = db.transaction(() => {
     const res = db
       .prepare(`
-        INSERT INTO collab_spaces (name, description, color, is_personal, invite_token, labels_json, created_by)
-        VALUES (?, ?, '#1B4D3E', 1, ?, ?, ?)
+        INSERT INTO collab_spaces (name, description, color, is_personal, invite_token, member_invite_token, labels_json, created_by)
+        VALUES (?, ?, '#1B4D3E', 1, ?, ?, ?, ?)
       `)
       .run(
         '내 공유 캘린더',
         '개인 일정과 생각을 정리하고, 원할 때 멤버를 초대해 함께 공유할 수 있습니다.',
+        generateInviteToken(),
         generateInviteToken(),
         JSON.stringify(DEFAULT_SPACE_LABELS),
         userId
@@ -131,6 +132,7 @@ export function initDatabase() {
       partner_type TEXT NOT NULL DEFAULT 'NONE', -- 'NONE' | 'SHARED' | 'EXTERNAL'
       partner_name TEXT,
       invite_token TEXT UNIQUE,
+      member_invite_token TEXT UNIQUE,
       active_turn_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
       participants_json TEXT DEFAULT '[]',
       intent_summary TEXT,
@@ -260,7 +262,9 @@ export function initDatabase() {
       description TEXT DEFAULT '',
       color TEXT NOT NULL DEFAULT '#1B4D3E',
       is_personal INTEGER NOT NULL DEFAULT 0,
+      linked_project_id INTEGER REFERENCES journal_projects(id) ON DELETE SET NULL,
       invite_token TEXT UNIQUE,
+      member_invite_token TEXT UNIQUE,
       labels_json TEXT NOT NULL DEFAULT '[]',
       created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -409,6 +413,27 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_cross_links_source ON cross_entity_links(source_type, source_id);
     CREATE INDEX IF NOT EXISTS idx_cross_links_target ON cross_entity_links(target_type, target_id);
     CREATE INDEX IF NOT EXISTS idx_cross_links_project ON cross_entity_links(project_id);
+
+    -- Owner-approval join requests for linked Collaboration Projects <-> Shared Spaces
+    CREATE TABLE IF NOT EXISTS collab_join_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id INTEGER NOT NULL REFERENCES journal_projects(id) ON DELETE CASCADE,
+      space_id INTEGER REFERENCES collab_spaces(id) ON DELETE SET NULL,
+      target_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      invited_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      source TEXT NOT NULL DEFAULT 'PROJECT', -- 'PROJECT' | 'SPACE'
+      status TEXT NOT NULL DEFAULT 'PENDING', -- 'PENDING' | 'APPROVED' | 'REJECTED'
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      resolved_at DATETIME,
+      resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_collab_join_requests_project
+      ON collab_join_requests(project_id, status, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_collab_join_requests_space
+      ON collab_join_requests(space_id, status, id DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_join_requests_pending_uniq
+      ON collab_join_requests(project_id, target_user_id)
+      WHERE status = 'PENDING';
   `);
 
   const userCols = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
@@ -443,6 +468,51 @@ export function initDatabase() {
   }
   if (!projColNames.has('intent_modified')) {
     db.exec('ALTER TABLE journal_projects ADD COLUMN intent_modified INTEGER NOT NULL DEFAULT 0;');
+  }
+  if (!projColNames.has('member_invite_token')) {
+    db.exec('ALTER TABLE journal_projects ADD COLUMN member_invite_token TEXT;');
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_journal_projects_member_invite_token
+      ON journal_projects(member_invite_token)
+      WHERE member_invite_token IS NOT NULL;
+  `);
+
+  const collabSpacesCols = db.prepare("PRAGMA table_info(collab_spaces)").all() as { name: string }[];
+  const collabSpacesColNames = new Set(collabSpacesCols.map((c) => c.name));
+  if (!collabSpacesColNames.has('linked_project_id')) {
+    db.exec('ALTER TABLE collab_spaces ADD COLUMN linked_project_id INTEGER REFERENCES journal_projects(id) ON DELETE SET NULL;');
+  }
+  if (!collabSpacesColNames.has('member_invite_token')) {
+    db.exec('ALTER TABLE collab_spaces ADD COLUMN member_invite_token TEXT;');
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_spaces_linked_project
+      ON collab_spaces(linked_project_id)
+      WHERE linked_project_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_spaces_member_invite_token
+      ON collab_spaces(member_invite_token)
+      WHERE member_invite_token IS NOT NULL;
+  `);
+
+  // Safe backfill of member_invite_token for existing COLLAB projects and spaces
+  const collabProjectsMissingMemberToken = db
+    .prepare("SELECT id FROM journal_projects WHERE mode = 'COLLAB' AND member_invite_token IS NULL")
+    .all() as Array<{ id: number }>;
+  for (const row of collabProjectsMissingMemberToken) {
+    db.prepare('UPDATE journal_projects SET member_invite_token = ? WHERE id = ?').run(
+      generateInviteToken(),
+      Number(row.id)
+    );
+  }
+  const spacesMissingMemberToken = db
+    .prepare('SELECT id FROM collab_spaces WHERE member_invite_token IS NULL')
+    .all() as Array<{ id: number }>;
+  for (const row of spacesMissingMemberToken) {
+    db.prepare('UPDATE collab_spaces SET member_invite_token = ? WHERE id = ?').run(
+      generateInviteToken(),
+      Number(row.id)
+    );
   }
 
   const entryCols = db.prepare("PRAGMA table_info(journal_entries)").all() as { name: string }[];
@@ -616,11 +686,12 @@ export function seedDemoDataForUser(userId: number) {
     const dPlus5 = getJstDateStrWithDayOffset(5);
 
     const spaceRes = db.prepare(`
-      INSERT INTO collab_spaces (name, description, color, is_personal, invite_token, labels_json, created_by)
-      VALUES (?, ?, '#1B4D3E', 0, ?, ?, ?)
+      INSERT INTO collab_spaces (name, description, color, is_personal, invite_token, member_invite_token, labels_json, created_by)
+      VALUES (?, ?, '#1B4D3E', 0, ?, ?, ?, ?)
     `).run(
       '우리 팀 공유 스페이스',
       '서로의 생각을 자유롭게 던지고, 날짜를 제안해 함께 실행하는 공유 캘린더 & 의식체 메모장',
+      generateInviteToken(),
       generateInviteToken(),
       JSON.stringify(DEFAULT_SPACE_LABELS),
       userId

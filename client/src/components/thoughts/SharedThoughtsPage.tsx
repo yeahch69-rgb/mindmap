@@ -7,6 +7,7 @@ import {
   CalendarPlus,
   CheckCircle2,
   Edit2,
+  ExternalLink,
   Hash,
   History,
   Lightbulb,
@@ -310,7 +311,7 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
           >
             {spaces.map((s) => (
               <option key={s.id} value={s.id}>
-                {s.name} ({s.members.length})
+                {s.linked_project ? '🔗 ' : ''}{s.name} ({s.members.length})
               </option>
             ))}
             <option value="__NEW__">+ {L('새 공유 스페이스 만들기', '新しいスペース作成', 'New Space')}</option>
@@ -322,7 +323,24 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
           </span>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {activeSpace.linked_project && (
+            <button
+              type="button"
+              onClick={() => onJumpToMindmapProject(activeSpace.linked_project!.id)}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 text-xs font-bold transition max-w-[200px]"
+              title={L(
+                `연동 프로젝트 열기: ${activeSpace.linked_project.title}`,
+                `連携プロジェクトを開く: ${activeSpace.linked_project.title}`,
+                `Open linked project: ${activeSpace.linked_project.title}`
+              )}
+            >
+              <BookMarked className="w-3.5 h-3.5 text-indigo-700 shrink-0" />
+              <span className="truncate hidden sm:inline">{L('연동 프로젝트 열기', '連携プロジェクト', 'Linked Project')}</span>
+              <ExternalLink className="w-3 h-3 text-indigo-500 shrink-0" />
+            </button>
+          )}
+
           <button
             type="button"
             onClick={onOpenActivityFeed}
@@ -340,11 +358,16 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
           <button
             type="button"
             onClick={() => onOpenSpaceSettings(activeSpace)}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-ivory-100 hover:bg-ivory-200 text-charcoal-800 text-xs font-bold transition"
+            className="relative inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-ivory-100 hover:bg-ivory-200 text-charcoal-800 text-xs font-bold transition"
             title={L('멤버 초대 · 스페이스 설정', 'メンバー招待・設定', 'Invite & Settings')}
           >
             <Users className="w-4 h-4 text-forest-700" />
             <span className="hidden sm:inline">{activeSpace.members.length}</span>
+            {(activeSpace.pending_join_request_count || 0) > 0 && (
+              <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-amber-500 text-white text-[10px] font-bold flex items-center justify-center">
+                {activeSpace.pending_join_request_count}
+              </span>
+            )}
             <Settings className="w-3.5 h-3.5 text-charcoal-500" />
           </button>
         </div>

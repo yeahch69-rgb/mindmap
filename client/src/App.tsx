@@ -15,7 +15,7 @@ import { ActivityFeedModal } from './components/spaces/ActivityFeedModal';
 import { SharedCalendarPage } from './components/calendar/SharedCalendarPage';
 import { SharedThoughtsPage } from './components/thoughts/SharedThoughtsPage';
 import { ProjectJournal } from './pages/ProjectJournal';
-import { CollabSpace, MainNavTab } from './types/spaces';
+import { CollabSpace, MainNavTab, MyPendingJoinRequest } from './types/spaces';
 
 const ACTIVE_TAB_KEY = 'pj_active_tab';
 const ACTIVE_SPACE_KEY = 'pj_active_space_id';
@@ -74,6 +74,7 @@ const AppShell: React.FC = () => {
   });
 
   const [spaces, setSpaces] = useState<CollabSpace[]>([]);
+  const [myPendingJoinRequests, setMyPendingJoinRequests] = useState<MyPendingJoinRequest[]>([]);
   const [activeSpaceId, setActiveSpaceIdState] = useState<number | null>(() => {
     try {
       const urlSpace = Number(new URLSearchParams(window.location.search).get('space'));
@@ -155,7 +156,7 @@ const AppShell: React.FC = () => {
         }
       }
       if (changed) {
-        window.history.replaceState({}, '', url.pathname + url.search);
+        window.history.replaceState({ ...(window.history.state || {}) }, '', url.pathname + url.search);
       }
     } catch {}
   }, []);
@@ -165,9 +166,13 @@ const AppShell: React.FC = () => {
     async (preferSpaceId?: number) => {
       if (!user) return;
       try {
-        const res = await api.get<{ spaces: CollabSpace[] }>('/spaces');
+        const res = await api.get<{
+          spaces: CollabSpace[];
+          my_pending_join_requests?: MyPendingJoinRequest[];
+        }>('/spaces');
         const list = res.spaces || [];
         setSpaces(list);
+        setMyPendingJoinRequests(res.my_pending_join_requests || []);
         setActiveSpaceIdState((cur) => {
           const desired = preferSpaceId || cur;
           if (desired && list.some((s) => s.id === desired)) {
@@ -205,11 +210,32 @@ const AppShell: React.FC = () => {
     let active = true;
     const joinSpace = async () => {
       try {
-        const res = await api.post<{ spaceId: number; name: string }>(
-          `/spaces/join/${encodeURIComponent(pendingSpaceInviteToken)}`
-        );
+        const res = await api.post<{
+          spaceId: number;
+          name: string;
+          pendingApproval?: boolean;
+          alreadyPending?: boolean;
+        }>(`/spaces/join/${encodeURIComponent(pendingSpaceInviteToken)}`);
         if (!active) return;
         setPendingSpaceInviteToken(null);
+        if (res.pendingApproval) {
+          await loadSpaces();
+          setSpaceJoinBanner(
+            res.alreadyPending
+              ? L(
+                  `'${res.name}' 스페이스 참여 요청이 이미 방장 승인 대기 중입니다.`,
+                  `「${res.name}」への参加申請はすでにオーナー承認待ちです。`,
+                  `Your join request for '${res.name}' is already awaiting owner approval.`
+                )
+              : L(
+                  `'${res.name}' 참여 요청을 보냈습니다! 방장이 승인하면 프로젝트와 공유 스페이스에 함께 합류됩니다.`,
+                  `「${res.name}」への参加申請を送信しました！オーナー承認後にプロジェクトと共有スペースへ同時参加します。`,
+                  `Join request sent for '${res.name}'! You will join both the project and space once the owner approves.`
+                )
+          );
+          window.setTimeout(() => setSpaceJoinBanner(''), 6000);
+          return;
+        }
         await loadSpaces(res.spaceId);
         setActiveTab('calendar');
         setSpaceJoinBanner(
@@ -374,6 +400,20 @@ const AppShell: React.FC = () => {
     [setActiveTab]
   );
 
+  const handleJumpToLinkedSpace = useCallback(
+    (spaceId: number) => {
+      setActiveSpaceId(spaceId);
+      setActiveTab('calendar');
+      void loadSpaces(spaceId);
+    },
+    [setActiveSpaceId, setActiveTab, loadSpaces]
+  );
+
+  const liveSpaceModalTarget = useMemo(() => {
+    if (!spaceModalTarget) return null;
+    return spaces.find((s) => s.id === spaceModalTarget.id) || spaceModalTarget;
+  }, [spaces, spaceModalTarget]);
+
   const activeSpace = useMemo(
     () => spaces.find((s) => s.id === activeSpaceId) || spaces[0] || null,
     [spaces, activeSpaceId]
@@ -499,6 +539,17 @@ const AppShell: React.FC = () => {
         </div>
       )}
 
+      {/* Pending Owner-Approval Banner */}
+      {myPendingJoinRequests.length > 0 && activeTab !== 'mindmap' && (
+        <div className="bg-sky-50 border-b border-sky-200 text-sky-950 text-xs font-bold text-center py-1.5 px-4">
+          {L(
+            `⏳ 방장 승인 대기 중인 초대 ${myPendingJoinRequests.length}건: ${myPendingJoinRequests.map((r) => r.space_name || r.project_title).join(', ')}`,
+            `⏳ オーナー承認待ちの招待 ${myPendingJoinRequests.length}件: ${myPendingJoinRequests.map((r) => r.space_name || r.project_title).join('・')}`,
+            `⏳ ${myPendingJoinRequests.length} invite(s) pending owner approval: ${myPendingJoinRequests.map((r) => r.space_name || r.project_title).join(', ')}`
+          )}
+        </div>
+      )}
+
       {/* Body: PC Left Sidebar + Main Workspace */}
       <div className="flex-1 flex min-w-0">
         <DesktopSidebar
@@ -534,6 +585,7 @@ const AppShell: React.FC = () => {
               activeSpaceId={activeSpace?.id ?? null}
               onJumpToSpaceThought={handleJumpToSpaceThought}
               onJumpToSpaceEvent={handleJumpToSpaceEvent}
+              onJumpToLinkedSpace={handleJumpToLinkedSpace}
               onSpacesNeedRefresh={() => void loadSpaces()}
               realtimeTick={realtimeTick}
             />
@@ -617,9 +669,11 @@ const AppShell: React.FC = () => {
         isOpen={Boolean(spaceModalMode)}
         onClose={() => setSpaceModalMode(null)}
         mode={spaceModalMode || 'create'}
-        space={spaceModalTarget}
+        space={liveSpaceModalTarget}
+        onJumpToLinkedProject={handleJumpToMindmapProject}
         onSaved={async (sid) => {
           await loadSpaces(sid);
+          setRealtimeTick((t) => t + 1);
           if (spaceModalMode === 'create' && sid && activeTab === 'mindmap') {
             setActiveTab('calendar');
           }
@@ -627,6 +681,7 @@ const AppShell: React.FC = () => {
         onDeleted={async () => {
           setActiveSpaceId(null);
           await loadSpaces();
+          setRealtimeTick((t) => t + 1);
         }}
       />
 

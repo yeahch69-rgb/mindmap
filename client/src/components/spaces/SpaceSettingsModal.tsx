@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import {
+  BookMarked,
   Check,
+  Clock,
   Copy,
+  ExternalLink,
   Link2,
   Mail,
   Plus,
@@ -10,6 +13,7 @@ import {
   Trash2,
   UserMinus,
   Users,
+  X,
 } from 'lucide-react';
 import { api } from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
@@ -32,6 +36,7 @@ interface SpaceSettingsModalProps {
   onClose: () => void;
   mode: 'create' | 'edit';
   space?: CollabSpace | null;
+  onJumpToLinkedProject?: (projectId: number) => void;
   onSaved: (createdOrUpdatedSpaceId?: number) => Promise<void> | void;
   onDeleted?: () => Promise<void> | void;
 }
@@ -41,6 +46,7 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
   onClose,
   mode,
   space,
+  onJumpToLinkedProject,
   onSaved,
   onDeleted,
 }) => {
@@ -52,17 +58,23 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
   const [color, setColor] = useState('#1B4D3E');
   const [labels, setLabels] = useState<SpaceLabelPreset[]>(DEFAULT_LABELS);
   const [inviteToken, setInviteToken] = useState('');
+  const [memberInviteToken, setMemberInviteToken] = useState('');
   const [inviteEmail, setInviteEmail] = useState('');
-  const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedKind, setCopiedKind] = useState<'owner' | 'member' | null>(null);
   const [feedbackMsg, setFeedbackMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [saving, setSaving] = useState(false);
+  const [resolvingReqId, setResolvingReqId] = useState<number | null>(null);
+
+  const isLinkedSpace = Boolean(space?.linked_project);
+  const isOwner = space?.my_role === 'OWNER';
+  const pendingRequests = space?.pending_join_requests || [];
 
   useEffect(() => {
     if (!isOpen) return;
     setErrorMsg('');
     setFeedbackMsg('');
-    setCopiedLink(false);
+    setCopiedKind(null);
     setInviteEmail('');
     if (mode === 'edit' && space) {
       setName(space.name);
@@ -70,36 +82,56 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
       setColor(space.color || '#1B4D3E');
       setLabels(space.labels && space.labels.length > 0 ? space.labels : DEFAULT_LABELS);
       setInviteToken(space.invite_token || '');
+      setMemberInviteToken(space.member_invite_token || '');
     } else {
       setName('');
       setDescription('');
       setColor('#1B4D3E');
       setLabels(DEFAULT_LABELS);
       setInviteToken('');
+      setMemberInviteToken('');
     }
-  }, [isOpen, mode, space]);
+  }, [isOpen, mode, space?.id]);
+
+  useEffect(() => {
+    if (!isOpen || mode !== 'edit' || !space) return;
+    setInviteToken(space.invite_token || '');
+    setMemberInviteToken(space.member_invite_token || '');
+  }, [isOpen, mode, space?.invite_token, space?.member_invite_token]);
 
   const inviteUrl = inviteToken
     ? `${window.location.origin}/?spaceInvite=${encodeURIComponent(inviteToken)}`
     : '';
+  const memberInviteUrl = memberInviteToken
+    ? `${window.location.origin}/?spaceInvite=${encodeURIComponent(memberInviteToken)}`
+    : '';
 
-  const handleCopyInvite = async () => {
-    if (!inviteUrl) return;
+  const handleCopyInvite = async (kind: 'owner' | 'member') => {
+    const url = kind === 'member' ? memberInviteUrl : inviteUrl;
+    if (!url) return;
     try {
-      await navigator.clipboard.writeText(inviteUrl);
-      setCopiedLink(true);
-      setTimeout(() => setCopiedLink(false), 2000);
+      await navigator.clipboard.writeText(url);
+      setCopiedKind(kind);
+      setTimeout(() => setCopiedKind(null), 2000);
     } catch {
       setErrorMsg(L('클립보드 복사에 실패했습니다.', 'コピーに失敗しました。', 'Copy failed.'));
     }
   };
 
-  const handleRegenerateInvite = async () => {
+  const handleRegenerateInvite = async (kind: 'owner' | 'member' = 'owner') => {
     if (!space) return;
     try {
-      const res = await api.post<{ invite_token: string }>(`/spaces/${space.id}/regenerate-invite`);
-      setInviteToken(res.invite_token);
-      setFeedbackMsg(L('새 초대 링크가 발급되었습니다.', '新しい招待リンクを発行しました。', 'Invite link regenerated.'));
+      const res = await api.post<{ invite_token: string; member_invite_token?: string }>(
+        `/spaces/${space.id}/regenerate-invite`,
+        { kind }
+      );
+      if (res.invite_token) setInviteToken(res.invite_token);
+      if (res.member_invite_token) setMemberInviteToken(res.member_invite_token);
+      setFeedbackMsg(
+        kind === 'member'
+          ? L('새 멤버용 초대 링크가 발급되었습니다.', '新しいメンバー用招待リンクを発行しました。', 'Member invite link regenerated.')
+          : L('새 초대 링크가 발급되었습니다.', '新しい招待リンクを発行しました。', 'Invite link regenerated.')
+      );
       await onSaved(space.id);
     } catch (err: any) {
       setErrorMsg(err.message || L('재발급에 실패했습니다.', '再発行に失敗しました。', 'Failed.'));
@@ -113,22 +145,72 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
     setFeedbackMsg('');
     try {
       setSaving(true);
-      const res = await api.post<{ member: { name: string; email: string } }>(`/spaces/${space.id}/invite-email`, {
+      const res = await api.post<{
+        member: { name: string; email: string };
+        pendingApproval?: boolean;
+        alreadyPending?: boolean;
+      }>(`/spaces/${space.id}/invite-email`, {
         email: inviteEmail.trim(),
       });
       setInviteEmail('');
-      setFeedbackMsg(
-        L(
-          `${res.member.name}님을 스페이스에 초대했습니다!`,
-          `${res.member.name}さんを招待しました！`,
-          `Invited ${res.member.name}!`
-        )
-      );
+      if (res.pendingApproval) {
+        setFeedbackMsg(
+          res.alreadyPending
+            ? L(
+                `${res.member.name}님은 이미 방장 승인 대기 중입니다.`,
+                `${res.member.name}さんはすでにオーナー承認待ちです。`,
+                `${res.member.name} already has a pending approval request.`
+              )
+            : L(
+                `${res.member.name}님의 초대 승인 요청을 방장에게 보냈습니다! 승인 후 프로젝트와 스페이스에 함께 합류됩니다.`,
+                `${res.member.name}さんの招待承認リクエストをオーナーへ送信しました！`,
+                `Sent invite approval request for ${res.member.name} to the owner!`
+              )
+        );
+      } else {
+        setFeedbackMsg(
+          isLinkedSpace
+            ? L(
+                `${res.member.name}님을 연동 프로젝트와 공유 스페이스에 함께 초대했습니다!`,
+                `${res.member.name}さんを連携プロジェクトと共有スペースに招待しました！`,
+                `Invited ${res.member.name} to both the linked project and space!`
+              )
+            : L(
+                `${res.member.name}님을 스페이스에 초대했습니다!`,
+                `${res.member.name}さんを招待しました！`,
+                `Invited ${res.member.name}!`
+              )
+        );
+      }
       await onSaved(space.id);
     } catch (err: any) {
       setErrorMsg(err.message || L('초대에 실패했습니다.', '招待に失敗しました。', 'Invite failed.'));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleResolveJoinRequest = async (requestId: number, decision: 'approve' | 'reject') => {
+    if (!space || resolvingReqId !== null) return;
+    setErrorMsg('');
+    setFeedbackMsg('');
+    try {
+      setResolvingReqId(requestId);
+      await api.post(`/spaces/${space.id}/join-requests/${requestId}/${decision}`);
+      setFeedbackMsg(
+        decision === 'approve'
+          ? L(
+              '초대 요청을 승인했습니다! 프로젝트와 스페이스에 함께 합류되었습니다.',
+              '招待申請を承認しました！プロジェクトとスペースに同時参加しました。',
+              'Approved! The user has joined both project & space.'
+            )
+          : L('초대 요청을 거절했습니다.', '招待申請を却下しました。', 'Declined the invite request.')
+      );
+      await onSaved(space.id);
+    } catch (err: any) {
+      setErrorMsg(err.message || L('처리에 실패했습니다.', '処理に失敗しました。', 'Action failed.'));
+    } finally {
+      setResolvingReqId(null);
     }
   };
 
@@ -227,6 +309,42 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
       }
     >
       <div className="space-y-5">
+        {mode === 'edit' && space?.linked_project && (
+          <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 min-w-0">
+              <Link2 className="w-4 h-4 text-indigo-700 shrink-0" />
+              <div className="min-w-0">
+                <div className="font-bold text-indigo-950 truncate">
+                  {L('협업 프로젝트 1:1 연동 중', '協業プロジェクト 1:1 連携中', '1:1 Linked with Project')}
+                  {': '}
+                  {space.linked_project.title}
+                </div>
+                <div className="text-[11px] text-indigo-700">
+                  {L(
+                    '멤버 추가·추방·나가기가 프로젝트와 양방향 자동 동기화됩니다.',
+                    'メンバーの追加・除外・退出がプロジェクトと双方向で同期されます。',
+                    'Membership syncs bidirectionally with the linked project.'
+                  )}
+                </div>
+              </div>
+            </div>
+            {onJumpToLinkedProject && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onJumpToLinkedProject(space.linked_project!.id);
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-[11px] font-bold transition shrink-0"
+              >
+                <BookMarked className="w-3.5 h-3.5" />
+                <span>{L('연동 프로젝트 열기', '連携プロジェクトを開く', 'Open Linked Project')}</span>
+                <ExternalLink className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        )}
+
         {errorMsg && (
           <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold">
             {errorMsg}
@@ -321,57 +439,186 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
         {/* Invite & Members Section (Edit Mode only) */}
         {mode === 'edit' && space && (
           <div className="pt-4 border-t border-ivory-200 space-y-4">
-            {/* Invite Link */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-charcoal-800 flex items-center gap-1.5">
-                  <Link2 className="w-3.5 h-3.5 text-forest-700" />
-                  {L('초대 링크로 멤버 초대', '招待リンクで招待', 'Invite via Link')}
-                </span>
-                {space.my_role === 'OWNER' && (
-                  <button
-                    type="button"
-                    onClick={() => void handleRegenerateInvite()}
-                    className="text-[11px] font-bold text-charcoal-500 hover:text-forest-800 inline-flex items-center gap-1"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    {L('링크 재발급', '再発行', 'Regenerate')}
-                  </button>
+            {/* Invite Links */}
+            {isLinkedSpace ? (
+              <div className="space-y-3">
+                {/* Owner Instant Invite Link (Owner Only) */}
+                {isOwner && inviteUrl && (
+                  <div className="p-3 rounded-xl bg-forest-50/70 border border-forest-200 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-forest-950 flex items-center gap-1.5">
+                        <Link2 className="w-3.5 h-3.5 text-forest-700" />
+                        {L('방장 전용 초대 링크 (즉시 합류)', 'オーナー専用招待リンク（即時参加）', 'Owner Invite Link (Instant Join)')}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void handleRegenerateInvite('owner')}
+                        className="text-[11px] font-bold text-charcoal-600 hover:text-forest-800 inline-flex items-center gap-1"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        {L('재발급', '再発行', 'Regenerate')}
+                      </button>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        readOnly
+                        value={inviteUrl}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-[11px] font-mono bg-white border border-forest-200 rounded-lg text-charcoal-700"
+                      />
+                      <Button type="button" size="sm" variant="secondary" onClick={() => void handleCopyInvite('owner')}>
+                        {copiedKind === 'owner' ? <Check className="w-3.5 h-3.5 text-emerald-700" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span className="ml-1">{copiedKind === 'owner' ? L('복사됨', 'コピー済', 'Copied') : L('복사', 'コピー', 'Copy')}</span>
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Member Approval-Required Invite Link (Visible to both Owner & Member) */}
+                {memberInviteUrl && (
+                  <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 text-amber-700" />
+                        {L('멤버용 초대 링크 (방장 승인 후 합류)', 'メンバー用招待リンク（オーナー承認制）', 'Member Invite Link (Owner Approval)')}
+                      </span>
+                      {isOwner && (
+                        <button
+                          type="button"
+                          onClick={() => void handleRegenerateInvite('member')}
+                          className="text-[11px] font-bold text-amber-800 hover:text-amber-950 inline-flex items-center gap-1"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          {L('재발급', '再発行', 'Regenerate')}
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        readOnly
+                        value={memberInviteUrl}
+                        className="flex-1 min-w-0 px-3 py-1.5 text-[11px] font-mono bg-white border border-amber-200 rounded-lg text-charcoal-700"
+                      />
+                      <Button type="button" size="sm" variant="secondary" onClick={() => void handleCopyInvite('member')}>
+                        {copiedKind === 'member' ? <Check className="w-3.5 h-3.5 text-emerald-700" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span className="ml-1">{copiedKind === 'member' ? L('복사됨', 'コピー済', 'Copied') : L('복사', 'コピー', 'Copy')}</span>
+                      </Button>
+                    </div>
+                  </div>
                 )}
               </div>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  readOnly
-                  value={inviteUrl}
-                  className="flex-1 min-w-0 px-3 py-1.5 text-[11px] font-mono bg-ivory-50 border border-ivory-300 rounded-lg text-charcoal-700"
-                />
-                <Button type="button" size="sm" variant="secondary" onClick={() => void handleCopyInvite()}>
-                  {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-700" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span className="ml-1">{copiedLink ? L('복사됨', 'コピー済', 'Copied') : L('복사', 'コピー', 'Copy')}</span>
-                </Button>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-charcoal-800 flex items-center gap-1.5">
+                    <Link2 className="w-3.5 h-3.5 text-forest-700" />
+                    {L('초대 링크로 멤버 초대', '招待リンクで招待', 'Invite via Link')}
+                  </span>
+                  {isOwner && (
+                    <button
+                      type="button"
+                      onClick={() => void handleRegenerateInvite('owner')}
+                      className="text-[11px] font-bold text-charcoal-500 hover:text-forest-800 inline-flex items-center gap-1"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      {L('링크 재발급', '再発行', 'Regenerate')}
+                    </button>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={inviteUrl}
+                    className="flex-1 min-w-0 px-3 py-1.5 text-[11px] font-mono bg-ivory-50 border border-ivory-300 rounded-lg text-charcoal-700"
+                  />
+                  <Button type="button" size="sm" variant="secondary" onClick={() => void handleCopyInvite('owner')}>
+                    {copiedKind === 'owner' ? <Check className="w-3.5 h-3.5 text-emerald-700" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span className="ml-1">{copiedKind === 'owner' ? L('복사됨', 'コピー済', 'Copied') : L('복사', 'コピー', 'Copy')}</span>
+                  </Button>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Invite by Email */}
             <form onSubmit={handleInviteByEmail} className="space-y-1.5">
               <label className="text-xs font-bold text-charcoal-800 flex items-center gap-1.5">
                 <Mail className="w-3.5 h-3.5 text-forest-700" />
-                {L('가입된 회원 이메일로 바로 초대', '登録済みメールで直接招待', 'Direct Invite by Email')}
+                {isLinkedSpace && !isOwner
+                  ? L('가입된 회원 이메일로 초대 요청 (방장 승인 필요)', '登録済みメールで招待申請（オーナー承認制）', 'Request Invite by Email (Owner Approval)')
+                  : L('가입된 회원 이메일로 바로 초대', '登録済みメールで直接招待', 'Direct Invite by Email')}
               </label>
               <div className="flex gap-2">
                 <input
-                  type="email"
+                  type="text"
                   value={inviteEmail}
                   onChange={(e) => setInviteEmail(e.target.value)}
-                  placeholder={L('초대할 이메일을 입력하세요', '招待するメールアドレスを入力', 'Enter email to invite')}
+                  placeholder={L('초대할 이메일 또는 아이디를 입력하세요', '招待するメールまたはIDを入力', 'Enter email or ID to invite')}
                   className="flex-1 min-w-0 px-3 py-1.5 text-xs rounded-lg border border-ivory-300 focus:outline-none focus:ring-2 focus:ring-forest-500"
                 />
                 <Button type="submit" size="sm" disabled={saving || !inviteEmail.trim()}>
-                  {L('초대', '招待', 'Invite')}
+                  {isLinkedSpace && !isOwner ? L('승인 요청', '承認申請', 'Request') : L('초대', '招待', 'Invite')}
                 </Button>
               </div>
             </form>
+
+            {/* Pending Join Requests (Linked Space) */}
+            {isLinkedSpace && pendingRequests.length > 0 && (
+              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
+                <div className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-amber-700" />
+                  <span>
+                    {L(
+                      `방장 승인 대기 목록 (${pendingRequests.length}건)`,
+                      `オーナー承認待ち (${pendingRequests.length}件)`,
+                      `Pending Owner Approval (${pendingRequests.length})`
+                    )}
+                  </span>
+                </div>
+                <div className="divide-y divide-amber-200 border border-amber-200 rounded-xl overflow-hidden bg-white">
+                  {pendingRequests.map((req) => (
+                    <div key={req.id} className="px-3 py-2 flex items-center justify-between gap-2 text-xs">
+                      <div className="min-w-0">
+                        <div className="font-bold text-charcoal-900 truncate">{req.target_user_name}</div>
+                        <div className="text-[11px] text-charcoal-500 truncate">
+                          {req.invited_by_name
+                            ? L(`요청자: ${req.invited_by_name}`, `申請者: ${req.invited_by_name}`, `Requested by: ${req.invited_by_name}`)
+                            : L('멤버용 초대 링크 신청', 'メンバー用リンク経由', 'Via member invite link')}
+                          {req.target_user_email ? ` · ${req.target_user_email}` : ''}
+                        </div>
+                      </div>
+                      {Number(space.linked_project?.created_by) === Number(user?.id) ? (
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            disabled={resolvingReqId === req.id}
+                            onClick={() => void handleResolveJoinRequest(req.id, 'approve')}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold disabled:opacity-50"
+                          >
+                            <Check className="w-3 h-3" />
+                            <span>{L('승인', '承認', 'Approve')}</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={resolvingReqId === req.id}
+                            onClick={() => void handleResolveJoinRequest(req.id, 'reject')}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-bold disabled:opacity-50"
+                          >
+                            <X className="w-3 h-3" />
+                            <span>{L('거절', '却下', 'Decline')}</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-[11px] font-bold text-amber-700 shrink-0">
+                          {L('승인 대기 중', '承認待ち', 'Pending')}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Members List */}
             <div className="space-y-2">
@@ -416,7 +663,13 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
             {space.my_role === 'OWNER' && (
               <div className="pt-3 border-t border-ivory-200 flex justify-between items-center">
                 <span className="text-[11px] text-charcoal-500">
-                  {L('방장 권한으로 스페이스를 영구 삭제할 수 있습니다.', 'オーナーはスペースを削除できます。', 'Owner can permanently delete this space.')}
+                  {isLinkedSpace
+                    ? L(
+                        '스페이스를 삭제해도 연동된 프로젝트와 기록은 유지되며 연동만 해제됩니다.',
+                        'スペースを削除しても連携プロジェクトと記録は保持され、連携のみ解除されます。',
+                        'Deleting this space only unlinks it; the linked project and its logs are preserved.'
+                      )
+                    : L('방장 권한으로 스페이스를 영구 삭제할 수 있습니다.', 'オーナーはスペースを削除できます。', 'Owner can permanently delete this space.')}
                 </span>
                 <button
                   type="button"
