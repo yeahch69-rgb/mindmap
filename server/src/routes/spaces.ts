@@ -9,7 +9,7 @@ import {
 } from '../db/database.js';
 import { authenticateToken, JWT_SECRET } from '../middleware/auth.js';
 import { getJstDateStr, getJstDateTimeStr, getJstTimeStr } from '../utils/jstTime.js';
-import { sendPushToUsers } from '../utils/webPush.js';
+import { PushNotificationPayload, sendPushToUsers } from '../utils/webPush.js';
 import { broadcastSpaceUpdate, subscribeSpaceStream } from '../utils/spaceRealtime.js';
 import {
   createCrossLink,
@@ -90,7 +90,7 @@ function getSpaceById(spaceId: number) {
 function notifySpacePeers(
   spaceId: number,
   actorId: number,
-  payload: { title: string; body: string; url: string; tag: string }
+  payload: PushNotificationPayload
 ) {
   const members = db
     .prepare('SELECT user_id FROM collab_space_members WHERE space_id = ?')
@@ -338,6 +338,7 @@ function hydrateThoughtRows(rows: any[]) {
       tags: safeJsonParse<string[]>(r.tags_json, []),
       status: r.status || 'NEW',
       is_pinned: Boolean(r.is_pinned),
+      is_important: Boolean(r.is_important),
       author_id: Number(r.author_id),
       author_name: r.author_name || '',
       updated_by: r.updated_by ? Number(r.updated_by) : null,
@@ -1575,6 +1576,7 @@ router.post('/:spaceId/thoughts', (req: Request, res: Response) => {
 
   const title = String(req.body?.title || '').trim();
   const content = String(req.body?.content || '').trim();
+  const isImportant = Boolean(req.body?.is_important);
   const tags = Array.isArray(req.body?.tags)
     ? Array.from(new Set(req.body.tags.map((t: unknown) => String(t || '').trim().replace(/^#/, '')).filter(Boolean))).slice(0, 8)
     : [];
@@ -1586,23 +1588,50 @@ router.post('/:spaceId/thoughts', (req: Request, res: Response) => {
 
   const result = db
     .prepare(`
-      INSERT INTO shared_thoughts (space_id, title, content, tags_json, status, author_id, updated_by)
-      VALUES (?, ?, ?, ?, 'NEW', ?, ?)
+      INSERT INTO shared_thoughts (space_id, title, content, tags_json, status, is_important, author_id, updated_by)
+      VALUES (?, ?, ?, ?, 'NEW', ?, ?, ?)
     `)
-    .run(spaceId, title, content, JSON.stringify(tags), userId, userId);
+    .run(spaceId, title, content, JSON.stringify(tags), isImportant ? 1 : 0, userId, userId);
 
   const thoughtId = Number(result.lastInsertRowid);
   const space = getSpaceById(spaceId);
+  const spaceName = space?.name || '공유 메모장';
+  const actorName = req.user!.name;
   const labelText = title || (content.length > 36 ? `${content.slice(0, 35)}…` : content);
-  const summary = `${req.user!.name}님이 새 생각을 던졌습니다: "${labelText}"`;
+  const summary = isImportant
+    ? `${actorName}님이 중요 메모를 등록했습니다: "${labelText}"`
+    : `${actorName}님이 새 생각을 던졌습니다: "${labelText}"`;
 
-  recordActivity(spaceId, userId, 'THOUGHT_CREATED', 'THOUGHT', thoughtId, summary);
-  notifySpacePeers(spaceId, userId, {
-    title: `💡 ${space?.name || '공유 메모장'}`,
-    body: summary,
-    url: `/?tab=thoughts&space=${spaceId}&thought=${thoughtId}`,
-    tag: `space-thought-${thoughtId}`,
+  recordActivity(spaceId, userId, 'THOUGHT_CREATED', 'THOUGHT', thoughtId, summary, {
+    actorName,
+    title: labelText,
+    isImportant,
   });
+  notifySpacePeers(
+    spaceId,
+    userId,
+    isImportant
+      ? {
+          titleKo: `📌 [중요 메모] ${spaceName}`,
+          bodyKo: `${actorName}님이 중요 메모를 등록했습니다: "${labelText}"`,
+          titleJa: `📌 [重要メモ] ${spaceName}`,
+          bodyJa: `${actorName}さんが重要メモを投稿しました：「${labelText}」`,
+          titleEn: `📌 [Important] ${spaceName}`,
+          bodyEn: `${actorName} posted an important note: "${labelText}"`,
+          url: `/?tab=thoughts&space=${spaceId}&thought=${thoughtId}`,
+          tag: `space-thought-${thoughtId}`,
+        }
+      : {
+          titleKo: `💡 ${spaceName}`,
+          bodyKo: summary,
+          titleJa: `💡 ${spaceName}`,
+          bodyJa: `${actorName}さんが新しいメモを投稿しました：「${labelText}」`,
+          titleEn: `💡 ${spaceName}`,
+          bodyEn: `${actorName} dropped a new thought: "${labelText}"`,
+          url: `/?tab=thoughts&space=${spaceId}&thought=${thoughtId}`,
+          tag: `space-thought-${thoughtId}`,
+        }
+  );
 
   const created = db
     .prepare(`
@@ -1720,6 +1749,7 @@ router.patch('/:spaceId/thoughts/:thoughtId', (req: Request, res: Response) => {
       ? req.body.status
       : existing.status;
   const isPinned = req.body?.is_pinned !== undefined ? (req.body.is_pinned ? 1 : 0) : existing.is_pinned;
+  const isImportant = req.body?.is_important !== undefined ? (req.body.is_important ? 1 : 0) : existing.is_important;
 
   if (!content) {
     res.status(400).json({ error: '생각 내용은 비워둘 수 없습니다.' });
@@ -1736,9 +1766,9 @@ router.patch('/:spaceId/thoughts/:thoughtId', (req: Request, res: Response) => {
 
     db.prepare(`
       UPDATE shared_thoughts
-      SET title = ?, content = ?, tags_json = ?, status = ?, is_pinned = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+      SET title = ?, content = ?, tags_json = ?, status = ?, is_pinned = ?, is_important = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).run(title, content, tagsJson, status, isPinned, userId, thoughtId);
+    `).run(title, content, tagsJson, status, isPinned, isImportant, userId, thoughtId);
   });
   tx();
 

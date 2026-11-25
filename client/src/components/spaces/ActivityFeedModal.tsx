@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
+  AlertCircle,
   Bell,
   CalendarDays,
   CheckCheck,
@@ -62,8 +63,31 @@ export const ActivityFeedModal: React.FC<ActivityFeedModalProps> = ({
     if (act.activity_type === 'EVENT_PROPOSED' || act.activity_type === 'EVENT_CONFIRMED')
       return <Sparkles className="w-4 h-4 text-amber-700" />;
     if (act.target_type === 'EVENT') return <CalendarDays className="w-4 h-4 text-forest-700" />;
-    if (act.target_type === 'THOUGHT') return <Lightbulb className="w-4 h-4 text-amber-600" />;
+    if (act.target_type === 'THOUGHT') {
+      if (act.meta?.isImportant) return <AlertCircle className="w-4 h-4 text-rose-600" />;
+      return <Lightbulb className="w-4 h-4 text-amber-600" />;
+    }
     return <Users className="w-4 h-4 text-charcoal-600" />;
+  };
+
+  const formatActivitySummary = (act: SpaceActivity) => {
+    if (act.activity_type === 'THOUGHT_CREATED' && act.meta && typeof act.meta.title === 'string') {
+      const actor = String(act.meta.actorName || act.actor_name || '');
+      const title = act.meta.title;
+      if (act.meta.isImportant) {
+        return L(
+          `[중요 메모] ${actor}님이 중요 메모를 등록했습니다: "${title}"`,
+          `[重要メモ] ${actor}さんが重要メモを投稿しました：「${title}」`,
+          `[Important] ${actor} posted an important note: "${title}"`
+        );
+      }
+      return L(
+        `${actor}님이 새 생각을 던졌습니다: "${title}"`,
+        `${actor}さんが新しいメモを投稿しました：「${title}」`,
+        `${actor} dropped a new thought: "${title}"`
+      );
+    }
+    return act.summary;
   };
 
   return (
@@ -134,7 +158,7 @@ export const ActivityFeedModal: React.FC<ActivityFeedModalProps> = ({
                       {act.is_unread && (
                         <span className="inline-block w-1.5 h-1.5 rounded-full bg-rose-600 mr-1.5 align-middle" />
                       )}
-                      {act.summary}
+                      {formatActivitySummary(act)}
                     </div>
                     <div className="text-[10px] text-charcoal-400 mt-1">
                       {getJstDateKey(act.created_at)} {formatJstTime(act.created_at)}

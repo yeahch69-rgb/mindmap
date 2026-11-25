@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  AlertCircle,
   ArrowRight,
   BookMarked,
   Calendar,
@@ -27,10 +28,13 @@ import {
   ThoughtCommentType,
   ThoughtRevision,
   ThoughtStance,
+  ThoughtStatus,
 } from '../../types/spaces';
 import { formatJstTime, getJstDateKey } from '../../utils/dateTime';
 import { Modal } from '../common/Modal';
 import { Button } from '../common/Button';
+import { TranslateButton } from '../common/TranslateButton';
+import { useContentTranslation } from '../../hooks/useContentTranslation';
 
 interface ThoughtDetailModalProps {
   isOpen: boolean;
@@ -61,6 +65,7 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
 }) => {
   const { user } = useAuth();
   const { L } = useLanguage();
+  const translator = useContentTranslation();
 
   const [thought, setThought] = useState<SharedThought | null>(null);
   const [comments, setComments] = useState<ThoughtComment[]>([]);
@@ -72,6 +77,7 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
   const [editTitle, setEditTitle] = useState('');
   const [editContent, setEditContent] = useState('');
   const [editTagsText, setEditTagsText] = useState('');
+  const [editImportant, setEditImportant] = useState(false);
   const [showRevisions, setShowRevisions] = useState(false);
 
   // Comment / Proposal composer
@@ -98,6 +104,7 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
         setEditTitle(res.thought.title || '');
         setEditContent(res.thought.content);
         setEditTagsText((res.thought.tags || []).join(', '));
+        setEditImportant(Boolean(res.thought.is_important));
         setIsEditing(true);
       }
     } catch {
@@ -125,6 +132,7 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
     setEditTitle(thought.title || '');
     setEditContent(thought.content);
     setEditTagsText(thought.tags.join(', '));
+    setEditImportant(Boolean(thought.is_important));
     setIsEditing(true);
   };
 
@@ -139,8 +147,18 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
       title: editTitle.trim(),
       content: editContent.trim(),
       tags,
+      is_important: editImportant,
     });
     setIsEditing(false);
+    await fetchDetail();
+    onMutated();
+  };
+
+  const handleToggleImportant = async (nextImportant: boolean) => {
+    if (!thought) return;
+    await api.patch(`/spaces/${space.id}/thoughts/${thought.id}`, {
+      is_important: nextImportant,
+    });
     await fetchDetail();
     onMutated();
   };
@@ -232,6 +250,43 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
 
   const proposedLinkedCount = (thought?.linked_events || []).filter((e) => e.event_status === 'PROPOSED').length;
 
+  const statusMeta = (status: ThoughtStatus) => {
+    switch (status) {
+      case 'NEW':
+        return {
+          label: L('새 생각', '新着', 'New'),
+          cls: 'bg-sky-100 text-sky-900 border-sky-200',
+        };
+      case 'DISCUSSING':
+        return {
+          label: L('논의중', '議論中', 'Discussing'),
+          cls: 'bg-violet-100 text-violet-900 border-violet-200',
+        };
+      case 'PROPOSED':
+        return {
+          label: L('일정 제안됨', '日程提案中', 'Date Proposed'),
+          cls: 'bg-amber-100 text-amber-950 border-amber-300',
+        };
+      case 'SCHEDULED':
+        return {
+          label: L('일정 확정됨', '予定確定', 'Scheduled'),
+          cls: 'bg-emerald-100 text-emerald-900 border-emerald-300',
+        };
+      case 'ARCHIVED':
+        return {
+          label: L('보관됨', 'アーカイブ', 'Archived'),
+          cls: 'bg-ivory-200 text-charcoal-600 border-ivory-300',
+        };
+    }
+  };
+
+  const thoughtTransKey = thought ? `thought-${thought.id}` : 'thought-none';
+  const showThoughtTranslate = thought ? translator.shouldShowButton(thought.title, thought.content) : false;
+  const displayThoughtTitle = thought
+    ? translator.getText(thoughtTransKey, 'title', thought.title) || L('공유된 생각', '共有アイデア', 'Shared Thought')
+    : '';
+  const displayThoughtContent = thought ? translator.getText(thoughtTransKey, 'content', thought.content) : '';
+
   return (
     <Modal
       isOpen={isOpen}
@@ -240,7 +295,22 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
       title={
         thought ? (
           <div className="flex items-center gap-2 min-w-0">
-            <span className="truncate">{thought.title || L('공유된 생각', '共有アイデア', 'Shared Thought')}</span>
+            {thought.is_important ? (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-rose-100 text-rose-900 border-rose-300 shrink-0">
+                <AlertCircle className="w-2.5 h-2.5 text-rose-600 shrink-0" />
+                {L('중요 메모', '重要メモ', 'Important')}
+              </span>
+            ) : (
+              (() => {
+                const st = statusMeta(thought.status);
+                return (
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border shrink-0 ${st.cls}`}>
+                    {st.label}
+                  </span>
+                );
+              })()
+            )}
+            <span className="truncate">{displayThoughtTitle}</span>
             {thought.revision_count > 0 && (
               <span className="px-2 py-0.5 rounded-full bg-violet-100 text-violet-900 text-[10px] font-bold shrink-0">
                 {L(`진화 ${thought.revision_count}회`, `更新 ${thought.revision_count}回`, `v${thought.revision_count + 1}`)}
@@ -260,14 +330,48 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
         <div className="space-y-4">
           {/* Top Metadata & Actions */}
           <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-ivory-200 text-[11px] text-charcoal-500">
-            <div>
-              <span className="font-bold text-charcoal-800">{thought.author_name}</span> ·{' '}
-              {getJstDateKey(thought.created_at)} {formatJstTime(thought.created_at)}
-              {thought.updated_by_name && thought.updated_by !== thought.author_id && (
-                <span> · {L(`최근 다듬기: ${thought.updated_by_name}`, `最終更新: ${thought.updated_by_name}`, `Edited by ${thought.updated_by_name}`)}</span>
-              )}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span>
+                <span className="font-bold text-charcoal-800">{thought.author_name}</span> ·{' '}
+                {getJstDateKey(thought.created_at)} {formatJstTime(thought.created_at)}
+                {thought.updated_by_name && thought.updated_by !== thought.author_id && (
+                  <span> · {L(`최근 다듬기: ${thought.updated_by_name}`, `最終更新: ${thought.updated_by_name}`, `Edited by ${thought.updated_by_name}`)}</span>
+                )}
+              </span>
+              <TranslateButton
+                visible={showThoughtTranslate}
+                translated={translator.isTranslated(thoughtTransKey)}
+                loading={translator.isTranslating(thoughtTransKey)}
+                error={translator.getError(thoughtTransKey)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void translator.toggleTranslate(
+                    thoughtTransKey,
+                    { title: thought.title, content: thought.content },
+                    'shared-thought'
+                  );
+                }}
+              />
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {!isEditing && (
+                <label
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] font-bold cursor-pointer select-none transition ${
+                    thought.is_important
+                      ? 'bg-rose-50 text-rose-800 border-rose-300'
+                      : 'bg-white text-charcoal-600 border-ivory-200 hover:bg-rose-50/50 hover:border-rose-200'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={Boolean(thought.is_important)}
+                    onChange={(e) => void handleToggleImportant(e.target.checked)}
+                    className="w-3 h-3 rounded accent-rose-600 cursor-pointer"
+                  />
+                  <AlertCircle className={`w-3 h-3 shrink-0 ${thought.is_important ? 'text-rose-600' : 'text-charcoal-400'}`} />
+                  <span>{L('중요 메모', '重要メモ', 'Important')}</span>
+                </label>
+              )}
               <button
                 type="button"
                 onClick={() => void handleTogglePin()}
@@ -302,6 +406,37 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
           {/* Thought Body (View or Edit) */}
           {isEditing ? (
             <form onSubmit={handleSaveEdit} className="space-y-2.5 p-3 rounded-xl bg-ivory-50 border border-ivory-300">
+              {(() => {
+                const editKey = `thought-edit-${thought.id}`;
+                const canPreview = translator.shouldShowButton(editTitle, editContent);
+                const previewOn = translator.isTranslated(editKey);
+                if (!canPreview) return null;
+                return (
+                  <div className="p-2.5 rounded-lg bg-emerald-50/70 border border-emerald-200 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold text-emerald-900">
+                        {L('원문 입력을 덮어쓰지 않고 번역 미리보기', '原文を保持したまま翻訳プレビュー', 'Non-destructive translation preview')}
+                      </span>
+                      <TranslateButton
+                        visible={canPreview}
+                        translated={previewOn}
+                        loading={translator.isTranslating(editKey)}
+                        error={translator.getError(editKey)}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          void translator.toggleTranslate(editKey, { title: editTitle, content: editContent }, 'shared-thought-edit');
+                        }}
+                      />
+                    </div>
+                    {previewOn && (
+                      <div className="p-2 rounded bg-white border border-emerald-200 text-xs space-y-1 text-charcoal-800">
+                        {editTitle && <div className="font-bold">{translator.getText(editKey, 'title', editTitle)}</div>}
+                        <div className="whitespace-pre-wrap">{translator.getText(editKey, 'content', editContent)}</div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
               <input
                 type="text"
                 value={editTitle}
@@ -315,13 +450,31 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
                 onChange={(e) => setEditContent(e.target.value)}
                 className="w-full px-3 py-2 text-xs rounded-lg border border-ivory-300 bg-white"
               />
-              <input
-                type="text"
-                value={editTagsText}
-                onChange={(e) => setEditTagsText(e.target.value)}
-                placeholder={L('태그 (쉼표로 구분, 예: 워크숍, 아이디어)', 'タグ（カンマ区切り）', 'Tags (comma separated)')}
-                className="w-full px-3 py-1.5 text-xs rounded-lg border border-ivory-300 bg-white"
-              />
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  value={editTagsText}
+                  onChange={(e) => setEditTagsText(e.target.value)}
+                  placeholder={L('태그 (쉼표로 구분)', 'タグ（カンマ区切り）', 'Tags (comma separated)')}
+                  className="flex-1 min-w-[160px] px-3 py-1.5 text-xs rounded-lg border border-ivory-300 bg-white"
+                />
+                <label
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-bold cursor-pointer select-none transition ${
+                    editImportant
+                      ? 'bg-rose-50 border-rose-300 text-rose-800'
+                      : 'bg-white border-ivory-300 text-charcoal-600 hover:bg-rose-50/50 hover:border-rose-200'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={editImportant}
+                    onChange={(e) => setEditImportant(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded accent-rose-600 cursor-pointer"
+                  />
+                  <AlertCircle className={`w-3.5 h-3.5 shrink-0 ${editImportant ? 'text-rose-600' : 'text-charcoal-400'}`} />
+                  <span>{L('중요 메모', '重要メモ', 'Important')}</span>
+                </label>
+              </div>
               <div className="flex justify-end gap-2">
                 <Button type="button" size="sm" variant="secondary" onClick={() => setIsEditing(false)}>
                   {L('취소', 'キャンセル', 'Cancel')}
@@ -333,7 +486,7 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
             </form>
           ) : (
             <div className="p-4 rounded-xl bg-ivory-50 border border-ivory-200 space-y-2.5">
-              <div className="text-sm text-charcoal-900 whitespace-pre-wrap leading-relaxed">{thought.content}</div>
+              <div className="text-sm text-charcoal-900 whitespace-pre-wrap leading-relaxed">{displayThoughtContent}</div>
               {thought.tags.length > 0 && (
                 <div className="flex flex-wrap gap-1.5">
                   {thought.tags.map((tag) => (
@@ -688,6 +841,10 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
                         ? L('➕ 추가 아이디어', '➕ 追加アイデア', '➕ Add Idea')
                         : L('💬 의견', '💬 意見', '💬 Opinion');
 
+                  const cmtKey = `thought-cmt-${c.id}`;
+                  const showCmtTrans = translator.shouldShowButton(c.content);
+                  const displayCmt = translator.getText(cmtKey, 'content', c.content);
+
                   return (
                     <div
                       key={c.id}
@@ -696,7 +853,7 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
                       }`}
                     >
                       <div className="flex flex-wrap items-center justify-between gap-1.5">
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${badgeClass}`}>
                             {typeLabel}
                           </span>
@@ -704,6 +861,16 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
                           <span className="text-[10px] text-charcoal-400">
                             {getJstDateKey(c.created_at).slice(5)} {formatJstTime(c.created_at)}
                           </span>
+                          <TranslateButton
+                            visible={showCmtTrans}
+                            translated={translator.isTranslated(cmtKey)}
+                            loading={translator.isTranslating(cmtKey)}
+                            error={translator.getError(cmtKey)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void translator.toggleTranslate(cmtKey, { content: c.content }, 'shared-thought-comment');
+                            }}
+                          />
                         </div>
 
                         {isProposal && (
@@ -724,7 +891,7 @@ export const ThoughtDetailModal: React.FC<ThoughtDetailModalProps> = ({
                           )
                         )}
                       </div>
-                      <div className="text-xs text-charcoal-800 whitespace-pre-wrap leading-relaxed">{c.content}</div>
+                      <div className="text-xs text-charcoal-800 whitespace-pre-wrap leading-relaxed">{displayCmt}</div>
                     </div>
                   );
                 })

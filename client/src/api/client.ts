@@ -25,6 +25,14 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
+  try {
+    const savedLang = localStorage.getItem('pj_language');
+    if (savedLang === 'ko' || savedLang === 'ja' || savedLang === 'en') {
+      headers['X-Language'] = savedLang;
+    }
+  } catch {
+    // ignore storage restriction
+  }
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }

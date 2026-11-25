@@ -22,6 +22,7 @@ interface MindMapNodeComposerProps {
   parentIdeaId: number | null;
   onAddIdea?: (payload: CreateJournalIdeaPayload) => Promise<JournalIdea | null | void>;
   onAddEntry?: (payload: CreateJournalEntryPayload) => Promise<JournalEntry | null | void>;
+  onSetNextStep?: (projectId: number, nextAction: string, nextActionDate: string | null) => Promise<void>;
   onCreatedNode: (newKey: string, parentKey: string | null) => void;
   onClose: () => void;
 }
@@ -37,12 +38,16 @@ export const MindMapNodeComposer: React.FC<MindMapNodeComposerProps> = ({
   parentIdeaId,
   onAddIdea,
   onAddEntry,
+  onSetNextStep,
   onCreatedNode,
   onClose,
 }) => {
   const { L } = useLanguage();
+  const isSettingUnsetNextStep =
+    parentNodeKey === 'next-step' && !project.next_action && Boolean(onSetNextStep);
 
   const [kind, setKind] = useState<EntryType | 'IDEA'>(initialKind);
+  const [nextStepTitle, setNextStepTitle] = useState('');
   const [ideaTitle, setIdeaTitle] = useState('');
   const [ideaNote, setIdeaNote] = useState('');
 
@@ -106,6 +111,18 @@ export const MindMapNodeComposer: React.FC<MindMapNodeComposerProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
+
+    if (isSettingUnsetNextStep && onSetNextStep) {
+      if (!nextStepTitle.trim()) return;
+      try {
+        setIsSubmitting(true);
+        await onSetNextStep(project.id, nextStepTitle.trim(), dueDate || null);
+        onClose();
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
 
     if (kind === 'IDEA') {
       if (!onAddIdea || !ideaTitle.trim()) return;
@@ -209,11 +226,14 @@ export const MindMapNodeComposer: React.FC<MindMapNodeComposerProps> = ({
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="px-2 py-0.5 rounded bg-forest-100 border border-forest-300 text-forest-900 font-bold whitespace-nowrap">
-            {parentNodeKey && parentNodeTitle
+            {isSettingUnsetNextStep
+              ? L('🎯 다음 할 일 지정 (미지정 노드 변경)', '🎯 次の行動を設定（未定ノードを更新）', '🎯 Set Next Step (Replaces Unset Node)')
+              : parentNodeKey && parentNodeTitle
               ? `${L('가지 뻗기 →', '子ノード追加 →', 'Branch from:')} ${parentNodeTitle}`
               : L('새 타임라인 노드 추가', '新規ノード追加', 'New Timeline Node')}
           </span>
-          {availableButtons.map((btn) => (
+          {!isSettingUnsetNextStep &&
+            availableButtons.map((btn) => (
             <button
               key={btn.id}
               type="button"
@@ -237,7 +257,32 @@ export const MindMapNodeComposer: React.FC<MindMapNodeComposerProps> = ({
         </button>
       </div>
 
-      {kind === 'IDEA' ? (
+      {isSettingUnsetNextStep ? (
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+          <input
+            type="text"
+            autoFocus
+            value={nextStepTitle}
+            onChange={(e) => setNextStepTitle(e.target.value)}
+            placeholder={L('다음 할 일(Next Step)을 입력하세요...', '次の行動(Next Step)を入力...', 'Enter Next Step...')}
+            className="flex-1 p-1.5 bg-white border border-ivory-300 rounded-lg font-bold text-charcoal-900"
+          />
+          <input
+            type="date"
+            value={dueDate}
+            onChange={(e) => setDueDate(e.target.value)}
+            className="p-1.5 bg-white border border-ivory-300 rounded-lg text-charcoal-800 shrink-0"
+            title={L('목표일 (선택)', '期限 (任意)', 'Target date (optional)')}
+          />
+          <button
+            type="submit"
+            disabled={isSubmitting || !nextStepTitle.trim()}
+            className="px-3 py-1.5 rounded-lg bg-forest-800 text-white font-bold disabled:opacity-50 hover:bg-forest-900 shrink-0"
+          >
+            {isSubmitting ? L('저장 중...', '保存中...', 'Saving...') : L('다음 할 일 지정', '次の行動を設定', 'Set Next Step')}
+          </button>
+        </div>
+      ) : kind === 'IDEA' ? (
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
           <input
             type="text"

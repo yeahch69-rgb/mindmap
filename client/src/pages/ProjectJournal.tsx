@@ -5,6 +5,8 @@ import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { Button } from '../components/common/Button';
 import { Modal } from '../components/common/Modal';
+import { TranslateButton } from '../components/common/TranslateButton';
+import { useContentTranslation } from '../hooks/useContentTranslation';
 import { loadFullWidthMap, setDocFullWidthPref, FullWidthMap } from '../utils/docWidthPrefs';
 import {
   BookMarked,
@@ -129,6 +131,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
 }) => {
   const { user } = useAuth();
   const { L, t } = useLanguage();
+  const tr = useContentTranslation();
 
   const [projects, setProjects] = useState<JournalProject[]>([]);
   const [inbox, setInbox] = useState<JournalInboxItem[]>([]);
@@ -1182,6 +1185,24 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     }
   };
 
+  const handleMindMapSetNextStep = async (
+    projectId: number,
+    nextAction: string,
+    nextActionDate: string | null
+  ) => {
+    try {
+      const nextActionText = nextAction.trim();
+      if (!nextActionText) return;
+      await api.patch(`/journal/projects/${projectId}`, {
+        next_action: nextActionText,
+        next_action_date: nextActionDate || null,
+      });
+      await refreshAfterIdeaChange(projectId);
+    } catch (err: any) {
+      alert(err.message || t('common.error'));
+    }
+  };
+
   const handleJumpFromTimelineToMindMap = (nodeKey: string) => {
     setDetailSubTab('MINDMAP');
     setLastMindMapTab('MINDMAP');
@@ -1487,7 +1508,11 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
             ) : (
               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-bold bg-indigo-50 text-indigo-800 border border-indigo-200">
                 <Users className="w-2.5 h-2.5" />
-                <span>{L('사내 공유', '社内共有', 'Shared')}</span>
+                <span>
+                  {p.partner_type === 'EXTERNAL'
+                    ? L('외부 협업', '外部協業', 'External Collab')
+                    : L('협업', '協業', 'Collab')}
+                </span>
               </span>
             )}
             {getTurnBadge(p.turn_state, p.active_turn_user_name || p.resolved_partner_name)}
@@ -1527,7 +1552,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
           />
           <div className="min-w-0 flex-1">
             <h3 className="font-bold text-sm text-charcoal-900 leading-snug break-words">
-              {p.title}
+              {tr.getText(`jproj-${p.id}`, 'title', p.title)}
             </h3>
             {p.resolved_partner_name && (
               <div className="text-[11px] font-semibold text-sky-800 mt-0.5">
@@ -1536,6 +1561,20 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               </div>
             )}
           </div>
+          <TranslateButton
+            size="xs"
+            visible={tr.shouldShowButton(p.title, p.next_action)}
+            translated={tr.isTranslated(`jproj-${p.id}`)}
+            loading={tr.isTranslating(`jproj-${p.id}`)}
+            error={tr.getError(`jproj-${p.id}`)}
+            onClick={(e) => {
+              e.stopPropagation();
+              void tr.toggleTranslate(`jproj-${p.id}`, {
+                title: p.title,
+                next_action: p.next_action || '',
+              }, 'journal');
+            }}
+          />
         </div>
 
         {/* Next Step or Missing Alert */}
@@ -1543,7 +1582,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
           <div className="px-2 py-1.5 rounded-lg bg-ivory-50 border border-ivory-200 text-xs flex items-start gap-1.5">
             <ArrowRight className="w-3.5 h-3.5 text-forest-700 shrink-0 mt-0.5" />
             <div className="min-w-0 flex-1">
-              <span className="font-bold text-charcoal-900 break-words">{p.next_action}</span>
+              <span className="font-bold text-charcoal-900 break-words">
+                {tr.getText(`jproj-${p.id}`, 'next_action', p.next_action)}
+              </span>
               {p.next_action_date && (
                 <span className={`ml-1.5 font-mono text-[11px] font-bold ${p.is_overdue_next_action ? 'text-rose-600' : 'text-charcoal-500'}`}>
                   ({p.next_action_date})
@@ -1680,8 +1721,18 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               {inbox.map(item => (
                 <div key={item.id} className="p-2 rounded-lg bg-amber-50/70 border border-amber-200 text-xs space-y-1.5">
                   <div className="flex items-start justify-between gap-2">
-                    <p className="font-semibold text-charcoal-900 break-words flex-1">{item.content}</p>
+                    <p className="font-semibold text-charcoal-900 break-words flex-1">
+                      {tr.getText(`jinbox-${item.id}`, 'content', item.content)}
+                    </p>
                     <div className="flex items-center gap-1 shrink-0">
+                      <TranslateButton
+                        size="xs"
+                        visible={tr.shouldShowButton(item.content)}
+                        translated={tr.isTranslated(`jinbox-${item.id}`)}
+                        loading={tr.isTranslating(`jinbox-${item.id}`)}
+                        error={tr.getError(`jinbox-${item.id}`)}
+                        onClick={() => tr.toggleTranslate(`jinbox-${item.id}`, { content: item.content }, 'journal')}
+                      />
                       <button
                         type="button"
                         onClick={() => {
@@ -1816,38 +1867,39 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       </div>
 
       {/* Filter & View Toolbar */}
-      <div className="bg-white p-2.5 sm:p-3 rounded-xl border border-ivory-300 shadow-2xs flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div className="flex flex-wrap items-center gap-1.5">
+      <div className="bg-white p-2 sm:p-2.5 lg:p-3 rounded-xl border border-ivory-300 shadow-2xs flex flex-col sm:flex-row sm:flex-nowrap sm:items-center sm:justify-between gap-1.5 sm:gap-2 text-xs">
+        <div className="flex items-center gap-1.5 flex-nowrap w-full sm:flex-1 sm:min-w-0">
           {/* Mode Filter */}
-          <div className="bg-ivory-100 p-0.5 rounded-lg border border-ivory-300 flex items-center font-bold">
+          <div className="bg-ivory-100 p-0.5 rounded-lg border border-ivory-300 flex items-center font-bold shrink-0">
             {(
               [
-                { id: 'ALL', label: L('전체', 'すべて', 'All') },
-                { id: 'SOLO', label: L('🔒 개인', '🔒 個人', '🔒 Solo') },
-                { id: 'COLLAB', label: L('🤝 협업', '🤝 協業', '🤝 Collab') },
+                { id: 'ALL', emoji: '', label: L('전체', 'すべて', 'All') },
+                { id: 'SOLO', emoji: '🔒', label: L('개인', '個人', 'Solo') },
+                { id: 'COLLAB', emoji: '🤝', label: L('협업', '協業', 'Collab') },
               ] as const
             ).map(m => (
               <button
                 key={m.id}
                 type="button"
                 onClick={() => setModeFilter(m.id)}
-                className={`px-2.5 py-1 rounded-md transition whitespace-nowrap ${
+                className={`px-2 md:px-2.5 py-1 rounded-md transition whitespace-nowrap ${
                   modeFilter === m.id ? 'bg-forest-800 text-white shadow-2xs' : 'text-charcoal-700'
                 }`}
               >
-                {m.label}
+                {m.emoji && <span className="hidden md:inline mr-1">{m.emoji}</span>}
+                <span>{m.label}</span>
               </button>
             ))}
           </div>
 
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 text-charcoal-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+          <div className="relative flex-1 min-w-0 lg:max-w-sm">
+            <Search className="w-3.5 h-3.5 text-charcoal-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={L('제목·의도·상대방 검색...', '検索...', 'Search...')}
-              className="pl-7 pr-2.5 py-1 bg-ivory-50 border border-ivory-300 rounded-lg text-xs font-medium w-40 sm:w-52"
+              className="w-full pl-7 pr-2.5 py-1 bg-ivory-50 border border-ivory-300 rounded-lg text-xs font-medium"
             />
           </div>
 
@@ -1855,43 +1907,44 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
             <button
               type="button"
               onClick={() => setTurnFilter('ALL')}
-              className="px-2 py-1 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 font-bold"
+              className="px-2 py-1 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 font-bold whitespace-nowrap shrink-0"
             >
-              {L('필터 해제', '解除', 'Reset')}
+              <span className="sm:hidden">{L('해제', '解除', 'Reset')}</span>
+              <span className="hidden sm:inline">{L('필터 해제', '解除', 'Reset')}</span>
             </button>
           )}
         </div>
 
         {/* View Mode Switcher */}
-        <div className="bg-ivory-100 p-0.5 rounded-lg border border-ivory-300 flex items-center font-bold">
+        <div className="w-full sm:w-auto bg-ivory-100 p-0.5 rounded-lg border border-ivory-300 grid grid-cols-3 sm:flex items-center font-bold shrink-0">
           <button
             type="button"
             onClick={() => setViewMode('BOARD')}
-            className={`px-2.5 py-1 rounded-md flex items-center gap-1 transition whitespace-nowrap ${
+            className={`px-1.5 sm:px-2 md:px-2.5 py-1 rounded-md flex items-center justify-center gap-1 transition whitespace-nowrap ${
               viewMode === 'BOARD' ? 'bg-forest-800 text-white shadow-2xs' : 'text-charcoal-700'
             }`}
           >
-            <LayoutGrid className="w-3.5 h-3.5" />
+            <LayoutGrid className="w-3.5 h-3.5 shrink-0" />
             <span>{L('턴 보드', 'ボード', 'Board')}</span>
           </button>
           <button
             type="button"
             onClick={() => setViewMode('PRIORITY')}
-            className={`px-2.5 py-1 rounded-md flex items-center gap-1 transition whitespace-nowrap ${
+            className={`px-1.5 sm:px-2 md:px-2.5 py-1 rounded-md flex items-center justify-center gap-1 transition whitespace-nowrap ${
               viewMode === 'PRIORITY' ? 'bg-forest-800 text-white shadow-2xs' : 'text-charcoal-700'
             }`}
           >
-            <ListOrdered className="w-3.5 h-3.5" />
+            <ListOrdered className="w-3.5 h-3.5 shrink-0" />
             <span>{L('방치·목록', '一覧', 'Priority')}</span>
           </button>
           <button
             type="button"
             onClick={() => setViewMode('VISUAL')}
-            className={`px-2.5 py-1 rounded-md flex items-center gap-1 transition whitespace-nowrap ${
+            className={`px-1.5 sm:px-2 md:px-2.5 py-1 rounded-md flex items-center justify-center gap-1 transition whitespace-nowrap ${
               viewMode === 'VISUAL' ? 'bg-forest-800 text-white shadow-2xs' : 'text-charcoal-700'
             }`}
           >
-            <BarChart3 className="w-3.5 h-3.5" />
+            <BarChart3 className="w-3.5 h-3.5 shrink-0" />
             <span>{L('시각화', '可視化', 'Visual')}</span>
           </button>
         </div>
@@ -1995,6 +2048,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               onEditEntry={handleMindMapEditEntry}
               onDeleteEntry={handleMindMapDeleteEntry}
               onPromoteEntryToNextStep={handleMindMapPromoteEntryToNextStep}
+              onSetNextStep={handleMindMapSetNextStep}
               onToggleRelatedIdea={handleMindMapToggleLink}
               onPromoteIdea={handleMindMapPromoteIdea}
               onUpdateIdeaStatus={handleMindMapUpdateIdeaStatus}
@@ -2021,6 +2075,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               onEditEntry={handleMindMapEditEntry}
               onDeleteEntry={handleMindMapDeleteEntry}
               onPromoteEntryToNextStep={handleMindMapPromoteEntryToNextStep}
+              onSetNextStep={handleMindMapSetNextStep}
               onPromoteIdea={handleMindMapPromoteIdea}
               onUpdateIdeaStatus={handleMindMapUpdateIdeaStatus}
               onDeleteIdea={handleMindMapDeleteIdea}
@@ -2152,7 +2207,31 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                 </div>
 
                 {detailProject && (
-                  <div className="flex items-center gap-1.5 shrink-0 ml-auto">
+                  <div className="flex items-center gap-1.5 shrink-0 ml-auto flex-wrap">
+                    <TranslateButton
+                      size="xs"
+                      visible={tr.shouldShowButton(
+                        detailProject.title,
+                        detailProject.intent_summary,
+                        detailProject.initial_intent_summary,
+                        detailProject.next_action
+                      )}
+                      translated={tr.isTranslated(`jproj-${detailProject.id}`)}
+                      loading={tr.isTranslating(`jproj-${detailProject.id}`)}
+                      error={tr.getError(`jproj-${detailProject.id}`)}
+                      onClick={() =>
+                        tr.toggleTranslate(
+                          `jproj-${detailProject.id}`,
+                          {
+                            title: detailProject.title,
+                            intent_summary: detailProject.intent_summary || '',
+                            initial_intent_summary: detailProject.initial_intent_summary || '',
+                            next_action: detailProject.next_action || '',
+                          },
+                          'journal'
+                        )
+                      }
+                    />
                     <button
                       type="button"
                       onClick={() => handleOpenParticipantsModal('STAKEHOLDERS')}
@@ -2191,7 +2270,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               </div>
 
               <h2 className="w-full text-lg sm:text-xl font-bold text-charcoal-900 break-words leading-snug">
-                {detailProject?.title || '...'}
+                {detailProject
+                  ? tr.getText(`jproj-${detailProject.id}`, 'title', detailProject.title)
+                  : '...'}
               </h2>
             </div>
 
@@ -2292,12 +2373,13 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                             </div>
                           ) : (
                             <p className="text-xs font-medium text-charcoal-900 whitespace-pre-wrap leading-relaxed">
-                              {detailProject.intent_summary ||
-                                L(
-                                  '아직 의도 메모가 없습니다. 수정 버튼을 눌러 배경/목표를 남겨두세요.',
-                                  'まだ意図メモがありません。編集から登録してください。',
-                                  'No intent memo yet. Click Edit to add.'
-                                )}
+                              {detailProject.intent_summary
+                                ? tr.getText(`jproj-${detailProject.id}`, 'intent_summary', detailProject.intent_summary)
+                                : L(
+                                    '아직 의도 메모가 없습니다. 수정 버튼을 눌러 배경/목표를 남겨두세요.',
+                                    'まだ意図メモがありません。編集から登録してください。',
+                                    'No intent memo yet. Click Edit to add.'
+                                  )}
                             </p>
                           )}
 
@@ -2308,7 +2390,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 <span>{L('최초 의도 · 왜 시작했나 (수정 전 원본 보존)', '当初の意図・始めた理由（原本保存）', 'Original Initial Intent (Preserved)')}</span>
                               </div>
                               <p className="text-charcoal-800 whitespace-pre-wrap leading-relaxed">
-                                {initialText}
+                                {tr.getText(`jproj-${detailProject.id}`, 'initial_intent_summary', initialText)}
                               </p>
                             </div>
                           )}
@@ -2582,7 +2664,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         </div>
                       ) : detailProject.next_action ? (
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-xs">
-                          <span className="font-bold text-charcoal-900 break-words leading-snug">{detailProject.next_action}</span>
+                          <span className="font-bold text-charcoal-900 break-words leading-snug">
+                            {tr.getText(`jproj-${detailProject.id}`, 'next_action', detailProject.next_action)}
+                          </span>
                           {detailProject.next_action_date && (
                             <span className="font-mono font-bold text-forest-800 bg-white px-2 py-0.5 rounded border border-forest-200 whitespace-nowrap shrink-0 self-start sm:self-auto">
                               <Calendar className="w-3 h-3 inline mr-1" />
@@ -2709,9 +2793,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 sourceType: 'PROJECT',
                                 sourceId: detailProject.id,
                                 projectId: detailProject.id,
-                                defaultTitle: detailProject.title,
-                                defaultContent: detailProject.intent_summary || detailProject.next_action || detailProject.title,
-                                defaultDate: detailProject.next_action_date,
+                                defaultTitle: '',
+                                defaultContent: '',
+                                defaultDate: null,
                                 initialDestination: 'thought',
                               })
                             }
@@ -2727,11 +2811,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 sourceType: 'PROJECT',
                                 sourceId: detailProject.id,
                                 projectId: detailProject.id,
-                                defaultTitle: detailProject.next_action
-                                  ? `${detailProject.title} — ${detailProject.next_action}`
-                                  : detailProject.title,
-                                defaultContent: detailProject.intent_summary || '',
-                                defaultDate: detailProject.next_action_date,
+                                defaultTitle: '',
+                                defaultContent: '',
+                                defaultDate: null,
                                 initialDestination: 'calendar',
                               })
                             }
@@ -3273,7 +3355,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                         : idea.status === 'ARCHIVED'
                                         ? 'bg-stone-50 border-stone-200 opacity-75'
                                         : 'bg-yellow-50/50 border-amber-300'
-                                    } ${highlightTimelineKey === `idea-${idea.id}` ? 'ring-2 ring-amber-500 shadow-md' : ''}`}
+                                    } ${highlightTimelineKey === `idea-${idea.id}` ? 'ring-2 ring-inset ring-amber-500 border-amber-500 shadow-md' : ''}`}
                                   >
                                     <div className="flex items-center justify-between gap-1.5 min-w-0">
                                       <div className="flex items-center gap-1.5 min-w-0 flex-nowrap">
@@ -3293,7 +3375,24 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                         })()}
                                       </div>
 
-                                      <div className="flex items-center gap-0.5 shrink-0">
+                                      <div className="flex items-center gap-0.5 shrink-0 flex-wrap justify-end">
+                                        <TranslateButton
+                                          size="xs"
+                                          visible={tr.shouldShowButton(idea.title, idea.note)}
+                                          translated={tr.isTranslated(`jidea-${idea.id}`)}
+                                          loading={tr.isTranslating(`jidea-${idea.id}`)}
+                                          error={tr.getError(`jidea-${idea.id}`)}
+                                          onClick={() =>
+                                            tr.toggleTranslate(
+                                              `jidea-${idea.id}`,
+                                              {
+                                                title: idea.title,
+                                                note: idea.note || '',
+                                              },
+                                              'journal'
+                                            )
+                                          }
+                                        />
                                         <button
                                           type="button"
                                           onClick={() => handleJumpFromTimelineToMindMap(`idea-${idea.id}`)}
@@ -3426,9 +3525,13 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                     )}
 
                                     <div className="space-y-0.5">
-                                      <p className="font-bold text-charcoal-900">{idea.title}</p>
+                                      <p className="font-bold text-charcoal-900">
+                                        {tr.getText(`jidea-${idea.id}`, 'title', idea.title)}
+                                      </p>
                                       {idea.note && (
-                                        <p className="text-charcoal-700 whitespace-pre-wrap leading-relaxed">{idea.note}</p>
+                                        <p className="text-charcoal-700 whitespace-pre-wrap leading-relaxed">
+                                          {tr.getText(`jidea-${idea.id}`, 'note', idea.note)}
+                                        </p>
                                       )}
                                     </div>
 
@@ -3511,7 +3614,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 <div key={`tl-entry-${en.id}`} id={`tl-node-entry-${en.id}`} className={wrapperStyle}>
                                   <div
                                     className={`p-2.5 sm:p-3 border space-y-1.5 text-xs transition ${cardStyle} ${
-                                      highlightTimelineKey === `entry-${en.id}` ? 'ring-2 ring-amber-500 shadow-md' : ''
+                                      highlightTimelineKey === `entry-${en.id}` ? 'ring-2 ring-inset ring-amber-500 border-amber-500 shadow-md' : ''
                                     }`}
                                   >
                                   <div className="flex items-center justify-between gap-1.5 min-w-0">
@@ -3532,7 +3635,28 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                       })()}
                                     </div>
 
-                                    <div className="flex items-center gap-0.5 shrink-0">
+                                    <div className="flex items-center gap-0.5 shrink-0 flex-wrap justify-end">
+                                      <TranslateButton
+                                        size="xs"
+                                        visible={tr.shouldShowButton(
+                                          en.content,
+                                          en.completed_target_summary,
+                                          ...(en.revision_requests || []).map((rr) => rr.reason)
+                                        )}
+                                        translated={tr.isTranslated(`jentry-${en.id}`)}
+                                        loading={tr.isTranslating(`jentry-${en.id}`)}
+                                        error={tr.getError(`jentry-${en.id}`)}
+                                        onClick={() => {
+                                          const fields: Record<string, string> = {
+                                            content: en.content,
+                                            completed_target_summary: en.completed_target_summary || '',
+                                          };
+                                          (en.revision_requests || []).forEach((rr) => {
+                                            fields[`rev_${rr.id}`] = rr.reason;
+                                          });
+                                          void tr.toggleTranslate(`jentry-${en.id}`, fields, 'journal');
+                                        }}
+                                      />
                                       <button
                                         type="button"
                                         onClick={() => handleJumpFromTimelineToMindMap(`entry-${en.id}`)}
@@ -3677,14 +3801,18 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                       <span className="font-bold text-emerald-800 shrink-0">
                                         {L('↳ 완료 대상', '↳ 完了対象', '↳ Completed')} [{targetKindLabel}]:
                                       </span>
-                                      <span className="text-charcoal-700 truncate font-medium">
-                                        {en.completed_target_summary}
+                                      <span
+                                        className={`text-charcoal-700 font-medium ${
+                                          tr.isTranslated(`jentry-${en.id}`) ? 'whitespace-normal break-words' : 'truncate'
+                                        }`}
+                                      >
+                                        {tr.getText(`jentry-${en.id}`, 'completed_target_summary', en.completed_target_summary)}
                                       </span>
                                     </div>
                                   )}
 
                                   <p className="text-charcoal-900 whitespace-pre-wrap leading-relaxed font-medium">
-                                    {en.content}
+                                    {tr.getText(`jentry-${en.id}`, 'content', en.content)}
                                   </p>
 
                                   {revisionFormEntryId === en.id && (
@@ -3733,7 +3861,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                             <span className="font-bold">
                                               📝 {rr.requester_name || L('참여자', 'メンバー', 'Member')} {L('수정 요청', '修正依頼', 'Revision Request')}:
                                             </span>{' '}
-                                            {rr.reason}
+                                            {tr.getText(`jentry-${en.id}`, `rev_${rr.id}`, rr.reason)}
                                           </div>
                                           <div className="flex items-center gap-1 shrink-0">
                                             {Number(en.author_id) === Number(user?.id) && (
@@ -3812,6 +3940,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         onEditEntry={handleMindMapEditEntry}
                         onDeleteEntry={handleMindMapDeleteEntry}
                         onPromoteEntryToNextStep={handleMindMapPromoteEntryToNextStep}
+              onSetNextStep={handleMindMapSetNextStep}
                         onToggleRelatedIdea={handleMindMapToggleLink}
                         onPromoteIdea={handleMindMapPromoteIdea}
                         onUpdateIdeaStatus={handleMindMapUpdateIdeaStatus}
@@ -3835,6 +3964,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         onEditEntry={handleMindMapEditEntry}
                         onDeleteEntry={handleMindMapDeleteEntry}
                         onPromoteEntryToNextStep={handleMindMapPromoteEntryToNextStep}
+              onSetNextStep={handleMindMapSetNextStep}
                         onPromoteIdea={handleMindMapPromoteIdea}
                         onUpdateIdeaStatus={handleMindMapUpdateIdeaStatus}
                         onDeleteIdea={handleMindMapDeleteIdea}
@@ -3906,7 +4036,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                 autoFocus
                 value={joinCodeInput}
                 onChange={(e) => setJoinCodeInput(e.target.value)}
-                placeholder={L('예: http://localhost:5174/?invite=... 또는 코드', '例: 招待URL または コード', 'Paste invite URL or token...')}
+                placeholder={L('초대 링크 또는 코드를 입력하세요', '招待URLまたはコードを入力', 'Paste invite URL or token...')}
                 className="w-full p-2.5 bg-ivory-50 border border-ivory-300 rounded-lg font-mono text-charcoal-900"
               />
               {joinError && <p className="text-rose-600 font-bold">{joinError}</p>}
@@ -3928,7 +4058,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                 value={formTitle}
                 onChange={(e) => setFormTitle(e.target.value)}
                 required
-                placeholder={L('예: 카트 노후화 교체 검토, 개인 앱 사이드프로젝트 등', '例: カート入替検討、個人開発プロジェクト等', 'e.g., Cart replacement plan, personal side project')}
+                placeholder={L('프로젝트 이름을 입력하세요', 'プロジェクト名を入力してください', 'Enter project name')}
                 className="w-full p-2.5 bg-ivory-50 border border-ivory-300 rounded-lg font-bold text-charcoal-900"
               />
             </div>
@@ -4000,7 +4130,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                     type="text"
                     value={formPartnerName}
                     onChange={(e) => setFormPartnerName(e.target.value)}
-                    placeholder={L('상대방 이름 또는 업체명 (예: 김변호사, OO디자인)', '相手名・会社名', 'Partner name or company')}
+                    placeholder={L('상대방 이름 또는 업체명', '相手名・会社名', 'Partner name or company')}
                     className="w-full p-2 bg-white border border-sky-300 rounded-lg font-bold"
                   />
                 ) : (
@@ -4035,7 +4165,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                   type="text"
                   value={formNextAction}
                   onChange={(e) => setFormNextAction(e.target.value)}
-                  placeholder={L('예: 금요일까지 시안 확인하기', '例: 金曜までに案を確認', 'e.g., Review draft by Friday')}
+                  placeholder={L('다음에 해야 할 일을 입력하세요', '次に行うアクションを入力してください', 'Enter next step')}
                   className="w-full p-2.5 bg-ivory-50 border border-ivory-300 rounded-lg font-bold"
                 />
               </div>
@@ -4157,14 +4287,14 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                       type="text"
                       value={newParticipantName}
                       onChange={(e) => setNewParticipantName(e.target.value)}
-                      placeholder={L('이름 / 호칭 (예: 김변호사, 장모님) *', '氏名・呼称 (例: 田中弁護士) *', 'Name / Label *')}
+                      placeholder={L('이름 / 호칭 *', '氏名・呼称 *', 'Name / Label *')}
                       className="p-2 bg-white border border-ivory-300 rounded-lg font-bold text-charcoal-900"
                     />
                     <input
                       type="text"
                       value={newParticipantRole}
                       onChange={(e) => setNewParticipantRole(e.target.value)}
-                      placeholder={L('역할 / 관계 (선택, 예: 법률대리인)', '役割・関係 (任意)', 'Role (optional)')}
+                      placeholder={L('역할 / 관계 (선택)', '役割・関係 (任意)', 'Role (optional)')}
                       className="p-2 bg-white border border-ivory-300 rounded-lg text-charcoal-800"
                     />
                   </div>

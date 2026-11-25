@@ -1,12 +1,13 @@
 <!doctype html>
-<html lang="ko">
+<html lang="en" translate="no" class="notranslate">
   <head>
     <meta charset="UTF-8" />
+    <meta name="google" content="notranslate" />
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
-    <title>프로젝트 마인드맵 (Project Mindmap)</title>
+    <title>Project Mindmap</title>
 
     <!-- PWA & Mobile Web App Meta -->
     <link rel="manifest" href="/manifest.json?v=2" />
@@ -39,6 +40,26 @@
     />
     <script>
       try {
+        var savedLang = localStorage.getItem('pj_language');
+        var initLang = (savedLang === 'ko' || savedLang === 'ja' || savedLang === 'en') ? savedLang : '';
+        if (!initLang) {
+          var navLangs = (navigator.languages && navigator.languages.length) ? navigator.languages : (navigator.language ? [navigator.language] : []);
+          for (var i = 0; i < navLangs.length; i++) {
+            var code = String(navLangs[i] || '').toLowerCase();
+            if (code.indexOf('ja') === 0) { initLang = 'ja'; break; }
+            if (code.indexOf('ko') === 0) { initLang = 'ko'; break; }
+            if (code.indexOf('en') === 0) { initLang = 'en'; break; }
+          }
+          if (!initLang) initLang = 'en';
+        }
+        document.documentElement.lang = initLang;
+        document.title =
+          initLang === 'ja'
+            ? 'プロジェクトマインドマップ (Project Mindmap)'
+            : initLang === 'ko'
+              ? '프로젝트 마인드맵 (Project Mindmap)'
+              : 'Project Mindmap';
+
         var mode = window.innerWidth < 1024 ? 'mobile' : 'desktop';
         var key = mode === 'mobile' ? 'pm_font_percent_mobile' : 'pm_font_percent_desktop';
         var saved = localStorage.getItem(key);

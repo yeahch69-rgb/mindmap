@@ -35,6 +35,8 @@ import {
 import { getJstTodayStr } from '../../utils/dateTime';
 import { Button } from '../common/Button';
 import { Modal } from '../common/Modal';
+import { TranslateButton } from '../common/TranslateButton';
+import { useContentTranslation } from '../../hooks/useContentTranslation';
 import { EventEditorModal } from './EventEditorModal';
 import { EventDetailChatModal } from './EventDetailChatModal';
 import { MobileDayBottomSheet } from './MobileDayBottomSheet';
@@ -335,6 +337,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
   onConsumeInitialFocus,
 }) => {
   const { L, language } = useLanguage();
+  const translator = useContentTranslation();
   const todayStr = useMemo(() => getJstTodayStr(), []);
   const todayParsed = useMemo(() => parseYmd(todayStr), [todayStr]);
   const isCoarsePointer = useMemo(
@@ -1653,6 +1656,12 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
                 const ev = inst.event;
                 const isProposed = ev.event_status === 'PROPOSED';
                 const okVotes = ev.votes.filter((v) => v.vote === 'AVAILABLE').length;
+                const cardKey = `cal-ev-${ev.id}`;
+                const cardTranslated = translator.isTranslated(cardKey);
+                const showCardTrans = translator.shouldShowButton(ev.title, ev.location, ev.description);
+                const dispTitle = translator.getText(cardKey, 'title', ev.title);
+                const dispLocation = translator.getText(cardKey, 'location', ev.location);
+                const dispDesc = translator.getText(cardKey, 'description', ev.description);
                 return (
                   <div
                     key={inst.instanceKey}
@@ -1680,7 +1689,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
                                 {L('제안', '提案', 'Prop')}
                               </span>
                             )}
-                            <span className="break-words">{ev.title}</span>
+                            <span className="break-words">{dispTitle}</span>
                           </div>
                           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition shrink-0">
                             <button
@@ -1721,18 +1730,38 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
                             </span>
                           )}
                           {ev.location && (
-                            <span className="text-charcoal-600 truncate max-w-[200px]">📍 {ev.location}</span>
+                            <span className={`text-charcoal-600 ${cardTranslated ? 'break-words' : 'truncate max-w-[200px]'}`}>
+                              📍 {dispLocation}
+                            </span>
                           )}
                           {ev.recurrence_type !== 'NONE' && <Repeat className="w-3 h-3 text-forest-700" />}
                         </div>
 
                         {ev.description && (
-                          <p className="text-[11px] text-charcoal-600 line-clamp-2 whitespace-pre-wrap leading-relaxed">
-                            {ev.description}
+                          <p
+                            className={`text-[11px] text-charcoal-600 whitespace-pre-wrap leading-relaxed ${
+                              cardTranslated ? '' : 'line-clamp-2'
+                            }`}
+                          >
+                            {dispDesc}
                           </p>
                         )}
 
-                        <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                        <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                          <TranslateButton
+                            visible={showCardTrans}
+                            translated={cardTranslated}
+                            loading={translator.isTranslating(cardKey)}
+                            error={translator.getError(cardKey)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void translator.toggleTranslate(
+                                cardKey,
+                                { title: ev.title, location: ev.location, description: ev.description },
+                                'shared-calendar-event'
+                              );
+                            }}
+                          />
                           {ev.comment_count > 0 && (
                             <span className="inline-flex items-center gap-1 text-[10px] font-bold text-sky-700 bg-sky-50 px-1.5 py-0.5 rounded-full">
                               <MessageSquare className="w-2.5 h-2.5" />

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AlertCircle,
   Bell,
   BookMarked,
   Calendar,
@@ -30,6 +31,8 @@ import {
 import { formatShortDate } from '../../utils/calendarUtils';
 import { formatJstTime, getJstDateKey } from '../../utils/dateTime';
 import { Button } from '../common/Button';
+import { TranslateButton } from '../common/TranslateButton';
+import { useContentTranslation } from '../../hooks/useContentTranslation';
 import { ProposeDateModal } from './ProposeDateModal';
 import { SendToMindmapModal } from './SendToMindmapModal';
 import { ThoughtDetailModal } from './ThoughtDetailModal';
@@ -65,6 +68,7 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
 }) => {
   const { user } = useAuth();
   const { L } = useLanguage();
+  const translator = useContentTranslation();
 
   const [thoughts, setThoughts] = useState<SharedThought[]>([]);
   const [loading, setLoading] = useState(false);
@@ -73,11 +77,11 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
   const [quickContent, setQuickContent] = useState('');
   const [quickTitle, setQuickTitle] = useState('');
   const [quickTagsText, setQuickTagsText] = useState('');
-  const [composerExpanded, setComposerExpanded] = useState(false);
+  const [quickImportant, setQuickImportant] = useState(false);
   const [posting, setPosting] = useState(false);
 
   // Filters
-  const [statusFilter, setStatusFilter] = useState<'ALL' | ThoughtStatus>('ALL');
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'IMPORTANT' | ThoughtStatus>('ALL');
   const [selectedTag, setSelectedTag] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -141,6 +145,8 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
     return thoughts.filter((t) => {
       if (statusFilter === 'ALL') {
         if (t.status === 'ARCHIVED') return false;
+      } else if (statusFilter === 'IMPORTANT') {
+        if (!t.is_important || t.status === 'ARCHIVED') return false;
       } else if (t.status !== statusFilter) {
         return false;
       }
@@ -158,6 +164,7 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
     if (!activeSpace || !quickContent.trim() || posting) return;
     try {
       setPosting(true);
+      const postedImportant = quickImportant;
       const tags = quickTagsText
         .split(/[,\s]+/)
         .map((s) => s.replace(/^#/, '').trim())
@@ -166,14 +173,19 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
         title: quickTitle.trim(),
         content: quickContent.trim(),
         tags,
+        is_important: postedImportant,
       });
       setQuickContent('');
       setQuickTitle('');
       setQuickTagsText('');
-      setComposerExpanded(false);
+      setQuickImportant(false);
       await loadThoughts();
       onSpacesNeedRefresh();
-      showToast(L('새 생각을 스페이스에 공유했습니다!', '新しい思考を共有しました！', 'Shared your thought!'));
+      showToast(
+        postedImportant
+          ? L('중요 메모를 스페이스에 공유했습니다!', '重要メモを共有しました！', 'Shared your important note!')
+          : L('새 생각을 스페이스에 공유했습니다!', '新しい思考を共有しました！', 'Shared your thought!')
+      );
     } finally {
       setPosting(false);
     }
@@ -266,6 +278,7 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
 
   const counts = {
     ALL: thoughts.filter((t) => t.status !== 'ARCHIVED').length,
+    IMPORTANT: thoughts.filter((t) => t.is_important && t.status !== 'ARCHIVED').length,
     NEW: thoughts.filter((t) => t.status === 'NEW').length,
     DISCUSSING: thoughts.filter((t) => t.status === 'DISCUSSING').length,
     PROPOSED: thoughts.filter((t) => t.status === 'PROPOSED').length,
@@ -340,22 +353,23 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
       {/* 1-Second Quick Thought Drop Composer */}
       <form
         onSubmit={handleQuickPost}
-        className="bg-white rounded-2xl border-2 border-forest-200 focus-within:border-forest-600 shadow-xs p-3.5 space-y-2.5 transition"
+        className={`bg-white rounded-2xl border-2 shadow-xs p-3.5 space-y-2.5 transition ${
+          quickImportant
+            ? 'border-rose-300 focus-within:border-rose-500'
+            : 'border-forest-200 focus-within:border-forest-600'
+        }`}
       >
-        {composerExpanded && (
-          <input
-            type="text"
-            value={quickTitle}
-            onChange={(e) => setQuickTitle(e.target.value)}
-            placeholder={L('제목 (비워두어도 괜찮아요)', 'タイトル（省略可）', 'Optional title...')}
-            className="w-full px-3 py-1.5 text-xs font-bold rounded-lg bg-ivory-50 border border-ivory-200 focus:outline-none focus:ring-2 focus:ring-forest-500"
-          />
-        )}
+        <input
+          type="text"
+          value={quickTitle}
+          onChange={(e) => setQuickTitle(e.target.value)}
+          placeholder={L('제목 (비워두어도 괜찮아요)', 'タイトル（省略可）', 'Optional title...')}
+          className="w-full px-3 py-1.5 text-xs font-bold rounded-lg bg-ivory-50 border border-ivory-200 focus:outline-none focus:ring-2 focus:ring-forest-500"
+        />
 
         <textarea
-          rows={composerExpanded ? 3 : 2}
+          rows={2}
           value={quickContent}
-          onFocus={() => setComposerExpanded(true)}
           onChange={(e) => setQuickContent(e.target.value)}
           onKeyDown={(e) => {
             if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -372,40 +386,37 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
         />
 
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 flex-1 min-w-[180px]">
-            {composerExpanded && (
-              <div className="relative flex-1 max-w-xs">
-                <Hash className="w-3.5 h-3.5 text-charcoal-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={quickTagsText}
-                  onChange={(e) => setQuickTagsText(e.target.value)}
-                  placeholder={L('태그 (예: 여행, 아이디어)', 'タグ（カンマ区切り）', 'tags (comma separated)')}
-                  className="w-full pl-7 pr-2.5 py-1.5 text-xs rounded-lg bg-ivory-50 border border-ivory-200 focus:outline-none focus:ring-1 focus:ring-forest-500"
-                />
-              </div>
-            )}
-            {!composerExpanded && (
-              <span className="text-[11px] text-charcoal-400">
-                {L(
-                  `현재 ${activeSpace.members.length}명과 실시간 공유됩니다`,
-                  `現在 ${activeSpace.members.length}人とリアルタイム共有中`,
-                  `Shared live with ${activeSpace.members.length} member(s)`
-                )}
-              </span>
-            )}
+          <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[200px]">
+            <div className="relative flex-1 min-w-[150px] max-w-xs">
+              <Hash className="w-3.5 h-3.5 text-charcoal-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={quickTagsText}
+                onChange={(e) => setQuickTagsText(e.target.value)}
+                placeholder={L('태그 (쉼표로 구분)', 'タグ（カンマ区切り）', 'tags (comma separated)')}
+                className="w-full pl-7 pr-2.5 py-1.5 text-xs rounded-lg bg-ivory-50 border border-ivory-200 focus:outline-none focus:ring-1 focus:ring-forest-500"
+              />
+            </div>
+
+            <label
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-bold cursor-pointer select-none transition ${
+                quickImportant
+                  ? 'bg-rose-50 border-rose-300 text-rose-800'
+                  : 'bg-ivory-50 border-ivory-200 text-charcoal-600 hover:bg-rose-50/50 hover:border-rose-200'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={quickImportant}
+                onChange={(e) => setQuickImportant(e.target.checked)}
+                className="w-3.5 h-3.5 rounded accent-rose-600 cursor-pointer"
+              />
+              <AlertCircle className={`w-3.5 h-3.5 shrink-0 ${quickImportant ? 'text-rose-600' : 'text-charcoal-400'}`} />
+              <span>{L('중요 메모', '重要メモ', 'Important')}</span>
+            </label>
           </div>
 
           <div className="flex items-center gap-1.5">
-            {composerExpanded && !quickContent.trim() && (
-              <button
-                type="button"
-                onClick={() => setComposerExpanded(false)}
-                className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-charcoal-500 hover:bg-ivory-100"
-              >
-                {L('접기', '閉じる', 'Collapse')}
-              </button>
-            )}
             <Button type="submit" size="sm" disabled={posting || !quickContent.trim()}>
               <Send className="w-3.5 h-3.5 mr-1" />
               {L('생각 등록', 'アイデア登録', 'Post Thought')}
@@ -420,28 +431,47 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
           {(
             [
               { id: 'ALL', label: L('전체', 'すべて', 'All'), count: counts.ALL },
+              { id: 'IMPORTANT', label: L('❗ 중요 메모', '❗ 重要メモ', '❗ Important'), count: counts.IMPORTANT },
               { id: 'NEW', label: L('✨ 새 생각', '✨ 新着', '✨ New'), count: counts.NEW },
               { id: 'DISCUSSING', label: L('💬 논의중', '💬 議論中', '💬 Discussing'), count: counts.DISCUSSING },
               { id: 'PROPOSED', label: L('📅 일정 제안됨', '📅 日程提案', '📅 Proposed'), count: counts.PROPOSED },
               { id: 'SCHEDULED', label: L('✅ 확정됨', '✅ 確定済', '✅ Scheduled'), count: counts.SCHEDULED },
             ] as const
-          ).map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setStatusFilter(tab.id)}
-              className={`px-2.5 py-1 rounded-full text-xs font-bold border transition inline-flex items-center gap-1 ${
-                statusFilter === tab.id
-                  ? 'bg-forest-800 text-white border-forest-900 shadow-2xs'
-                  : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-50'
-              }`}
-            >
-              <span>{tab.label}</span>
-              <span className={`text-[10px] ${statusFilter === tab.id ? 'text-forest-200' : 'text-charcoal-400'}`}>
-                {tab.count}
-              </span>
-            </button>
-          ))}
+          ).map((tab) => {
+            const isActive = statusFilter === tab.id;
+            const isImportantTab = tab.id === 'IMPORTANT';
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setStatusFilter(tab.id)}
+                className={`px-2.5 py-1 rounded-full text-xs font-bold border transition inline-flex items-center gap-1 ${
+                  isActive
+                    ? isImportantTab
+                      ? 'bg-rose-700 text-white border-rose-800 shadow-2xs'
+                      : 'bg-forest-800 text-white border-forest-900 shadow-2xs'
+                    : isImportantTab
+                      ? 'bg-rose-50/70 text-rose-800 border-rose-200 hover:bg-rose-100/70'
+                      : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-50'
+                }`}
+              >
+                <span>{tab.label}</span>
+                <span
+                  className={`text-[10px] ${
+                    isActive
+                      ? isImportantTab
+                        ? 'text-rose-200'
+                        : 'text-forest-200'
+                      : isImportantTab
+                        ? 'text-rose-500'
+                        : 'text-charcoal-400'
+                  }`}
+                >
+                  {tab.count}
+                </span>
+              </button>
+            );
+          })}
         </div>
 
         <div className="relative w-full sm:w-56">
@@ -492,16 +522,28 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
         </div>
       ) : filteredThoughts.length === 0 ? (
         <div className="bg-white rounded-2xl border border-dashed border-ivory-300 py-14 px-6 text-center space-y-2">
-          <Lightbulb className="w-8 h-8 text-amber-500 mx-auto" />
+          {statusFilter === 'IMPORTANT' ? (
+            <AlertCircle className="w-8 h-8 text-rose-500 mx-auto" />
+          ) : (
+            <Lightbulb className="w-8 h-8 text-amber-500 mx-auto" />
+          )}
           <div className="text-sm font-bold text-charcoal-800">
-            {L('아직 올려진 생각이 없습니다', 'まだ共有されたアイデアはありません', 'No shared thoughts yet')}
+            {statusFilter === 'IMPORTANT'
+              ? L('아직 등록된 중요 메모가 없습니다', '重要メモはまだありません', 'No important notes yet')
+              : L('아직 올려진 생각이 없습니다', 'まだ共有されたアイデアはありません', 'No shared thoughts yet')}
           </div>
           <p className="text-xs text-charcoal-500 max-w-md mx-auto">
-            {L(
-              '위 입력창에 머릿속 아이디어를 편하게 툭 던져보세요. 멤버들이 [좋다/더 생각해본다/별로다] 피드백을 남기고, 수정 제안이나 캘린더 날짜 제안까지 바로 이어갈 수 있습니다.',
-              '上の入力欄にアイデアを気軽に投稿してみてください。メンバー同士でリアクションや修正提案、日程提案までスムーズに連携できます。',
-              'Drop your first thought above. Members can react, propose edits/additions, and link dates directly to the shared calendar.'
-            )}
+            {statusFilter === 'IMPORTANT'
+              ? L(
+                  '위 입력창에서 [중요 메모]를 체크하고 등록하거나, 기존 메모의 상세 화면에서 중요 메모로 지정할 수 있습니다.',
+                  '上の入力欄で「重要メモ」にチェックして投稿するか、既存メモの詳細画面から重要メモに設定できます。',
+                  'Check "Important" above when posting, or toggle it inside any existing note.'
+                )
+              : L(
+                  '위 입력창에 머릿속 아이디어를 편하게 툭 던져보세요. 멤버들이 [좋다/더 생각해본다/별로다] 피드백을 남기고, 수정 제안이나 캘린더 날짜 제안까지 바로 이어갈 수 있습니다.',
+                  '上の入力欄にアイデアを気軽に投稿してみてください。メンバー同士でリアクションや修正提案、日程提案までスムーズに連携できます。',
+                  'Drop your first thought above. Members can react, propose edits/additions, and link dates directly to the shared calendar.'
+                )}
           </p>
         </div>
       ) : (
@@ -513,6 +555,12 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
             const bad = t.reactions.filter((r) => r.stance === 'BAD');
             const myStance = t.reactions.find((r) => r.user_id === user?.id)?.stance || null;
 
+            const cardKey = `thought-${t.id}`;
+            const cardTranslated = translator.isTranslated(cardKey);
+            const showCardTrans = translator.shouldShowButton(t.title, t.content);
+            const dispTitle = translator.getText(cardKey, 'title', t.title);
+            const dispContent = translator.getText(cardKey, 'content', t.content);
+
             return (
               <article
                 key={t.id}
@@ -520,17 +568,30 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
                   setDetailInitialEditMode(false);
                   setDetailThoughtId(t.id);
                 }}
-                className={`bg-white rounded-2xl border p-4 flex flex-col justify-between gap-3 cursor-pointer transition hover:shadow-md hover:border-forest-400 ${
-                  t.is_pinned ? 'border-amber-300 ring-1 ring-amber-200/70' : 'border-ivory-300'
+                className={`rounded-2xl border p-4 flex flex-col justify-between gap-3 cursor-pointer transition hover:shadow-md ${
+                  t.is_important && t.is_pinned
+                    ? 'bg-rose-50/25 border-rose-300 ring-1 ring-amber-300/80 hover:border-rose-400'
+                    : t.is_important
+                      ? 'bg-rose-50/25 border-rose-300 hover:border-rose-400'
+                      : t.is_pinned
+                        ? 'bg-white border-amber-300 ring-1 ring-amber-200/70 hover:border-forest-400'
+                        : 'bg-white border-ivory-300 hover:border-forest-400'
                 }`}
               >
                 <div className="space-y-2.5">
                   {/* Card Header */}
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-1.5 min-w-0">
-                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${st.cls}`}>
-                        {st.label}
-                      </span>
+                      {t.is_important ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-rose-100 text-rose-900 border-rose-300">
+                          <AlertCircle className="w-2.5 h-2.5 text-rose-600 shrink-0" />
+                          {L('중요 메모', '重要メモ', 'Important')}
+                        </span>
+                      ) : (
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${st.cls}`}>
+                          {st.label}
+                        </span>
+                      )}
                       {t.revision_count > 0 && (
                         <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-800 border border-violet-200 text-[10px] font-bold">
                           <History className="w-2.5 h-2.5" />
@@ -540,6 +601,20 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
                       <span className="text-[10px] text-charcoal-400">
                         {t.author_name} · {getJstDateKey(t.created_at).slice(5)} {formatJstTime(t.created_at)}
                       </span>
+                      <TranslateButton
+                        visible={showCardTrans}
+                        translated={cardTranslated}
+                        loading={translator.isTranslating(cardKey)}
+                        error={translator.getError(cardKey)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void translator.toggleTranslate(
+                            cardKey,
+                            { title: t.title, content: t.content },
+                            'shared-thought'
+                          );
+                        }}
+                      />
                     </div>
 
                     <div className="flex items-center gap-0.5 shrink-0">
@@ -579,9 +654,13 @@ export const SharedThoughtsPage: React.FC<SharedThoughtsPageProps> = ({
 
                   {/* Title & Content */}
                   <div className="space-y-1">
-                    {t.title && <h3 className="text-sm font-bold text-charcoal-900 leading-snug">{t.title}</h3>}
-                    <p className="text-xs text-charcoal-700 whitespace-pre-wrap line-clamp-4 leading-relaxed">
-                      {t.content}
+                    {t.title && <h3 className="text-sm font-bold text-charcoal-900 leading-snug">{dispTitle}</h3>}
+                    <p
+                      className={`text-xs text-charcoal-700 whitespace-pre-wrap leading-relaxed ${
+                        cardTranslated ? '' : 'line-clamp-4'
+                      }`}
+                    >
+                      {dispContent}
                     </p>
                   </div>
 

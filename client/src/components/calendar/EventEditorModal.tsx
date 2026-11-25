@@ -10,6 +10,8 @@ import {
 } from '../../types/spaces';
 import { Modal } from '../common/Modal';
 import { Button } from '../common/Button';
+import { TranslateButton } from '../common/TranslateButton';
+import { useContentTranslation } from '../../hooks/useContentTranslation';
 import { EventColorControls } from './EventColorControls';
 
 interface EventEditorModalProps {
@@ -30,6 +32,7 @@ export const EventEditorModal: React.FC<EventEditorModalProps> = ({
   onSaved,
 }) => {
   const { L } = useLanguage();
+  const translator = useContentTranslation();
 
   const defaultLabel = space.labels[0] || { key: 'emerald', color: '#1B4D3E', name: '기본 일정' };
 
@@ -167,6 +170,52 @@ export const EventEditorModal: React.FC<EventEditorModalProps> = ({
             {error}
           </div>
         )}
+
+        {/* Non-destructive Translation Preview when Editing */}
+        {editingEvent && (() => {
+          const editPreviewId = `cal-ev-edit-${editingEvent.id}`;
+          const canTranslatePreview = translator.shouldShowButton(title, location, description);
+          const previewTranslated = translator.isTranslated(editPreviewId);
+          if (!canTranslatePreview) return null;
+          return (
+            <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold text-emerald-900">
+                  {L('원문 입력을 덮어쓰지 않고 번역 미리보기', '原文を保持したまま翻訳プレビュー', 'Non-destructive translation preview')}
+                </span>
+                <TranslateButton
+                  visible={canTranslatePreview}
+                  translated={previewTranslated}
+                  loading={translator.isTranslating(editPreviewId)}
+                  error={translator.getError(editPreviewId)}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    void translator.toggleTranslate(
+                      editPreviewId,
+                      { title, location, description },
+                      'shared-calendar-event-edit'
+                    );
+                  }}
+                />
+              </div>
+              {previewTranslated && (
+                <div className="p-2.5 rounded-lg bg-white border border-emerald-200 text-xs space-y-1 text-charcoal-800">
+                  <div className="font-bold">{translator.getText(editPreviewId, 'title', title)}</div>
+                  {location && (
+                    <div className="text-[11px] text-charcoal-600">
+                      📍 {translator.getText(editPreviewId, 'location', location)}
+                    </div>
+                  )}
+                  {description && (
+                    <div className="whitespace-pre-wrap text-charcoal-700 pt-1 border-t border-ivory-200">
+                      {translator.getText(editPreviewId, 'description', description)}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Title */}
         <div>
@@ -397,7 +446,7 @@ export const EventEditorModal: React.FC<EventEditorModalProps> = ({
               type="text"
               value={location}
               onChange={(e) => setLocation(e.target.value)}
-              placeholder={L('예: 강남역 카페, 온라인 Zoom', '例: 会議室A / Zoom', 'Location')}
+              placeholder={L('장소를 입력하세요', '場所を入力', 'Location')}
               className="w-full px-3 py-1.5 text-xs rounded-lg border border-ivory-300"
             />
           </div>
@@ -410,7 +459,7 @@ export const EventEditorModal: React.FC<EventEditorModalProps> = ({
               type="url"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://..."
+              placeholder={L('URL을 입력하세요', 'URLを入力', 'Enter URL')}
               className="w-full px-3 py-1.5 text-xs rounded-lg border border-ivory-300"
             />
           </div>

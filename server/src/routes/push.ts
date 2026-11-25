@@ -26,11 +26,16 @@ router.get('/status', authenticateToken, (req: Request, res: Response) => {
 
 router.post('/subscribe', authenticateToken, (req: Request, res: Response) => {
   const userId = Number(req.user!.id);
-  const { subscription, deviceInfo } = req.body || {};
+  const { subscription, deviceInfo, language } = req.body || {};
 
   if (!subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
     res.status(400).json({ error: '유효한 푸시 구독 정보가 필요합니다.' });
     return;
+  }
+
+  const reqLang = String(language || req.headers['x-language'] || '').toLowerCase();
+  if (reqLang === 'ko' || reqLang === 'ja' || reqLang === 'en') {
+    db.prepare('UPDATE users SET language = ? WHERE id = ?').run(reqLang, userId);
   }
 
   db.prepare(`

@@ -1,7 +1,44 @@
-import React, { createContext, useCallback, useContext, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { api, getStoredToken } from '../api/client';
 import { Language } from '../types';
 
 const LANG_KEY = 'pj_language';
+
+const APP_TITLES: Record<Language, string> = {
+  ko: '프로젝트 마인드맵 (Project Mindmap)',
+  ja: 'プロジェクトマインドマップ (Project Mindmap)',
+  en: 'Project Mindmap',
+};
+
+function detectInitialLanguage(): Language {
+  try {
+    const saved = localStorage.getItem(LANG_KEY);
+    if (saved === 'ko' || saved === 'ja' || saved === 'en') return saved;
+  } catch {
+    // ignore storage errors
+  }
+
+  try {
+    const navLanguages =
+      typeof navigator !== 'undefined'
+        ? navigator.languages && navigator.languages.length > 0
+          ? navigator.languages
+          : navigator.language
+            ? [navigator.language]
+            : []
+        : [];
+    for (const raw of navLanguages) {
+      const l = String(raw || '').toLowerCase();
+      if (l.startsWith('ja')) return 'ja';
+      if (l.startsWith('ko')) return 'ko';
+      if (l.startsWith('en')) return 'en';
+    }
+  } catch {
+    // ignore navigator errors
+  }
+
+  return 'en';
+}
 
 const COMMON_TEXT: Record<string, Record<Language, string>> = {
   'common.loading': { ko: '불러오는 중...', ja: '読み込み中...', en: 'Loading...' },
@@ -22,15 +59,12 @@ interface LanguageContextValue {
 const LanguageContext = createContext<LanguageContextValue | null>(null);
 
 export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [language, setLangState] = useState<Language>(() => {
-    try {
-      const saved = localStorage.getItem(LANG_KEY);
-      if (saved === 'ko' || saved === 'ja' || saved === 'en') return saved;
-    } catch {
-      // ignore
-    }
-    return 'ko';
-  });
+  const [language, setLangState] = useState<Language>(detectInitialLanguage);
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+    document.title = APP_TITLES[language] || APP_TITLES.en;
+  }, [language]);
 
   const setLanguage = useCallback((lang: Language) => {
     setLangState(lang);
@@ -38,6 +72,9 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       localStorage.setItem(LANG_KEY, lang);
     } catch {
       // ignore
+    }
+    if (getStoredToken()) {
+      void api.patch('/auth/preferences', { language: lang }).catch(() => {});
     }
   }, []);
 

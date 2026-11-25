@@ -217,11 +217,11 @@ router.get('/me', authenticateToken, (req: Request, res: Response) => {
 
 router.patch('/preferences', authenticateToken, (req: Request, res: Response) => {
   const userId = Number(req.user!.id);
-  const { name, fontSize, mobileFontSize, pushEnabled } = req.body || {};
+  const { name, fontSize, mobileFontSize, pushEnabled, language } = req.body || {};
 
   try {
     const current = db
-      .prepare('SELECT id, email, name, role, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')
+      .prepare('SELECT id, email, name, role, font_size, mobile_font_size, push_enabled, language FROM users WHERE id = ?')
       .get(userId) as any;
     if (!current) {
       res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
@@ -234,12 +234,14 @@ router.patch('/preferences', authenticateToken, (req: Request, res: Response) =>
       mobileFontSize !== undefined ? clampFontScaleStr(mobileFontSize) : current.mobile_font_size;
     const nextPushEnabled =
       pushEnabled !== undefined ? (pushEnabled ? 1 : 0) : Number(current.push_enabled ?? 1);
+    const nextLanguage =
+      language === 'ko' || language === 'ja' || language === 'en' ? language : (current.language || 'ko');
 
     db.prepare(`
       UPDATE users
-      SET name = ?, font_size = ?, mobile_font_size = ?, push_enabled = ?
+      SET name = ?, font_size = ?, mobile_font_size = ?, push_enabled = ?, language = ?
       WHERE id = ?
-    `).run(nextName, nextFontSize, nextMobileFontSize, nextPushEnabled, userId);
+    `).run(nextName, nextFontSize, nextMobileFontSize, nextPushEnabled, nextLanguage, userId);
 
     const updated = db
       .prepare('SELECT id, email, name, role, font_size, mobile_font_size, push_enabled FROM users WHERE id = ?')

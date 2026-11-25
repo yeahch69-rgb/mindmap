@@ -2212,7 +2212,8 @@ router.delete('/entries/:entryId', authenticateToken, (req: Request, res: Respon
 
   try {
     const entry = db.prepare(`
-      SELECT e.*, p.created_by as project_owner_id, p.title as project_title, p.mode as project_mode
+      SELECT e.*, p.created_by as project_owner_id, p.title as project_title, p.mode as project_mode,
+             p.intent_summary, p.initial_intent_summary, p.intent_modified
       FROM journal_entries e
       INNER JOIN journal_projects p ON p.id = e.project_id
       WHERE e.id = ?
@@ -2228,11 +2229,55 @@ router.delete('/entries/:entryId', authenticateToken, (req: Request, res: Respon
       return;
     }
 
+    let revertedIntent: string | null | undefined = undefined;
     db.transaction(() => {
       removeLinksForEntity('ENTRY', entryId);
       db.prepare('DELETE FROM journal_entries WHERE id = ?').run(entryId);
       cleanupDeletedNodeFromMindMapLayout(Number(entry.project_id), `entry-${entryId}`, userId);
+
+      if (entry.entry_type === 'INTENT' && entry.speaker_name === CURRENT_FOCUS_INTENT_MARKER) {
+        const remainingFocus = db
+          .prepare(
+            `SELECT id, content FROM journal_entries
+             WHERE project_id = ? AND entry_type = 'INTENT' AND speaker_name = ?
+             ORDER BY id ASC`
+          )
+          .all(Number(entry.project_id), CURRENT_FOCUS_INTENT_MARKER) as Array<{
+          id: number;
+          content: string;
+        }>;
+
+        const deletedWasLatest = !remainingFocus.some((r) => Number(r.id) > entryId);
+        if (deletedWasLatest) {
+          const nowJst = getJstDateTimeStr();
+          if (remainingFocus.length > 0) {
+            const prevFocus = remainingFocus[remainingFocus.length - 1];
+            revertedIntent = String(prevFocus.content || '').trim() || null;
+            db.prepare(
+              `UPDATE journal_projects
+               SET intent_summary = ?, intent_modified = 1, updated_at = ?
+               WHERE id = ?`
+            ).run(revertedIntent, nowJst, Number(entry.project_id));
+          } else {
+            revertedIntent = entry.initial_intent_summary ? String(entry.initial_intent_summary).trim() : null;
+            db.prepare(
+              `UPDATE journal_projects
+               SET intent_summary = ?, intent_modified = 0, updated_at = ?
+               WHERE id = ?`
+            ).run(revertedIntent, nowJst, Number(entry.project_id));
+          }
+        }
+      }
     })();
+
+    if (revertedIntent !== undefined) {
+      syncContentAcrossLinkedEntities(
+        'PROJECT',
+        Number(entry.project_id),
+        { title: entry.project_title, content: revertedIntent || '' },
+        userId
+      );
+    }
     notifyProjectPeers(
       {
         id: Number(entry.project_id),

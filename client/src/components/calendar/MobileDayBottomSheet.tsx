@@ -18,6 +18,8 @@ import {
 import { useLanguage } from '../../context/LanguageContext';
 import { CalendarEventItem } from '../../types/spaces';
 import { ExpandedEventInstance, formatShortDate } from '../../utils/calendarUtils';
+import { TranslateButton } from '../common/TranslateButton';
+import { useContentTranslation } from '../../hooks/useContentTranslation';
 
 interface MobileDayBottomSheetProps {
   isOpen: boolean;
@@ -58,6 +60,7 @@ export const MobileDayBottomSheet: React.FC<MobileDayBottomSheetProps> = ({
   onCancelCardDragMove,
 }) => {
   const { L } = useLanguage();
+  const translator = useContentTranslation();
   const [mounted, setMounted] = useState(false);
   const [visible, setVisible] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -414,6 +417,10 @@ export const MobileDayBottomSheet: React.FC<MobileDayBottomSheetProps> = ({
               const isProposed = ev.event_status === 'PROPOSED';
               const okVotes = ev.votes.filter((v) => v.vote === 'AVAILABLE').length;
               const hasMindmapLink = Boolean(ev.mindmap_links && ev.mindmap_links.length > 0);
+              const cardKey = `cal-ev-${ev.id}`;
+              const cardTranslated = translator.isTranslated(cardKey);
+              const showCardTrans = translator.shouldShowButton(ev.title, ev.location, ev.description);
+              const dispTitle = translator.getText(cardKey, 'title', ev.title);
 
               return (
                 <div
@@ -519,7 +526,7 @@ export const MobileDayBottomSheet: React.FC<MobileDayBottomSheetProps> = ({
                               {L('제안', '提案', 'Proposed')}
                             </span>
                           )}
-                          <span className="truncate">{ev.title}</span>
+                          <span className={cardTranslated ? 'break-words' : 'truncate'}>{dispTitle}</span>
                         </div>
                         <div className="flex items-center gap-1 shrink-0">
                           <button
@@ -565,6 +572,20 @@ export const MobileDayBottomSheet: React.FC<MobileDayBottomSheetProps> = ({
                       </div>
 
                       <div className="flex flex-wrap items-center gap-1.5">
+                        <TranslateButton
+                          visible={showCardTrans}
+                          translated={cardTranslated}
+                          loading={translator.isTranslating(cardKey)}
+                          error={translator.getError(cardKey)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void translator.toggleTranslate(
+                              cardKey,
+                              { title: ev.title, location: ev.location, description: ev.description },
+                              'shared-calendar-event'
+                            );
+                          }}
+                        />
                         {ev.comment_count > 0 && (
                           <span className="inline-flex items-center gap-1 text-[11px] font-bold text-sky-700 bg-sky-50 px-2 py-0.5 rounded-full">
                             <MessageSquare className="w-3 h-3" />

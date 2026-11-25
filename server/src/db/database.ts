@@ -119,6 +119,7 @@ export function initDatabase() {
       font_size TEXT NOT NULL DEFAULT '100',
       mobile_font_size TEXT NOT NULL DEFAULT '100',
       push_enabled INTEGER NOT NULL DEFAULT 1,
+      language TEXT NOT NULL DEFAULT 'ko',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -284,6 +285,7 @@ export function initDatabase() {
       tags_json TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL DEFAULT 'NEW', -- 'NEW' | 'DISCUSSING' | 'PROPOSED' | 'SCHEDULED' | 'ARCHIVED'
       is_pinned INTEGER NOT NULL DEFAULT 0,
+      is_important INTEGER NOT NULL DEFAULT 0,
       author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -426,6 +428,9 @@ export function initDatabase() {
   if (!userColNames.has('calendar_palette_json')) {
     db.exec('ALTER TABLE users ADD COLUMN calendar_palette_json TEXT;');
   }
+  if (!userColNames.has('language')) {
+    db.exec("ALTER TABLE users ADD COLUMN language TEXT NOT NULL DEFAULT 'ko';");
+  }
 
   const projCols = db.prepare("PRAGMA table_info(journal_projects)").all() as { name: string }[];
   const projColNames = new Set(projCols.map((c) => c.name));
@@ -454,6 +459,44 @@ export function initDatabase() {
   if (!calColNames.has('text_color')) {
     db.exec("ALTER TABLE calendar_events ADD COLUMN text_color TEXT NOT NULL DEFAULT '#FFFFFF';");
   }
+
+  const thoughtCols = db.prepare("PRAGMA table_info(shared_thoughts)").all() as { name: string }[];
+  const thoughtColNames = new Set(thoughtCols.map((c) => c.name));
+  if (!thoughtColNames.has('is_important')) {
+    db.exec('ALTER TABLE shared_thoughts ADD COLUMN is_important INTEGER NOT NULL DEFAULT 0;');
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS translation_cache (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_hash TEXT NOT NULL,
+      target_lang TEXT NOT NULL CHECK(target_lang IN ('ko', 'ja', 'en')),
+      provider TEXT NOT NULL DEFAULT 'google-unofficial',
+      content_format TEXT NOT NULL DEFAULT 'text' CHECK(content_format IN ('text', 'html')),
+      detected_source_lang TEXT,
+      translated_text TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_used_at TEXT NOT NULL,
+      hit_count INTEGER NOT NULL DEFAULT 1,
+      UNIQUE(source_hash, target_lang, provider, content_format)
+    );
+    CREATE INDEX IF NOT EXISTS idx_translation_cache_lookup
+      ON translation_cache(source_hash, target_lang, provider, content_format);
+    CREATE INDEX IF NOT EXISTS idx_translation_cache_last_used
+      ON translation_cache(last_used_at);
+
+    CREATE TABLE IF NOT EXISTS translation_usage_stats (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      api_call_count INTEGER NOT NULL DEFAULT 0,
+      cache_hit_count INTEGER NOT NULL DEFAULT 0,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      last_model TEXT,
+      last_used_at TEXT,
+      reset_at TEXT
+    );
+    INSERT OR IGNORE INTO translation_usage_stats (id) VALUES (1);
+  `);
 }
 
 export function seedDemoDataForUser(userId: number) {

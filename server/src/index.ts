@@ -19,6 +19,7 @@ import adminRoutes from './routes/admin.js';
 import journalRoutes from './routes/journal.js';
 import pushRoutes from './routes/push.js';
 import spacesRoutes from './routes/spaces.js';
+import translateRoutes from './routes/translate.js';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4100;
@@ -36,7 +37,8 @@ app.use('/api', (req, res, next) => {
   if (
     ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) &&
     req.path !== '/push/test' &&
-    req.path !== '/system/cloud-sync/backup'
+    req.path !== '/system/cloud-sync/backup' &&
+    !req.path.startsWith('/translate')
   ) {
     res.on('finish', () => {
       if (res.statusCode >= 200 && res.statusCode < 400) {
@@ -65,6 +67,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/journal', journalRoutes);
 app.use('/api/push', pushRoutes);
 app.use('/api/spaces', spacesRoutes);
+app.use('/api/translate', translateRoutes);
 
 // Serve built client bundle in production when present
 const __filename = fileURLToPath(import.meta.url);

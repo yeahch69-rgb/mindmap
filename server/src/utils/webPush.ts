@@ -65,11 +65,36 @@ export function getPublicVapidKey(): string {
 }
 
 export interface PushNotificationPayload {
-  title: string;
-  body: string;
+  title?: string;
+  body?: string;
+  titleKo?: string;
+  bodyKo?: string;
+  titleJa?: string;
+  bodyJa?: string;
+  titleEn?: string;
+  bodyEn?: string;
   url?: string;
   tag?: string;
   projectId?: number;
+}
+
+function resolveLocalizedPush(payload: PushNotificationPayload, lang?: string | null): { title: string; body: string } {
+  if (lang === 'ja') {
+    return {
+      title: payload.titleJa || payload.titleKo || payload.title || '',
+      body: payload.bodyJa || payload.bodyKo || payload.body || '',
+    };
+  }
+  if (lang === 'en') {
+    return {
+      title: payload.titleEn || payload.titleKo || payload.title || '',
+      body: payload.bodyEn || payload.bodyKo || payload.body || '',
+    };
+  }
+  return {
+    title: payload.titleKo || payload.title || payload.titleEn || payload.titleJa || '',
+    body: payload.bodyKo || payload.body || payload.bodyEn || payload.bodyJa || '',
+  };
 }
 
 export async function sendPushToUsers(userIds: number[], payload: PushNotificationPayload): Promise<number> {
@@ -80,30 +105,30 @@ export async function sendPushToUsers(userIds: number[], payload: PushNotificati
   const placeholders = uniqueIds.map(() => '?').join(',');
   const subs = db
     .prepare(`
-      SELECT s.id, s.endpoint, s.p256dh, s.auth
+      SELECT s.id, s.endpoint, s.p256dh, s.auth, COALESCE(u.language, 'ko') as language
       FROM push_subscriptions s
       INNER JOIN users u ON u.id = s.user_id
       WHERE s.user_id IN (${placeholders}) AND COALESCE(u.push_enabled, 1) = 1
     `)
-    .all(...uniqueIds) as Array<{ id: number; endpoint: string; p256dh: string; auth: string }>;
+    .all(...uniqueIds) as Array<{ id: number; endpoint: string; p256dh: string; auth: string; language: string }>;
 
   if (subs.length === 0) return 0;
-
-  const bodyStr = JSON.stringify({
-    title: payload.title,
-    body: payload.body,
-    icon: '/icons/icon-192.png',
-    badge: '/icons/icon-192.png',
-    data: {
-      url: payload.url || (payload.projectId ? `/?project=${payload.projectId}` : '/'),
-      projectId: payload.projectId,
-      tag: payload.tag || 'mindmap-alert',
-    },
-  });
 
   let sentCount = 0;
   await Promise.all(
     subs.map(async (sub) => {
+      const resolved = resolveLocalizedPush(payload, sub.language);
+      const bodyStr = JSON.stringify({
+        title: resolved.title,
+        body: resolved.body,
+        icon: '/icons/icon-192.png',
+        badge: '/icons/icon-192.png',
+        data: {
+          url: payload.url || (payload.projectId ? `/?project=${payload.projectId}` : '/'),
+          projectId: payload.projectId,
+          tag: payload.tag || 'mindmap-alert',
+        },
+      });
       try {
         await webpush.sendNotification(
           {

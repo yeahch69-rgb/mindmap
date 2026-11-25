@@ -31,6 +31,8 @@ import {
 import { formatJstTime, getJstDateKey } from '../../utils/dateTime';
 import { Modal } from '../common/Modal';
 import { Button } from '../common/Button';
+import { TranslateButton } from '../common/TranslateButton';
+import { useContentTranslation } from '../../hooks/useContentTranslation';
 
 interface EventDetailChatModalProps {
   isOpen: boolean;
@@ -61,6 +63,7 @@ export const EventDetailChatModal: React.FC<EventDetailChatModalProps> = ({
 }) => {
   const { user } = useAuth();
   const { L } = useLanguage();
+  const translator = useContentTranslation();
 
   const [event, setEvent] = useState<CalendarEventItem | null>(null);
   const [comments, setComments] = useState<CalendarEventComment[]>([]);
@@ -185,6 +188,14 @@ export const EventDetailChatModal: React.FC<EventDetailChatModalProps> = ({
     return L(`${min}분 전 알림`, `${min}分前`, `${min}m before`);
   };
 
+  const evTransKey = event ? `cal-ev-${event.id}` : 'cal-ev-none';
+  const showEventTranslate = event
+    ? translator.shouldShowButton(event.title, event.location, event.description)
+    : false;
+  const displayTitle = event ? translator.getText(evTransKey, 'title', event.title) : '';
+  const displayLocation = event ? translator.getText(evTransKey, 'location', event.location) : '';
+  const displayDescription = event ? translator.getText(evTransKey, 'description', event.description) : '';
+
   return (
     <Modal
       isOpen={isOpen}
@@ -194,7 +205,7 @@ export const EventDetailChatModal: React.FC<EventDetailChatModalProps> = ({
         event ? (
           <div className="flex items-center gap-2 min-w-0">
             <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: event.color }} />
-            <span className="truncate">{event.title}</span>
+            <span className="truncate">{displayTitle}</span>
             {event.event_status === 'PROPOSED' && (
               <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold shrink-0">
                 {L('제안 일정', '提案中', 'Proposed')}
@@ -226,6 +237,20 @@ export const EventDetailChatModal: React.FC<EventDetailChatModalProps> = ({
               <span className="text-[11px] text-charcoal-500">
                 {L(`작성: ${event.creator_name}`, `作成: ${event.creator_name}`, `By ${event.creator_name}`)}
               </span>
+              <TranslateButton
+                visible={showEventTranslate}
+                translated={translator.isTranslated(evTransKey)}
+                loading={translator.isTranslating(evTransKey)}
+                error={translator.getError(evTransKey)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void translator.toggleTranslate(
+                    evTransKey,
+                    { title: event.title, location: event.location, description: event.description },
+                    'shared-calendar-event'
+                  );
+                }}
+              />
             </div>
 
             <div className="flex items-center gap-1">
@@ -403,7 +428,7 @@ export const EventDetailChatModal: React.FC<EventDetailChatModalProps> = ({
             {event.location && (
               <div className="flex items-center gap-2 text-charcoal-700">
                 <MapPin className="w-3.5 h-3.5 text-forest-700 shrink-0" />
-                <span>{event.location}</span>
+                <span>{displayLocation}</span>
               </div>
             )}
 
@@ -437,7 +462,7 @@ export const EventDetailChatModal: React.FC<EventDetailChatModalProps> = ({
 
             {event.description && (
               <div className="pt-2 border-t border-ivory-200 whitespace-pre-wrap text-charcoal-700 leading-relaxed">
-                {event.description}
+                {displayDescription}
               </div>
             )}
           </div>
@@ -543,6 +568,9 @@ export const EventDetailChatModal: React.FC<EventDetailChatModalProps> = ({
                   }
 
                   const isMine = c.author_id === user?.id;
+                  const msgTransKey = `ev-cmt-${c.id}`;
+                  const showMsgTranslate = translator.shouldShowButton(c.content);
+                  const displayMsg = translator.getText(msgTransKey, 'content', c.content);
                   return (
                     <div key={c.id} className={`flex flex-col ${isMine ? 'items-end' : 'items-start'}`}>
                       <div className="flex items-center gap-1.5 mb-0.5 px-1">
@@ -550,6 +578,16 @@ export const EventDetailChatModal: React.FC<EventDetailChatModalProps> = ({
                         <span className="text-[10px] text-charcoal-400">
                           {getJstDateKey(c.created_at).slice(5)} {formatJstTime(c.created_at)}
                         </span>
+                        <TranslateButton
+                          visible={showMsgTranslate}
+                          translated={translator.isTranslated(msgTransKey)}
+                          loading={translator.isTranslating(msgTransKey)}
+                          error={translator.getError(msgTransKey)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void translator.toggleTranslate(msgTransKey, { content: c.content }, 'event-chat');
+                          }}
+                        />
                       </div>
                       <div className="group flex items-end gap-1 max-w-[85%]">
                         {isMine && (
@@ -569,7 +607,7 @@ export const EventDetailChatModal: React.FC<EventDetailChatModalProps> = ({
                               : 'bg-white border border-ivory-300 text-charcoal-900 rounded-bl-sm'
                           }`}
                         >
-                          {c.content}
+                          {displayMsg}
                         </div>
                       </div>
                     </div>

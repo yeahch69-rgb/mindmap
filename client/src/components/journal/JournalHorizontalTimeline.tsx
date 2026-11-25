@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLanguage } from '../../context/LanguageContext';
+import { TranslateButton } from '../common/TranslateButton';
+import { useContentTranslation } from '../../hooks/useContentTranslation';
 import { getJstTodayStr } from '../../utils/dateTime';
 import {
   Calendar,
@@ -54,6 +56,7 @@ export const JournalHorizontalTimeline: React.FC<JournalHorizontalTimelineProps>
   onSelectProject,
 }) => {
   const { L, language } = useLanguage();
+  const tr = useContentTranslation();
   const todayJst = propTodayJst || getJstTodayStr();
 
   const [zoomIdx, setZoomIdx] = useState(1); // 38px default
@@ -561,17 +564,39 @@ export const JournalHorizontalTimeline: React.FC<JournalHorizontalTimelineProps>
                 className="w-2.5 h-2.5 rounded-full shrink-0"
                 style={{ backgroundColor: selectedDayInfo.project.color }}
               />
-              <span className="font-bold text-xs text-charcoal-900 truncate">
-                {selectedDayInfo.project.title}
+              <span
+                className={`font-bold text-xs text-charcoal-900 ${
+                  tr.isTranslated(`jht-proj-${selectedDayInfo.project.id}`) ? 'break-words' : 'truncate'
+                }`}
+              >
+                {tr.getText(`jht-proj-${selectedDayInfo.project.id}`, 'title', selectedDayInfo.project.title)}
               </span>
               <span className="px-2 py-0.5 rounded bg-white border border-ivory-300 font-mono text-[11px] font-bold text-charcoal-700">
                 {selectedDayInfo.date}
               </span>
               {selectedDayInfo.isNextStep && selectedDayInfo.project.next_action && (
                 <span className="px-2 py-0.5 rounded bg-amber-100 border border-amber-300 text-amber-900 text-[11px] font-bold">
-                  {L('Next Step 예정:', 'Next Step予定:', 'Next Step:')} {selectedDayInfo.project.next_action}
+                  {L('Next Step 예정:', 'Next Step予定:', 'Next Step:')}{' '}
+                  {tr.getText(`jht-proj-${selectedDayInfo.project.id}`, 'next_action', selectedDayInfo.project.next_action)}
                 </span>
               )}
+              <TranslateButton
+                size="xs"
+                visible={tr.shouldShowButton(selectedDayInfo.project.title, selectedDayInfo.project.next_action)}
+                translated={tr.isTranslated(`jht-proj-${selectedDayInfo.project.id}`)}
+                loading={tr.isTranslating(`jht-proj-${selectedDayInfo.project.id}`)}
+                error={tr.getError(`jht-proj-${selectedDayInfo.project.id}`)}
+                onClick={() =>
+                  tr.toggleTranslate(
+                    `jht-proj-${selectedDayInfo.project.id}`,
+                    {
+                      title: selectedDayInfo.project.title || '',
+                      next_action: selectedDayInfo.project.next_action || '',
+                    },
+                    'journal'
+                  )
+                }
+              />
             </div>
 
             <div className="flex items-center gap-1.5">
@@ -606,11 +631,23 @@ export const JournalHorizontalTimeline: React.FC<JournalHorizontalTimelineProps>
                       <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${meta.bg}`}>
                         {en.entry_type === 'DIALOGUE_THEM' && en.speaker_name ? en.speaker_name : meta.label}
                       </span>
-                      <span className="text-[10px] font-mono text-charcoal-400">
-                        {en.entry_time || ''}
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <TranslateButton
+                          size="xs"
+                          visible={tr.shouldShowButton(en.content)}
+                          translated={tr.isTranslated(`jht-entry-${en.id}`)}
+                          loading={tr.isTranslating(`jht-entry-${en.id}`)}
+                          error={tr.getError(`jht-entry-${en.id}`)}
+                          onClick={() => tr.toggleTranslate(`jht-entry-${en.id}`, { content: en.content }, 'journal')}
+                        />
+                        <span className="text-[10px] font-mono text-charcoal-400">
+                          {en.entry_time || ''}
+                        </span>
+                      </div>
                     </div>
-                    <p className="text-charcoal-800 whitespace-pre-wrap leading-relaxed">{en.content}</p>
+                    <p className="text-charcoal-800 whitespace-pre-wrap leading-relaxed">
+                      {tr.getText(`jht-entry-${en.id}`, 'content', en.content)}
+                    </p>
                   </div>
                 );
               })}

@@ -290,7 +290,7 @@ export const ProposeDateModal: React.FC<ProposeDateModalProps> = ({
                 type="text"
                 value={location}
                 onChange={(e) => setLocation(e.target.value)}
-                placeholder={L('예: 성수동 카페', '例: 会議室・カフェ', 'Optional location')}
+                placeholder={L('장소 (선택)', '場所（任意）', 'Optional location')}
                 className="w-full px-3 py-1.5 text-xs rounded-lg border border-ivory-300"
               />
             </div>
@@ -302,7 +302,7 @@ export const ProposeDateModal: React.FC<ProposeDateModalProps> = ({
                 type="text"
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
-                placeholder={L('예: 이 날 오후 어때요?', '例: この日の午後どうでしょう？', 'e.g. How about this afternoon?')}
+                placeholder={L('메모 (선택)', 'メモ（任意）', 'Optional note')}
                 className="w-full px-3 py-1.5 text-xs rounded-lg border border-ivory-300"
               />
             </div>

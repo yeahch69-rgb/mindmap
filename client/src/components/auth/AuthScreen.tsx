@@ -154,7 +154,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                   required
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder={L('예: 소우', '例: 佐藤', 'e.g. Alex')}
+                  placeholder={L('이름 또는 닉네임을 입력하세요', '名前またはニックネームを入力', 'Enter your name')}
                   className="w-full p-2.5 bg-ivory-50 border border-ivory-300 rounded-lg font-bold text-charcoal-900"
                 />
               </div>
@@ -172,7 +172,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder={
                   mode === 'LOGIN'
-                    ? L('아이디 또는 이메일 (예: admin)', 'ID またはメール (例: admin)', 'ID or email (e.g. admin)')
+                    ? L('아이디 또는 이메일 입력', 'ID またはメールを入力', 'Enter ID or email')
                     : L('아이디 또는 이메일 (공백 없이 2자 이상)', 'ID またはメール (空白なし2文字以上)', 'ID or email (2+ chars, no spaces)')
                 }
                 className="w-full p-2.5 bg-ivory-50 border border-ivory-300 rounded-lg text-charcoal-900"

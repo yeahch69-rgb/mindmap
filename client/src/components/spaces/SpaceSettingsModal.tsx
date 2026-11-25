@@ -248,7 +248,7 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder={L('예: 우리 팀 공유 캘린더, 가족 일정', '例: チーム共有カレンダー', 'e.g. Team Shared Space')}
+                placeholder={L('스페이스 이름을 입력하세요', 'スペース名を入力', 'Enter space name')}
                 className="w-full px-3 py-2 text-xs rounded-lg border border-ivory-300 focus:outline-none focus:ring-2 focus:ring-forest-500"
               />
             </div>
@@ -364,7 +364,7 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
                   type="email"
                   value={inviteEmail}
                   onChange={(e) => setInviteEmail(e.target.value)}
-                  placeholder="partner@example.com"
+                  placeholder={L('초대할 이메일을 입력하세요', '招待するメールアドレスを入力', 'Enter email to invite')}
                   className="flex-1 min-w-0 px-3 py-1.5 text-xs rounded-lg border border-ivory-300 focus:outline-none focus:ring-2 focus:ring-forest-500"
                 />
                 <Button type="submit" size="sm" disabled={saving || !inviteEmail.trim()}>

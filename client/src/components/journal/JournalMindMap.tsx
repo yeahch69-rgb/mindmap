@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLanguage } from '../../context/LanguageContext';
+import { TranslateButton } from '../common/TranslateButton';
+import { useContentTranslation } from '../../hooks/useContentTranslation';
+import { MobileNodeBottomSheet } from './MobileNodeBottomSheet';
 import {
   Archive,
   Check,
@@ -83,6 +86,7 @@ interface JournalMindMapProps {
   onEditEntry?: (entry: JournalEntry, updates: { content: string; speaker_name?: string | null }) => Promise<void>;
   onDeleteEntry?: (entryId: number) => Promise<void>;
   onPromoteEntryToNextStep?: (entry: JournalEntry) => Promise<void>;
+  onSetNextStep?: (projectId: number, nextAction: string, nextActionDate: string | null) => Promise<void>;
   onToggleRelatedIdea?: (ideaId: number, targetIdeaId: number, projectId: number) => Promise<void>;
   onPromoteIdea?: (idea: JournalIdea) => Promise<void>;
   onUpdateIdeaStatus?: (idea: JournalIdea, status: IdeaStatus) => Promise<void>;
@@ -146,6 +150,7 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
   onEditEntry,
   onDeleteEntry,
   onPromoteEntryToNextStep,
+  onSetNextStep,
   onToggleRelatedIdea,
   onPromoteIdea,
   onUpdateIdeaStatus,
@@ -156,6 +161,7 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
   onConsumedFocusNode,
 }) => {
   const { L } = useLanguage();
+  const tr = useContentTranslation();
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -1964,6 +1970,18 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
 
   const draggingGhostNode = draggingNest?.moved ? layout.nodeMap.get(draggingNest.key) || null : null;
 
+  const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.matchMedia('(max-width: 1279px)').matches : false
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const mq = window.matchMedia('(max-width: 1279px)');
+    const onChange = () => setIsMobileViewport(mq.matches);
+    onChange();
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
   return (
     <div className="bg-white rounded-xl border border-ivory-300 shadow-2xs overflow-hidden">
       {/* Mind Map Top Toolbar */}
@@ -2270,6 +2288,7 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
           parentIdeaId={composerState.parentIdeaId}
           onAddIdea={onAddIdea}
           onAddEntry={onAddEntry}
+          onSetNextStep={onSetNextStep}
           onCreatedNode={handleComposerCreatedNode}
           onClose={() => setComposerState((prev) => ({ ...prev, open: false }))}
         />
@@ -2976,7 +2995,7 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                   type="text"
                   value={wireLabelDraft}
                   onChange={(e) => setWireLabelDraft(e.target.value)}
-                  placeholder={L('관계 메모 (예: 원인, 참고)', '関係メモ (例: 原因, 参考)', 'Label (e.g. cause, ref)')}
+                  placeholder={L('관계 메모 입력', '関係メモを入力', 'Enter label')}
                   className="px-2 py-0.5 rounded bg-white text-charcoal-900 text-[11px] font-medium w-36 focus:outline-none"
                 />
                 <button
@@ -3026,8 +3045,11 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
       )}
 
       {/* Selected Node Inspector & Graph Action Bar */}
-      {selectedNode && (
-        <div className="p-3.5 bg-ivory-50 border-t border-ivory-300 space-y-2.5 text-xs">
+      {(() => {
+        const renderSelectedNodeInspector = () => {
+          if (!selectedNode) return null;
+          return (
+            <>
           <div className="flex items-start justify-between gap-2 flex-wrap">
             <div className="space-y-1 min-w-0 flex-1">
               <div className="flex items-center gap-1.5 flex-wrap">
@@ -3042,7 +3064,26 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                     ? L('Next Step', 'Next Step', 'Next Step')
                     : L('노드 상세', 'ノード詳細', 'Node')}
                 </span>
-                <span className="font-bold text-sm text-charcoal-900">{selectedNode.title}</span>
+                <span className="font-bold text-sm text-charcoal-900">
+                  {tr.getText(`jmm-${selectedNode.key}`, 'title', selectedNode.title)}
+                </span>
+                <TranslateButton
+                  size="xs"
+                  visible={tr.shouldShowButton(selectedNode.title, selectedNode.subtitle)}
+                  translated={tr.isTranslated(`jmm-${selectedNode.key}`)}
+                  loading={tr.isTranslating(`jmm-${selectedNode.key}`)}
+                  error={tr.getError(`jmm-${selectedNode.key}`)}
+                  onClick={() =>
+                    tr.toggleTranslate(
+                      `jmm-${selectedNode.key}`,
+                      {
+                        title: selectedNode.title || '',
+                        subtitle: selectedNode.subtitle || '',
+                      },
+                      'journal'
+                    )
+                  }
+                />
               </div>
               {editingEntryInline && selectedEntry ? (
                 <div className="space-y-1.5 pt-1">
@@ -3079,7 +3120,9 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                 </div>
               ) : (
                 selectedNode.subtitle && (
-                  <p className="text-charcoal-700 whitespace-pre-wrap">{selectedNode.subtitle}</p>
+                  <p className="text-charcoal-700 whitespace-pre-wrap">
+                    {tr.getText(`jmm-${selectedNode.key}`, 'subtitle', selectedNode.subtitle)}
+                  </p>
                 )
               )}
 
@@ -3402,8 +3445,31 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
               </>
             )}
           </div>
-        </div>
-      )}
+            </>
+          );
+        };
+
+        return (
+          <>
+            {!isMobileViewport && selectedNode && (
+              <div className="p-3.5 bg-ivory-50 border-t border-ivory-300 space-y-2.5 text-xs">
+                {renderSelectedNodeInspector()}
+              </div>
+            )}
+            <MobileNodeBottomSheet
+              isOpen={isMobileViewport && Boolean(selectedNode)}
+              onClose={() => selectAndSyncNode(null)}
+              title={L('노드 상세', 'ノード詳細', 'Node Detail')}
+            >
+              {selectedNode && (
+                <div className="p-3.5 space-y-2.5 text-xs">
+                  {renderSelectedNodeInspector()}
+                </div>
+              )}
+            </MobileNodeBottomSheet>
+          </>
+        );
+      })()}
     </div>
   );
 };

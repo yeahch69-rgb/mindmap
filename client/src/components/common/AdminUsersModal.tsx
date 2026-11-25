@@ -2,7 +2,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Bell,
   FolderKanban,
+  Languages,
   RefreshCw,
+  RotateCcw,
   Search,
   Shield,
   ShieldCheck,
@@ -28,6 +30,26 @@ interface AdminUserRow {
   createdAt: string;
 }
 
+interface TranslationUsageSummary {
+  apiCallCount: number;
+  cacheHitCount: number;
+  totalRequestCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  inputCostUsd: number;
+  outputCostUsd: number;
+  totalCostUsd: number;
+  inputCostJpy: number;
+  outputCostJpy: number;
+  totalCostJpy: number;
+  activeProvider: string;
+  activeModel: string;
+  lastModel: string | null;
+  lastUsedAt: string | null;
+  resetAt: string | null;
+}
+
 interface AdminUsersModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -38,6 +60,9 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
   const { L } = useLanguage();
 
   const [users, setUsers] = useState<AdminUserRow[]>([]);
+  const [usage, setUsage] = useState<TranslationUsageSummary | null>(null);
+  const [isResettingUsage, setIsResettingUsage] = useState(false);
+  const [confirmResetUsage, setConfirmResetUsage] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
@@ -48,8 +73,12 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
     setIsLoading(true);
     setError('');
     try {
-      const res = await api.get<{ users: AdminUserRow[] }>('/admin/users');
-      setUsers(res.users || []);
+      const [usersRes, usageRes] = await Promise.all([
+        api.get<{ users: AdminUserRow[] }>('/admin/users'),
+        api.get<TranslationUsageSummary>('/translate/usage').catch(() => null),
+      ]);
+      setUsers(usersRes.users || []);
+      if (usageRes) setUsage(usageRes);
     } catch (err: any) {
       setError(
         err?.message ||
@@ -59,6 +88,22 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
       setIsLoading(false);
     }
   }, [L]);
+
+  const handleResetUsage = async () => {
+    setIsResettingUsage(true);
+    try {
+      const res = await api.post<TranslationUsageSummary>('/translate/usage/reset', {});
+      setUsage(res);
+      setConfirmResetUsage(false);
+    } catch (err: any) {
+      setError(
+        err?.message ||
+          L('사용량 초기화에 실패했습니다.', '使用量のリセットに失敗しました。', 'Failed to reset translation usage.')
+      );
+    } finally {
+      setIsResettingUsage(false);
+    }
+  };
 
   useEffect(() => {
     if (isOpen && user?.role === 'ADMIN') {
@@ -152,6 +197,109 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
             </button>
           </div>
         </div>
+
+        {/* Gemini Translation API Usage Monitor */}
+        {usage && (
+          <div className="px-5 py-3 border-b border-ivory-200 bg-emerald-50/50 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-forest-900">
+                <Languages className="w-3.5 h-3.5 text-forest-700" />
+                <span>{L('Gemini 번역 API 사용량', 'Gemini 翻訳API使用量', 'Gemini Translation Usage')}</span>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                    usage.activeProvider === 'gemini'
+                      ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                      : 'bg-amber-100 text-amber-900 border-amber-300'
+                  }`}
+                >
+                  {usage.activeProvider === 'gemini'
+                    ? `Gemini · ${usage.activeModel}`
+                    : `${usage.activeProvider} (fallback)`}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                {confirmResetUsage ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={isResettingUsage}
+                      onClick={() => void handleResetUsage()}
+                      className="px-2 py-0.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold disabled:opacity-50"
+                    >
+                      {L('초기화 확인', 'リセット確定', 'Confirm Reset')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmResetUsage(false)}
+                      className="px-2 py-0.5 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-[11px] font-bold hover:bg-ivory-100"
+                    >
+                      {L('취소', 'キャンセル', 'Cancel')}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmResetUsage(true)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-white border border-ivory-300 text-charcoal-700 hover:bg-ivory-100 text-[11px] font-bold transition"
+                    title={L('누적 통계 초기화', '累積統計をリセット', 'Reset counters')}
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>{L('카운터 초기화', 'リセット', 'Reset')}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+              <div className="p-2 rounded-xl bg-white border border-ivory-200">
+                <div className="text-charcoal-500">{L('API 호출 / 캐시', 'API呼出 / キャッシュ', 'API / Cache')}</div>
+                <div className="font-mono font-bold text-charcoal-900 mt-0.5">
+                  {usage.apiCallCount.toLocaleString()} / {usage.cacheHitCount.toLocaleString()}
+                </div>
+                <div className="text-[10px] text-emerald-700 font-semibold">
+                  {L('캐시 적중률', 'キャッシュ率', 'Cache hit')}{' '}
+                  {usage.totalRequestCount > 0
+                    ? `${Math.round((usage.cacheHitCount / usage.totalRequestCount) * 100)}%`
+                    : '0%'}
+                </div>
+              </div>
+              <div className="p-2 rounded-xl bg-white border border-ivory-200">
+                <div className="text-charcoal-500">{L('입력 토큰', '入力トークン', 'Input Tokens')}</div>
+                <div className="font-mono font-bold text-charcoal-900 mt-0.5">
+                  {usage.inputTokens.toLocaleString()}
+                </div>
+                <div className="text-[10px] text-charcoal-400 font-mono">
+                  ${usage.inputCostUsd.toFixed(4)}
+                </div>
+              </div>
+              <div className="p-2 rounded-xl bg-white border border-ivory-200">
+                <div className="text-charcoal-500">{L('출력 토큰', '出力トークン', 'Output Tokens')}</div>
+                <div className="font-mono font-bold text-charcoal-900 mt-0.5">
+                  {usage.outputTokens.toLocaleString()}
+                </div>
+                <div className="text-[10px] text-charcoal-400 font-mono">
+                  ${usage.outputCostUsd.toFixed(4)}
+                </div>
+              </div>
+              <div className="p-2 rounded-xl bg-white border border-emerald-200">
+                <div className="text-charcoal-500">{L('예상 누적 비용', '推定累積コスト', 'Est. Cost')}</div>
+                <div className="font-mono font-bold text-emerald-900 mt-0.5">
+                  ${usage.totalCostUsd.toFixed(4)}
+                </div>
+                <div className="text-[10px] text-charcoal-500 font-mono">
+                  ≈ ¥{usage.totalCostJpy.toFixed(2)}
+                </div>
+              </div>
+            </div>
+            {usage.lastUsedAt && (
+              <div className="text-[10px] text-charcoal-500 font-mono">
+                {L('최근 호출:', '最終呼出:', 'Last call:')} {usage.lastUsedAt}
+                {usage.lastModel ? ` (${usage.lastModel})` : ''}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Search & Filter */}
         <div className="px-5 py-3 border-b border-ivory-200 flex flex-wrap items-center gap-2 bg-white">

@@ -126,6 +126,7 @@ export interface SharedThought {
   tags: string[];
   status: ThoughtStatus;
   is_pinned: boolean;
+  is_important: boolean;
   author_id: number;
   author_name: string;
   updated_by: number | null;
