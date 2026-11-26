@@ -528,23 +528,30 @@ async function sendCalendarEventReminders(
         const dedupKey = `cal-rem:${ev.id}:${occDate}:${remMin}`;
         if (hasPushLog(dedupKey)) continue;
 
-        let targetUserIds: number[] = [];
+        let attendeeIds: number[] = [];
         try {
           const parsed = JSON.parse(ev.attendee_ids_json || '[]');
           if (Array.isArray(parsed)) {
-            targetUserIds = parsed.map(Number).filter((id) => Number.isInteger(id) && id > 0);
+            attendeeIds = Array.from(
+              new Set(parsed.map(Number).filter((id) => Number.isInteger(id) && id > 0))
+            );
           }
         } catch {}
 
-        if (targetUserIds.length === 0) {
-          const members = db
-            .prepare('SELECT user_id FROM collab_space_members WHERE space_id = ?')
-            .all(Number(ev.space_id)) as Array<{ user_id: number }>;
-          targetUserIds = members.map((m) => Number(m.user_id));
-        }
+        if (attendeeIds.length === 0) continue;
 
-        const timeLabel = ev.is_all_day ? '종일' : (ev.start_time || '09:00');
-        const remLabel =
+        const memberRows = db
+          .prepare('SELECT user_id FROM collab_space_members WHERE space_id = ?')
+          .all(Number(ev.space_id)) as Array<{ user_id: number }>;
+        const memberSet = new Set(memberRows.map((m) => Number(m.user_id)));
+        const targetUserIds = attendeeIds.filter((id) => memberSet.has(id));
+        if (targetUserIds.length === 0) continue;
+
+        const timeKo = ev.is_all_day ? '종일' : (ev.start_time || '09:00');
+        const timeJa = ev.is_all_day ? '終日' : (ev.start_time || '09:00');
+        const timeEn = ev.is_all_day ? 'All Day' : (ev.start_time || '09:00');
+
+        const remKo =
           remMin === 0
             ? '지금 시작'
             : remMin >= 1440
@@ -552,10 +559,33 @@ async function sendCalendarEventReminders(
               : remMin >= 60
                 ? `${Math.round(remMin / 60)}시간 전`
                 : `${remMin}분 전`;
+        const remJa =
+          remMin === 0
+            ? 'まもなく開始'
+            : remMin >= 1440
+              ? '1日前リマインド'
+              : remMin >= 60
+                ? `${Math.round(remMin / 60)}時間前`
+                : `${remMin}分前`;
+        const remEn =
+          remMin === 0
+            ? 'Starting now'
+            : remMin >= 1440
+              ? '1 day before'
+              : remMin >= 60
+                ? `${Math.round(remMin / 60)}h before`
+                : `${remMin}m before`;
+
+        const shortTitle = truncateText(ev.title, 36);
+        const spaceName = ev.space_name || 'Shared Space';
 
         const sent = await sendPushToUsers(targetUserIds, {
-          title: `📅 ${ev.space_name}`,
-          body: `⏰ [${remLabel}] ${truncateText(ev.title, 36)} (${occDate} ${timeLabel})`,
+          titleKo: `📅 ${spaceName}`,
+          bodyKo: `⏰ [${remKo}] ${shortTitle} (${occDate} ${timeKo})`,
+          titleJa: `📅 ${spaceName}`,
+          bodyJa: `⏰ [${remJa}] ${shortTitle} (${occDate} ${timeJa})`,
+          titleEn: `📅 ${spaceName}`,
+          bodyEn: `⏰ [${remEn}] ${shortTitle} (${occDate} ${timeEn})`,
           url: `/?tab=calendar&space=${ev.space_id}&event=${ev.id}`,
           tag: `space-cal-rem-${ev.id}-${occDate}`,
         });

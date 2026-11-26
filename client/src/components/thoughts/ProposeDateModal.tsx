@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { Calendar, CheckCircle2, Clock, MapPin, Sparkles } from 'lucide-react';
 import { api } from '../../api/client';
+import { useAuth } from '../../context/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { CalendarEventItem, CollabSpace, SharedThought } from '../../types/spaces';
 import { getJstTodayStr } from '../../utils/dateTime';
 import { Modal } from '../common/Modal';
 import { Button } from '../common/Button';
 import { EventColorControls } from '../calendar/EventColorControls';
+import { SpaceMemberPicker } from '../spaces/SpaceMemberPicker';
 
 interface ProposeDateModalProps {
   isOpen: boolean;
@@ -23,6 +25,7 @@ export const ProposeDateModal: React.FC<ProposeDateModalProps> = ({
   thought,
   onProposed,
 }) => {
+  const { user } = useAuth();
   const { L } = useLanguage();
   const today = getJstTodayStr();
   const amberLabel =
@@ -40,6 +43,7 @@ export const ProposeDateModal: React.FC<ProposeDateModalProps> = ({
   const [textColor, setTextColor] = useState('#FFFFFF');
   const [location, setLocation] = useState('');
   const [note, setNote] = useState('');
+  const [attendeeIds, setAttendeeIds] = useState<number[]>([]);
   const [confirmImmediately, setConfirmImmediately] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -58,8 +62,10 @@ export const ProposeDateModal: React.FC<ProposeDateModalProps> = ({
     setTextColor('#FFFFFF');
     setLocation('');
     setNote('');
+    const myId = user ? Number(user.id) : 0;
+    setAttendeeIds(myId && space.members.some((m) => Number(m.user_id) === myId) ? [myId] : []);
     setConfirmImmediately(false);
-  }, [isOpen, thought?.id]);
+  }, [isOpen, thought?.id, space.id, user?.id]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -86,7 +92,7 @@ export const ProposeDateModal: React.FC<ProposeDateModalProps> = ({
           text_color: textColor,
           location: location.trim(),
           note: note.trim(),
-          attendee_ids: space.members.map((m) => m.user_id),
+          attendee_ids: attendeeIds,
           confirmImmediately,
         }
       );
@@ -277,6 +283,19 @@ export const ProposeDateModal: React.FC<ProposeDateModalProps> = ({
             textColor={textColor}
             onChangeTextColor={setTextColor}
             previewTitle={title}
+          />
+
+          {/* Attendees */}
+          <SpaceMemberPicker
+            members={space.members}
+            selectedIds={attendeeIds}
+            onChange={setAttendeeIds}
+            currentUserId={user?.id}
+            hint={L(
+              '선택된 참여자에게만 일정 제안·확정·댓글·리마인더 푸시 알림이 발송됩니다.',
+              '選択された参加者にのみ日程提案・確定・コメント・リマインダー通知が送信されます。',
+              'Only selected attendees receive proposal, confirmation, comment, and reminder push notifications.'
+            )}
           />
 
           {/* Location & Proposal Note */}

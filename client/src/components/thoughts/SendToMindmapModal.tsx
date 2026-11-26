@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { BookMarked, FolderPlus, GitBranch, ListPlus, RefreshCw, Users } from 'lucide-react';
+import { BookMarked, FolderPlus, GitBranch, ListPlus, RefreshCw } from 'lucide-react';
 import { api } from '../../api/client';
+import { useAuth } from '../../context/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { CollabSpace, SharedThought, SPACE_COLOR_PRESETS } from '../../types/spaces';
 import { Modal } from '../common/Modal';
 import { Button } from '../common/Button';
+import { SpaceMemberPicker } from '../spaces/SpaceMemberPicker';
 
 interface MindmapProjectOption {
   id: number;
@@ -28,6 +30,7 @@ export const SendToMindmapModal: React.FC<SendToMindmapModalProps> = ({
   thought,
   onSent,
 }) => {
+  const { user } = useAuth();
   const { L } = useLanguage();
 
   const [mode, setMode] = useState<'NEW_PROJECT' | 'EXISTING_IDEA' | 'EXISTING_ENTRY'>('NEW_PROJECT');
@@ -38,7 +41,7 @@ export const SendToMindmapModal: React.FC<SendToMindmapModalProps> = ({
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [color, setColor] = useState(space.color || '#1B4D3E');
-  const [includeSpaceMembers, setIncludeSpaceMembers] = useState(true);
+  const [selectedMemberIds, setSelectedMemberIds] = useState<number[]>([]);
   const [entryType, setEntryType] = useState<'INTENT' | 'PROGRESS'>('INTENT');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -50,7 +53,8 @@ export const SendToMindmapModal: React.FC<SendToMindmapModalProps> = ({
     setTitle(thought.title || thought.content.slice(0, 48));
     setContent(thought.content);
     setColor(space.color || '#1B4D3E');
-    setIncludeSpaceMembers(space.members.length > 1);
+    const myId = user ? Number(user.id) : 0;
+    setSelectedMemberIds(myId && space.members.some((m) => Number(m.user_id) === myId) ? [myId] : []);
     setEntryType('INTENT');
 
     setLoadingProjects(true);
@@ -63,7 +67,7 @@ export const SendToMindmapModal: React.FC<SendToMindmapModalProps> = ({
       })
       .catch(() => setProjects([]))
       .finally(() => setLoadingProjects(false));
-  }, [isOpen, thought?.id, space.id]);
+  }, [isOpen, thought?.id, space.id, user?.id]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -85,7 +89,7 @@ export const SendToMindmapModal: React.FC<SendToMindmapModalProps> = ({
               title: title.trim() || thought.title || thought.content.slice(0, 48),
               intent: content.trim(),
               color,
-              includeSpaceMembers,
+              memberIds: selectedMemberIds.filter((id) => id !== Number(user?.id || 0)),
             }
           : mode === 'EXISTING_IDEA'
             ? {
@@ -289,24 +293,35 @@ export const SendToMindmapModal: React.FC<SendToMindmapModalProps> = ({
                 </div>
               </div>
 
-              {space.members.length > 1 && (
-                <label className="flex items-center gap-2 text-xs font-bold text-charcoal-800 cursor-pointer pt-1 border-t border-ivory-200">
-                  <input
-                    type="checkbox"
-                    checked={includeSpaceMembers}
-                    onChange={(e) => setIncludeSpaceMembers(e.target.checked)}
-                    className="rounded text-indigo-700"
-                  />
-                  <Users className="w-3.5 h-3.5 text-indigo-700 shrink-0" />
-                  <span>
-                    {L(
-                      `현재 스페이스 멤버(${space.members.length}명)를 협업 프로젝트 멤버로 함께 참여`,
-                      `スペースメンバー(${space.members.length}人)を共同メンバーとして自動招待`,
-                      `Include all ${space.members.length} space members as project collaborators`
-                    )}
-                  </span>
-                </label>
-              )}
+              {space.members.length > 1 && (() => {
+                const otherSelectedCount = selectedMemberIds.filter((id) => id !== Number(user?.id || 0)).length;
+                return (
+                  <div className="pt-2 border-t border-ivory-200">
+                    <SpaceMemberPicker
+                      members={space.members}
+                      selectedIds={selectedMemberIds}
+                      onChange={setSelectedMemberIds}
+                      currentUserId={user?.id}
+                      lockedUserIds={user ? [Number(user.id)] : []}
+                      accent="indigo"
+                      label={L('새 프로젝트 참여 멤버', '新規プロジェクト参加メンバー', 'New Project Members')}
+                      hint={
+                        otherSelectedCount === 0
+                          ? L(
+                              '나만 참여하는 개인 프로젝트로 생성됩니다. (다른 멤버에게 푸시 알림 미발송)',
+                              '自分のみの個人プロジェクトとして作成されます。（他メンバーへ通知なし）',
+                              'Creates a solo project for yourself only (no push sent to other members).'
+                            )
+                          : L(
+                              `선택한 ${otherSelectedCount}명과 협업 프로젝트로 생성되며, 선택된 멤버에게만 푸시 알림이 발송됩니다.`,
+                              `選択した${otherSelectedCount}名との共同プロジェクトとして作成され、選択メンバーにのみ通知されます。`,
+                              `Creates a collaborative project with ${otherSelectedCount} selected member(s); only they receive push notifications.`
+                            )
+                      }
+                    />
+                  </div>
+                );
+              })()}
             </div>
           )}
 

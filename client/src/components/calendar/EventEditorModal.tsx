@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Bell, Calendar, Clock, Link2, MapPin, Repeat, Sparkles, Users } from 'lucide-react';
+import { Bell, Calendar, Clock, Link2, MapPin, Repeat, Sparkles } from 'lucide-react';
 import { api } from '../../api/client';
+import { useAuth } from '../../context/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import {
   CalendarEventItem,
@@ -13,6 +14,7 @@ import { Button } from '../common/Button';
 import { TranslateButton } from '../common/TranslateButton';
 import { useContentTranslation } from '../../hooks/useContentTranslation';
 import { EventColorControls } from './EventColorControls';
+import { SpaceMemberPicker } from '../spaces/SpaceMemberPicker';
 
 interface EventEditorModalProps {
   isOpen: boolean;
@@ -31,6 +33,7 @@ export const EventEditorModal: React.FC<EventEditorModalProps> = ({
   editingEvent,
   onSaved,
 }) => {
+  const { user } = useAuth();
   const { L } = useLanguage();
   const translator = useContentTranslation();
 
@@ -101,10 +104,6 @@ export const EventEditorModal: React.FC<EventEditorModalProps> = ({
       setEventStatus('CONFIRMED');
     }
   }, [isOpen, editingEvent, initialDate, space.id]);
-
-  const toggleAttendee = (uid: number) => {
-    setAttendeeIds((prev) => (prev.includes(uid) ? prev.filter((id) => id !== uid) : [...prev, uid]));
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -406,34 +405,17 @@ export const EventEditorModal: React.FC<EventEditorModalProps> = ({
         </div>
 
         {/* Attendees */}
-        {space.members.length > 0 && (
-          <div className="space-y-1.5">
-            <div className="text-xs font-bold text-charcoal-700 flex items-center gap-1.5">
-              <Users className="w-3.5 h-3.5 text-forest-700" />
-              <span>{L('참여자', '参加者', 'Attendees')}</span>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {space.members.map((m) => {
-                const selected = attendeeIds.includes(m.user_id);
-                return (
-                  <button
-                    key={m.user_id}
-                    type="button"
-                    onClick={() => toggleAttendee(m.user_id)}
-                    className={`px-2.5 py-1 rounded-full text-xs font-bold border transition ${
-                      selected
-                        ? 'bg-forest-100 text-forest-900 border-forest-300'
-                        : 'bg-white text-charcoal-500 border-ivory-300 hover:bg-ivory-50'
-                    }`}
-                  >
-                    {selected ? '✓ ' : ''}
-                    {m.name}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
+        <SpaceMemberPicker
+          members={space.members}
+          selectedIds={attendeeIds}
+          onChange={setAttendeeIds}
+          currentUserId={user?.id}
+          hint={L(
+            '선택된 참여자에게만 일정 등록·수정·댓글·리마인더 푸시 알림이 발송됩니다.',
+            '選択された参加者にのみ予定・コメント・リマインダー通知が送信されます。',
+            'Only selected attendees receive event, comment, and reminder push notifications.'
+          )}
+        />
 
         {/* Location & URL */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

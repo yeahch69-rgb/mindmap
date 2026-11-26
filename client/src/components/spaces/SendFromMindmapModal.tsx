@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { Calendar, CheckCircle2, Clock, Hash, Lightbulb, MapPin, RefreshCw, Sparkles } from 'lucide-react';
 import { api } from '../../api/client';
+import { useAuth } from '../../context/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { CalendarEventItem, CollabSpace, SharedThought } from '../../types/spaces';
 import { getJstTodayStr } from '../../utils/dateTime';
 import { Modal } from '../common/Modal';
 import { Button } from '../common/Button';
 import { EventColorControls } from '../calendar/EventColorControls';
+import { SpaceMemberPicker } from './SpaceMemberPicker';
 
 export interface MindmapSendSource {
   sourceType: 'PROJECT' | 'IDEA' | 'ENTRY';
@@ -24,6 +26,7 @@ interface SendFromMindmapModalProps {
   source: MindmapSendSource | null;
   spaces: CollabSpace[];
   activeSpaceId: number | null;
+  projectMemberIds?: number[];
   onSentThought: (spaceId: number, thought: SharedThought) => void;
   onSentEvent: (spaceId: number, event: CalendarEventItem) => void;
 }
@@ -34,9 +37,11 @@ export const SendFromMindmapModal: React.FC<SendFromMindmapModalProps> = ({
   source,
   spaces,
   activeSpaceId,
+  projectMemberIds = [],
   onSentThought,
   onSentEvent,
 }) => {
+  const { user } = useAuth();
   const { L } = useLanguage();
   const today = getJstTodayStr();
 
@@ -56,12 +61,23 @@ export const SendFromMindmapModal: React.FC<SendFromMindmapModalProps> = ({
   const [color, setColor] = useState('#0369A1');
   const [textColor, setTextColor] = useState('#FFFFFF');
   const [location, setLocation] = useState('');
+  const [attendeeIds, setAttendeeIds] = useState<number[]>([]);
   const [confirmImmediately, setConfirmImmediately] = useState(true);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   const selectedSpace = spaces.find((s) => s.id === spaceId) || spaces[0] || null;
+
+  const computeDefaultAttendees = (sp: CollabSpace | undefined | null) => {
+    if (!sp) return [];
+    const spaceMemberIds = sp.members.map((m) => Number(m.user_id));
+    const projSet = new Set(projectMemberIds.map(Number).filter((id) => id > 0));
+    const intersected = spaceMemberIds.filter((id) => projSet.has(id));
+    if (intersected.length > 0) return intersected;
+    const myId = user ? Number(user.id) : 0;
+    return myId && spaceMemberIds.includes(myId) ? [myId] : [];
+  };
 
   useEffect(() => {
     if (!isOpen || !source) return;
@@ -86,6 +102,7 @@ export const SendFromMindmapModal: React.FC<SendFromMindmapModalProps> = ({
     setConfirmImmediately(true);
 
     const sp = spaces.find((s) => s.id === sid) || spaces[0];
+    setAttendeeIds(computeDefaultAttendees(sp));
     const lb = sp?.labels.find((l) => l.key === 'sky') || sp?.labels[0];
     if (lb) {
       setLabelKey(lb.key);
@@ -142,6 +159,7 @@ export const SendFromMindmapModal: React.FC<SendFromMindmapModalProps> = ({
           color,
           text_color: textColor,
           location: location.trim(),
+          attendee_ids: attendeeIds,
           confirmImmediately,
         });
         onSentEvent(spaceId, res.event);
@@ -217,7 +235,12 @@ export const SendFromMindmapModal: React.FC<SendFromMindmapModalProps> = ({
             </label>
             <select
               value={spaceId}
-              onChange={(e) => setSpaceId(Number(e.target.value))}
+              onChange={(e) => {
+                const nextId = Number(e.target.value);
+                setSpaceId(nextId);
+                const nextSp = spaces.find((s) => s.id === nextId);
+                setAttendeeIds(computeDefaultAttendees(nextSp));
+              }}
               className="w-full px-3 py-2 text-xs font-bold rounded-lg border border-ivory-300 bg-white"
             >
               {spaces.map((s) => (
@@ -366,6 +389,20 @@ export const SendFromMindmapModal: React.FC<SendFromMindmapModalProps> = ({
                   textColor={textColor}
                   onChangeTextColor={setTextColor}
                   previewTitle={title}
+                />
+              )}
+
+              {selectedSpace && (
+                <SpaceMemberPicker
+                  members={selectedSpace.members}
+                  selectedIds={attendeeIds}
+                  onChange={setAttendeeIds}
+                  currentUserId={user?.id}
+                  hint={L(
+                    '선택된 참여자에게만 일정·댓글·리마인더 푸시 알림이 발송됩니다.',
+                    '選択された参加者にのみ予定・コメント・リマインダー通知が送信されます。',
+                    'Only selected attendees receive event, comment, and reminder push notifications.'
+                  )}
                 />
               )}
 

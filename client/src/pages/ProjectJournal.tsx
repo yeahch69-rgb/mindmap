@@ -5632,6 +5632,18 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
         source={spaceBridgeSource}
         spaces={spaces}
         activeSpaceId={activeSpaceId}
+        projectMemberIds={
+          detailProject
+            ? Array.from(
+                new Set(
+                  [
+                    Number(detailProject.created_by),
+                    ...(detailProject.members || []).map((m) => Number(m.user_id)),
+                  ].filter((id) => Number.isInteger(id) && id > 0)
+                )
+              )
+            : []
+        }
         onSentThought={() => {
           void loadProjectSpaceLinks(selectedProjectId);
           onSpacesNeedRefresh?.();

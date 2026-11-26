@@ -111,6 +111,87 @@ function notifySpacePeers(
   void sendPushToUsers(peerIds, payload);
 }
 
+function parseAttendeeIds(raw: unknown): number[] {
+  let list: unknown[] = [];
+  if (Array.isArray(raw)) {
+    list = raw;
+  } else if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) list = parsed;
+    } catch {}
+  }
+  return Array.from(new Set(list.map(Number).filter((id) => Number.isInteger(id) && id > 0)));
+}
+
+function filterValidSpaceAttendees(spaceId: number, candidateIds: number[]): number[] {
+  if (candidateIds.length === 0) return [];
+  const members = db
+    .prepare('SELECT user_id FROM collab_space_members WHERE space_id = ?')
+    .all(spaceId) as Array<{ user_id: number }>;
+  const memberSet = new Set(members.map((m) => Number(m.user_id)));
+  return Array.from(new Set(candidateIds.filter((id) => memberSet.has(id))));
+}
+
+function notifyEventAttendees(
+  spaceId: number,
+  attendeeIds: number[],
+  actorId: number,
+  payload: PushNotificationPayload
+) {
+  const valid = filterValidSpaceAttendees(spaceId, attendeeIds).filter((id) => id !== actorId);
+  if (valid.length === 0) return;
+  void sendPushToUsers(valid, payload);
+}
+
+function notifyThoughtParticipants(
+  spaceId: number,
+  thoughtId: number,
+  thoughtAuthorId: number | null | undefined,
+  actorId: number,
+  payload: PushNotificationPayload
+) {
+  const commentAuthors = db
+    .prepare('SELECT DISTINCT author_id FROM thought_comments WHERE thought_id = ?')
+    .all(thoughtId) as Array<{ author_id: number | null }>;
+  const candidates: number[] = [];
+  if (thoughtAuthorId && Number(thoughtAuthorId) > 0) candidates.push(Number(thoughtAuthorId));
+  for (const row of commentAuthors) {
+    if (row.author_id && Number(row.author_id) > 0) candidates.push(Number(row.author_id));
+  }
+  const valid = filterValidSpaceAttendees(spaceId, candidates).filter((id) => id !== actorId);
+  if (valid.length === 0) return;
+  void sendPushToUsers(valid, payload);
+}
+
+function getMindmapProjectMemberIds(projectId: number): number[] {
+  const p = db
+    .prepare('SELECT id, mode, created_by FROM journal_projects WHERE id = ?')
+    .get(projectId) as { id: number; mode: string; created_by: number } | undefined;
+  if (!p) return [];
+  const ids = new Set<number>();
+  if (Number(p.created_by) > 0) ids.add(Number(p.created_by));
+  if (p.mode === 'COLLAB') {
+    const members = db
+      .prepare('SELECT user_id FROM journal_project_members WHERE project_id = ?')
+      .all(projectId) as Array<{ user_id: number }>;
+    for (const m of members) {
+      if (Number(m.user_id) > 0) ids.add(Number(m.user_id));
+    }
+  }
+  return Array.from(ids);
+}
+
+function notifyMindmapProjectPeers(
+  projectId: number,
+  actorId: number,
+  payload: PushNotificationPayload
+) {
+  const recipients = getMindmapProjectMemberIds(projectId).filter((id) => id > 0 && id !== actorId);
+  if (recipients.length === 0) return;
+  void sendPushToUsers(recipients, payload);
+}
+
 function recordActivity(
   spaceId: number,
   actorId: number,
@@ -1113,9 +1194,7 @@ router.post('/:spaceId/events', (req: Request, res: Response) => {
   const location = String(req.body?.location || '').trim();
   const url = String(req.body?.url || '').trim();
   const description = String(req.body?.description || '').trim();
-  const attendeeIds = Array.isArray(req.body?.attendee_ids)
-    ? req.body.attendee_ids.map(Number).filter((id: number) => Number.isInteger(id) && id > 0)
-    : [];
+  const attendeeIds = filterValidSpaceAttendees(spaceId, parseAttendeeIds(req.body?.attendee_ids));
   const recurrenceType = ['NONE', 'DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'].includes(req.body?.recurrence_type)
     ? req.body.recurrence_type
     : 'NONE';
@@ -1188,10 +1267,20 @@ router.post('/:spaceId/events', (req: Request, res: Response) => {
   }
 
   const space = getSpaceById(spaceId);
+  const spaceName = space?.name || '공유 캘린더';
+  const actorName = req.user!.name;
   const summary =
     eventStatus === 'PROPOSED'
-      ? `${req.user!.name}님이 '${title}' (${startDate}) 일정을 제안했습니다.`
-      : `${req.user!.name}님이 '${title}' (${startDate}) 일정을 추가했습니다.`;
+      ? `${actorName}님이 '${title}' (${startDate}) 일정을 제안했습니다.`
+      : `${actorName}님이 '${title}' (${startDate}) 일정을 추가했습니다.`;
+  const summaryJa =
+    eventStatus === 'PROPOSED'
+      ? `${actorName}さんが「${title}」(${startDate})の日程を提案しました。`
+      : `${actorName}さんが「${title}」(${startDate})の予定を追加しました。`;
+  const summaryEn =
+    eventStatus === 'PROPOSED'
+      ? `${actorName} proposed '${title}' (${startDate}).`
+      : `${actorName} added event '${title}' (${startDate}).`;
 
   recordActivity(
     spaceId,
@@ -1203,9 +1292,13 @@ router.post('/:spaceId/events', (req: Request, res: Response) => {
     { startDate, title }
   );
 
-  notifySpacePeers(spaceId, userId, {
-    title: `📅 ${space?.name || '공유 캘린더'}`,
-    body: summary,
+  notifyEventAttendees(spaceId, attendeeIds, userId, {
+    titleKo: `📅 ${spaceName}`,
+    bodyKo: summary,
+    titleJa: `📅 ${spaceName}`,
+    bodyJa: summaryJa,
+    titleEn: `📅 ${spaceName}`,
+    bodyEn: summaryEn,
     url: `/?tab=calendar&space=${spaceId}&event=${eventId}`,
     tag: `space-ev-${eventId}`,
   });
@@ -1314,8 +1407,12 @@ router.patch('/:spaceId/events/:eventId', (req: Request, res: Response) => {
   const location = req.body?.location !== undefined ? String(req.body.location).trim() : existing.location;
   const url = req.body?.url !== undefined ? String(req.body.url).trim() : existing.url;
   const description = req.body?.description !== undefined ? String(req.body.description).trim() : existing.description;
+  const prevAttendeeIds = parseAttendeeIds(existing.attendee_ids_json);
+  const nextAttendeeIds = Array.isArray(req.body?.attendee_ids)
+    ? filterValidSpaceAttendees(spaceId, parseAttendeeIds(req.body.attendee_ids))
+    : prevAttendeeIds;
   const attendeeIdsJson = Array.isArray(req.body?.attendee_ids)
-    ? JSON.stringify(req.body.attendee_ids.map(Number).filter((id: number) => Number.isInteger(id) && id > 0))
+    ? JSON.stringify(nextAttendeeIds)
     : existing.attendee_ids_json;
   const recurrenceType =
     req.body?.recurrence_type !== undefined &&
@@ -1367,20 +1464,44 @@ router.patch('/:spaceId/events/:eventId', (req: Request, res: Response) => {
     eventId
   );
 
-  const changes: string[] = [];
-  if (title !== existing.title) changes.push(`제목 '${title}'`);
+  const changesKo: string[] = [];
+  const changesJa: string[] = [];
+  const changesEn: string[] = [];
+  if (title !== existing.title) {
+    changesKo.push(`제목 '${title}'`);
+    changesJa.push(`タイトル「${title}」`);
+    changesEn.push(`title '${title}'`);
+  }
   if (startDate !== existing.start_date || endDate !== existing.end_date) {
-    changes.push(`날짜 ${startDate}${endDate !== startDate ? `~${endDate}` : ''}`);
+    const rangeStr = `${startDate}${endDate !== startDate ? `~${endDate}` : ''}`;
+    changesKo.push(`날짜 ${rangeStr}`);
+    changesJa.push(`日付 ${rangeStr}`);
+    changesEn.push(`date ${rangeStr}`);
   }
   if (Boolean(isAllDay) !== Boolean(existing.is_all_day) || startTime !== existing.start_time || endTime !== existing.end_time) {
-    changes.push(isAllDay ? '시간 종일' : `시간 ${startTime}~${endTime}`);
+    changesKo.push(isAllDay ? '시간 종일' : `시간 ${startTime}~${endTime}`);
+    changesJa.push(isAllDay ? '時間 終日' : `時間 ${startTime}~${endTime}`);
+    changesEn.push(isAllDay ? 'All Day' : `time ${startTime}~${endTime}`);
   }
-  if (location !== (existing.location || '')) changes.push(`장소 '${location || '없음'}'`);
+  if (location !== (existing.location || '')) {
+    changesKo.push(`장소 '${location || '없음'}'`);
+    changesJa.push(`場所「${location || 'なし'}」`);
+    changesEn.push(`location '${location || 'none'}'`);
+  }
 
+  const actorName = req.user!.name;
   const changeLog =
-    changes.length > 0
-      ? `${req.user!.name}님이 일정을 수정했습니다 (${changes.join(', ')}).`
-      : `${req.user!.name}님이 일정 정보를 업데이트했습니다.`;
+    changesKo.length > 0
+      ? `${actorName}님이 일정을 수정했습니다 (${changesKo.join(', ')}).`
+      : `${actorName}님이 일정 정보를 업데이트했습니다.`;
+  const changeLogJa =
+    changesJa.length > 0
+      ? `${actorName}さんが予定を更新しました（${changesJa.join('、')}）。`
+      : `${actorName}さんが予定情報を更新しました。`;
+  const changeLogEn =
+    changesEn.length > 0
+      ? `${actorName} updated the event (${changesEn.join(', ')}).`
+      : `${actorName} updated the event details.`;
 
   db.prepare(`
     INSERT INTO calendar_event_comments (event_id, author_id, is_system, content)
@@ -1392,16 +1513,40 @@ router.patch('/:spaceId/events/:eventId', (req: Request, res: Response) => {
   }
 
   const space = getSpaceById(spaceId);
-  recordActivity(spaceId, userId, 'EVENT_UPDATED', 'EVENT', eventId, `${req.user!.name}님이 '${title}' 일정을 수정했습니다.`, {
+  const spaceName = space?.name || '공유 캘린더';
+  recordActivity(spaceId, userId, 'EVENT_UPDATED', 'EVENT', eventId, `${actorName}님이 '${title}' 일정을 수정했습니다.`, {
     startDate,
   });
 
-  notifySpacePeers(spaceId, userId, {
-    title: `📅 ${space?.name || '공유 캘린더'}`,
-    body: changeLog,
-    url: `/?tab=calendar&space=${spaceId}&event=${eventId}`,
-    tag: `space-ev-upd-${eventId}`,
-  });
+  const prevAttendeeSet = new Set(prevAttendeeIds);
+  const newlyAddedAttendees = nextAttendeeIds.filter((id) => !prevAttendeeSet.has(id));
+  const continuingAttendees = nextAttendeeIds.filter((id) => prevAttendeeSet.has(id));
+
+  if (newlyAddedAttendees.length > 0) {
+    notifyEventAttendees(spaceId, newlyAddedAttendees, userId, {
+      titleKo: `📅 ${spaceName}`,
+      bodyKo: `${actorName}님이 '${title}' (${startDate}) 일정 참여자로 추가했습니다.`,
+      titleJa: `📅 ${spaceName}`,
+      bodyJa: `${actorName}さんが「${title}」(${startDate})の参加者に追加しました。`,
+      titleEn: `📅 ${spaceName}`,
+      bodyEn: `${actorName} added you to event '${title}' (${startDate}).`,
+      url: `/?tab=calendar&space=${spaceId}&event=${eventId}`,
+      tag: `space-ev-add-${eventId}`,
+    });
+  }
+
+  if (continuingAttendees.length > 0) {
+    notifyEventAttendees(spaceId, continuingAttendees, userId, {
+      titleKo: `📅 ${spaceName}`,
+      bodyKo: changeLog,
+      titleJa: `📅 ${spaceName}`,
+      bodyJa: changeLogJa,
+      titleEn: `📅 ${spaceName}`,
+      bodyEn: changeLogEn,
+      url: `/?tab=calendar&space=${spaceId}&event=${eventId}`,
+      tag: `space-ev-upd-${eventId}`,
+    });
+  }
 
   const updated = db
     .prepare(`SELECT e.*, u.name as creator_name FROM calendar_events e LEFT JOIN users u ON u.id = e.created_by WHERE e.id = ?`)
@@ -1448,19 +1593,25 @@ router.post('/:spaceId/events/:eventId/move', (req: Request, res: Response) => {
   `).run(eventId, userId, logMsg);
 
   const space = getSpaceById(spaceId);
+  const spaceName = space?.name || '공유 캘린더';
+  const actorName = req.user!.name;
   recordActivity(
     spaceId,
     userId,
     'EVENT_MOVED',
     'EVENT',
     eventId,
-    `${req.user!.name}님이 '${existing.title}' 일정을 ${targetDate}로 이동했습니다.`,
+    `${actorName}님이 '${existing.title}' 일정을 ${targetDate}로 이동했습니다.`,
     { startDate: targetDate }
   );
 
-  notifySpacePeers(spaceId, userId, {
-    title: `📅 ${space?.name || '공유 캘린더'}`,
-    body: `${req.user!.name}님이 '${existing.title}' 일정을 ${targetDate}로 이동했습니다.`,
+  notifyEventAttendees(spaceId, parseAttendeeIds(existing.attendee_ids_json), userId, {
+    titleKo: `📅 ${spaceName}`,
+    bodyKo: `${actorName}님이 '${existing.title}' 일정을 ${targetDate}로 이동했습니다.`,
+    titleJa: `📅 ${spaceName}`,
+    bodyJa: `${actorName}さんが「${existing.title}」を ${targetDate} に移動しました。`,
+    titleEn: `📅 ${spaceName}`,
+    bodyEn: `${actorName} moved '${existing.title}' to ${targetDate}.`,
     url: `/?tab=calendar&space=${spaceId}&event=${eventId}`,
     tag: `space-ev-mv-${eventId}`,
   });
@@ -1539,12 +1690,18 @@ router.post('/:spaceId/events/:eventId/copy', (req: Request, res: Response) => {
   }
 
   const space = getSpaceById(spaceId);
-  const summary = `${req.user!.name}님이 '${source.title}' 일정을 ${targetDate}에 복사했습니다.`;
+  const spaceName = space?.name || '공유 캘린더';
+  const actorName = req.user!.name;
+  const summary = `${actorName}님이 '${source.title}' 일정을 ${targetDate}에 복사했습니다.`;
   recordActivity(spaceId, userId, 'EVENT_COPIED', 'EVENT', newEventId, summary, { startDate: targetDate });
 
-  notifySpacePeers(spaceId, userId, {
-    title: `📅 ${space?.name || '공유 캘린더'}`,
-    body: summary,
+  notifyEventAttendees(spaceId, parseAttendeeIds(source.attendee_ids_json), userId, {
+    titleKo: `📅 ${spaceName}`,
+    bodyKo: summary,
+    titleJa: `📅 ${spaceName}`,
+    bodyJa: `${actorName}さんが「${source.title}」を ${targetDate} にコピーしました。`,
+    titleEn: `📅 ${spaceName}`,
+    bodyEn: `${actorName} copied '${source.title}' to ${targetDate}.`,
     url: `/?tab=calendar&space=${spaceId}&event=${newEventId}`,
     tag: `space-ev-cp-${newEventId}`,
   });
@@ -1646,12 +1803,18 @@ router.post('/:spaceId/events/:eventId/confirm', (req: Request, res: Response) =
   tx();
 
   const space = getSpaceById(spaceId);
-  const summary = `${req.user!.name}님이 '${ev.title}' (${ev.start_date}) 일정을 확정했습니다!`;
+  const spaceName = space?.name || '공유 캘린더';
+  const actorName = req.user!.name;
+  const summary = `${actorName}님이 '${ev.title}' (${ev.start_date}) 일정을 확정했습니다!`;
   recordActivity(spaceId, userId, 'EVENT_CONFIRMED', 'EVENT', eventId, summary, { startDate: ev.start_date });
 
-  notifySpacePeers(spaceId, userId, {
-    title: `✅ ${space?.name || '공유 캘린더'}`,
-    body: summary,
+  notifyEventAttendees(spaceId, parseAttendeeIds(ev.attendee_ids_json), userId, {
+    titleKo: `✅ ${spaceName}`,
+    bodyKo: summary,
+    titleJa: `✅ ${spaceName}`,
+    bodyJa: `${actorName}さんが「${ev.title}」(${ev.start_date})の予定を確定しました！`,
+    titleEn: `✅ ${spaceName}`,
+    bodyEn: `${actorName} confirmed '${ev.title}' (${ev.start_date})!`,
     url: `/?tab=calendar&space=${spaceId}&event=${eventId}`,
     tag: `space-ev-confirm-${eventId}`,
   });
@@ -1706,7 +1869,7 @@ router.post('/:spaceId/events/:eventId/comments', (req: Request, res: Response) 
   }
 
   const ev = db
-    .prepare('SELECT id, title, start_date FROM calendar_events WHERE id = ? AND space_id = ?')
+    .prepare('SELECT id, title, start_date, attendee_ids_json FROM calendar_events WHERE id = ? AND space_id = ?')
     .get(eventId, spaceId) as any;
   if (!ev) {
     res.status(404).json({ error: '일정을 찾을 수 없습니다.' });
@@ -1728,13 +1891,19 @@ router.post('/:spaceId/events/:eventId/comments', (req: Request, res: Response) 
 
   const commentId = Number(result.lastInsertRowid);
   const space = getSpaceById(spaceId);
+  const spaceName = space?.name || '공유 캘린더';
+  const actorName = req.user!.name;
   const snippet = content.length > 42 ? `${content.slice(0, 41)}…` : content;
-  const summary = `${req.user!.name}님이 '${ev.title}' 채팅에 남김: "${snippet}"`;
+  const summary = `${actorName}님이 '${ev.title}' 채팅에 남김: "${snippet}"`;
 
   recordActivity(spaceId, userId, 'EVENT_COMMENT', 'EVENT', eventId, summary, { startDate: ev.start_date });
-  notifySpacePeers(spaceId, userId, {
-    title: `💬 ${ev.title} (${space?.name || '공유 캘린더'})`,
-    body: `${req.user!.name}: ${snippet}`,
+  notifyEventAttendees(spaceId, parseAttendeeIds(ev.attendee_ids_json), userId, {
+    titleKo: `💬 ${ev.title} (${spaceName})`,
+    bodyKo: `${actorName}: ${snippet}`,
+    titleJa: `💬 ${ev.title} (${spaceName})`,
+    bodyJa: `${actorName}: ${snippet}`,
+    titleEn: `💬 ${ev.title} (${spaceName})`,
+    bodyEn: `${actorName}: ${snippet}`,
     url: `/?tab=calendar&space=${spaceId}&event=${eventId}`,
     tag: `space-ev-chat-${eventId}`,
   });
@@ -2148,7 +2317,7 @@ router.post('/:spaceId/thoughts/:thoughtId/comments', (req: Request, res: Respon
   }
 
   const thought = db
-    .prepare('SELECT id, title, content, status FROM shared_thoughts WHERE id = ? AND space_id = ?')
+    .prepare('SELECT id, title, content, status, author_id FROM shared_thoughts WHERE id = ? AND space_id = ?')
     .get(thoughtId, spaceId) as any;
   if (!thought) {
     res.status(404).json({ error: '생각을 찾을 수 없습니다.' });
@@ -2181,16 +2350,26 @@ router.post('/:spaceId/thoughts/:thoughtId/comments', (req: Request, res: Respon
   }
 
   const space = getSpaceById(spaceId);
+  const spaceName = space?.name || '공유 메모장';
+  const actorName = req.user!.name;
   const typeLabel =
     commentType === 'EDIT_PROPOSAL' ? '수정 제안' : commentType === 'ADD_PROPOSAL' ? '추가 아이디어' : '의견';
+  const typeJa =
+    commentType === 'EDIT_PROPOSAL' ? '修正提案' : commentType === 'ADD_PROPOSAL' ? '追加アイデア' : 'コメント';
+  const typeEn =
+    commentType === 'EDIT_PROPOSAL' ? 'Edit Proposal' : commentType === 'ADD_PROPOSAL' ? 'Add Idea' : 'Comment';
   const snippet = content.length > 36 ? `${content.slice(0, 35)}…` : content;
   const titleHint = thought.title || String(thought.content).slice(0, 20);
-  const summary = `${req.user!.name}님이 '${titleHint}'에 [${typeLabel}]을 남겼습니다: "${snippet}"`;
+  const summary = `${actorName}님이 '${titleHint}'에 [${typeLabel}]을 남겼습니다: "${snippet}"`;
 
   recordActivity(spaceId, userId, 'THOUGHT_COMMENT', 'THOUGHT', thoughtId, summary);
-  notifySpacePeers(spaceId, userId, {
-    title: `💡 ${space?.name || '공유 메모장'}`,
-    body: summary,
+  notifyThoughtParticipants(spaceId, thoughtId, thought.author_id, userId, {
+    titleKo: `💡 ${spaceName}`,
+    bodyKo: summary,
+    titleJa: `💡 ${spaceName}`,
+    bodyJa: `${actorName}さんが「${titleHint}」に[${typeJa}]を投稿しました：「${snippet}」`,
+    titleEn: `💡 ${spaceName}`,
+    bodyEn: `${actorName} posted [${typeEn}] on '${titleHint}': "${snippet}"`,
     url: `/?tab=thoughts&space=${spaceId}&thought=${thoughtId}`,
     tag: `space-thought-cmt-${thoughtId}`,
   });
@@ -2300,13 +2479,19 @@ router.post('/:spaceId/thoughts/:thoughtId/comments/:commentId/apply', (req: Req
   syncContentAcrossLinkedEntities('THOUGHT', thoughtId, { content: nextContent }, userId);
 
   const space = getSpaceById(spaceId);
+  const spaceName = space?.name || '공유 메모장';
+  const actorName = req.user!.name;
   const titleHint = thought.title || String(thought.content).slice(0, 24);
-  const summary = `${req.user!.name}님이 '${titleHint}'에 ${comment.author_name}님의 제안을 본문에 반영했습니다.`;
+  const summary = `${actorName}님이 '${titleHint}'에 ${comment.author_name}님의 제안을 본문에 반영했습니다.`;
   recordActivity(spaceId, userId, 'THOUGHT_MERGED', 'THOUGHT', thoughtId, summary);
 
-  notifySpacePeers(spaceId, userId, {
-    title: `✨ ${space?.name || '공유 메모장'}`,
-    body: summary,
+  notifyThoughtParticipants(spaceId, thoughtId, thought.author_id, userId, {
+    titleKo: `✨ ${spaceName}`,
+    bodyKo: summary,
+    titleJa: `✨ ${spaceName}`,
+    bodyJa: `${actorName}さんが「${titleHint}」に${comment.author_name}さんの提案を反映しました。`,
+    titleEn: `✨ ${spaceName}`,
+    bodyEn: `${actorName} merged ${comment.author_name}'s suggestion into '${titleHint}'.`,
     url: `/?tab=thoughts&space=${spaceId}&thought=${thoughtId}`,
     tag: `space-thought-merge-${thoughtId}`,
   });
@@ -2355,9 +2540,7 @@ router.post('/:spaceId/thoughts/:thoughtId/propose-date', (req: Request, res: Re
   const note = String(req.body?.note || '').trim();
   const confirmImmediately = Boolean(req.body?.confirmImmediately);
   const eventStatus = confirmImmediately ? 'CONFIRMED' : 'PROPOSED';
-  const attendeeIds = Array.isArray(req.body?.attendee_ids)
-    ? req.body.attendee_ids.map(Number).filter((id: number) => Number.isInteger(id) && id > 0)
-    : [];
+  const attendeeIds = filterValidSpaceAttendees(spaceId, parseAttendeeIds(req.body?.attendee_ids));
 
   const result = db
     .prepare(`
@@ -2421,9 +2604,17 @@ router.post('/:spaceId/thoughts/:thoughtId/propose-date', (req: Request, res: Re
   syncLinkedThoughtStatus(thoughtId);
 
   const space = getSpaceById(spaceId);
+  const spaceName = space?.name || '공유 캘린더';
+  const actorName = req.user!.name;
   const summary = confirmImmediately
-    ? `${req.user!.name}님이 생각 '${title}'을 ${startDate} 일정으로 바로 등록했습니다.`
-    : `${req.user!.name}님이 생각 '${title}'에 ${startDate} 날짜를 제안했습니다!`;
+    ? `${actorName}님이 생각 '${title}'을 ${startDate} 일정으로 바로 등록했습니다.`
+    : `${actorName}님이 생각 '${title}'에 ${startDate} 날짜를 제안했습니다!`;
+  const summaryJa = confirmImmediately
+    ? `${actorName}さんがメモ「${title}」を ${startDate} の予定として登録しました。`
+    : `${actorName}さんがメモ「${title}」に ${startDate} の日程を提案しました！`;
+  const summaryEn = confirmImmediately
+    ? `${actorName} scheduled thought '${title}' on ${startDate}.`
+    : `${actorName} proposed ${startDate} for thought '${title}'!`;
 
   recordActivity(
     spaceId,
@@ -2435,9 +2626,13 @@ router.post('/:spaceId/thoughts/:thoughtId/propose-date', (req: Request, res: Re
     { startDate, thoughtId }
   );
 
-  notifySpacePeers(spaceId, userId, {
-    title: `📅 ${space?.name || '공유 캘린더'}`,
-    body: summary,
+  notifyEventAttendees(spaceId, attendeeIds, userId, {
+    titleKo: `📅 ${spaceName}`,
+    bodyKo: summary,
+    titleJa: `📅 ${spaceName}`,
+    bodyJa: summaryJa,
+    titleEn: `📅 ${spaceName}`,
+    bodyEn: summaryEn,
     url: `/?tab=calendar&space=${spaceId}&event=${eventId}`,
     tag: `space-prop-${eventId}`,
   });
@@ -2491,10 +2686,18 @@ router.post('/:spaceId/thoughts/:thoughtId/send-to-mindmap', (req: Request, res:
     const title = String(req.body?.title || '').trim() || thought.title || String(thought.content).slice(0, 48);
     const intent = String(req.body?.intent ?? thought.content).trim();
     const color = String(req.body?.color || space?.color || '#1B4D3E').trim();
-    const includeSpaceMembers = req.body?.includeSpaceMembers !== false;
     const spaceMembers = getSpaceMembers(spaceId);
     const otherMembers = spaceMembers.filter((m) => Number(m.user_id) !== userId);
-    const isCollab = includeSpaceMembers && otherMembers.length > 0;
+    const hasExplicitMemberIds = Array.isArray(req.body?.memberIds);
+    const requestedMemberIdSet = hasExplicitMemberIds
+      ? new Set(parseAttendeeIds(req.body.memberIds))
+      : null;
+    const selectedOtherMembers = hasExplicitMemberIds
+      ? otherMembers.filter((m) => requestedMemberIdSet!.has(Number(m.user_id)))
+      : req.body?.includeSpaceMembers === true
+        ? otherMembers
+        : [];
+    const isCollab = selectedOtherMembers.length > 0;
 
     const projectId = db.transaction(() => {
       const pRes = db
@@ -2521,7 +2724,7 @@ router.post('/:spaceId/thoughts/:thoughtId/send-to-mindmap', (req: Request, res:
       const pid = Number(pRes.lastInsertRowid);
 
       if (isCollab) {
-        for (const m of otherMembers) {
+        for (const m of selectedOtherMembers) {
           db.prepare(`
             INSERT OR IGNORE INTO journal_project_members (project_id, user_id, role)
             VALUES (?, ?, 'MEMBER')
@@ -2543,14 +2746,24 @@ router.post('/:spaceId/thoughts/:thoughtId/send-to-mindmap', (req: Request, res:
       return pid;
     })();
 
-    const summary = `${req.user!.name}님이 생각 '${title}'을(를) 새 마인드맵 프로젝트로 시작했습니다.`;
+    const actorName = req.user!.name;
+    const spaceName = space?.name || '공유 메모장';
+    const summary = `${actorName}님이 생각 '${title}'을(를) 새 마인드맵 프로젝트로 시작했습니다.`;
     recordActivity(spaceId, userId, 'THOUGHT_TO_MINDMAP', 'THOUGHT', thoughtId, summary, { projectId });
-    notifySpacePeers(spaceId, userId, {
-      title: `🧠 ${space?.name || '공유 메모장'}`,
-      body: summary,
-      url: `/?project=${projectId}`,
-      tag: `space-to-mm-${projectId}`,
-    });
+    const selectedPeerIds = selectedOtherMembers.map((m) => Number(m.user_id));
+    if (selectedPeerIds.length > 0) {
+      void sendPushToUsers(selectedPeerIds, {
+        titleKo: `🧠 ${spaceName}`,
+        bodyKo: summary,
+        titleJa: `🧠 ${spaceName}`,
+        bodyJa: `${actorName}さんがメモ「${title}」を新規マインドマッププロジェクトとして開始しました。`,
+        titleEn: `🧠 ${spaceName}`,
+        bodyEn: `${actorName} started a new Mindmap project from thought '${title}'.`,
+        url: `/?project=${projectId}`,
+        projectId,
+        tag: `space-to-mm-${projectId}`,
+      });
+    }
 
     res.status(201).json({ mode: 'NEW_PROJECT', projectId });
     return;
@@ -2593,8 +2806,20 @@ router.post('/:spaceId/thoughts/:thoughtId/send-to-mindmap', (req: Request, res:
       return iid;
     })();
 
-    const summary = `${req.user!.name}님이 생각 '${ideaTitle}'을(를) 마인드맵 '${project.title}' 아이디어로 연결했습니다.`;
+    const actorName = req.user!.name;
+    const summary = `${actorName}님이 생각 '${ideaTitle}'을(를) 마인드맵 '${project.title}' 아이디어로 연결했습니다.`;
     recordActivity(spaceId, userId, 'THOUGHT_TO_MINDMAP', 'THOUGHT', thoughtId, summary, { projectId, ideaId });
+    notifyMindmapProjectPeers(projectId, userId, {
+      titleKo: `📌 ${project.title}`,
+      bodyKo: `💡 ${actorName}님이 공유 메모장에서 아이디어 '${ideaTitle}'을(를) 추가했습니다.`,
+      titleJa: `📌 ${project.title}`,
+      bodyJa: `💡 ${actorName}さんが共有メモ帳からアイデア「${ideaTitle}」を追加しました。`,
+      titleEn: `📌 ${project.title}`,
+      bodyEn: `💡 ${actorName} added idea '${ideaTitle}' from Shared Thought Pad.`,
+      url: `/?project=${projectId}`,
+      projectId,
+      tag: `space-to-mm-idea-${ideaId}`,
+    });
     res.status(201).json({ mode: 'EXISTING_IDEA', projectId, ideaId });
     return;
   }
@@ -2630,8 +2855,21 @@ router.post('/:spaceId/thoughts/:thoughtId/send-to-mindmap', (req: Request, res:
       return eid;
     })();
 
-    const summary = `${req.user!.name}님이 생각을 마인드맵 '${project.title}' 타임라인 기록으로 연결했습니다.`;
+    const actorName = req.user!.name;
+    const snippet = entryContent.length > 50 ? `${entryContent.slice(0, 49)}…` : entryContent;
+    const summary = `${actorName}님이 생각을 마인드맵 '${project.title}' 타임라인 기록으로 연결했습니다.`;
     recordActivity(spaceId, userId, 'THOUGHT_TO_MINDMAP', 'THOUGHT', thoughtId, summary, { projectId, entryId });
+    notifyMindmapProjectPeers(projectId, userId, {
+      titleKo: `📌 ${project.title}`,
+      bodyKo: `📝 ${actorName}님이 공유 메모장에서 기록을 추가했습니다: ${snippet}`,
+      titleJa: `📌 ${project.title}`,
+      bodyJa: `📝 ${actorName}さんが共有メモ帳から記録を追加しました：${snippet}`,
+      titleEn: `📌 ${project.title}`,
+      bodyEn: `📝 ${actorName} added a timeline entry from Shared Thought Pad: ${snippet}`,
+      url: `/?project=${projectId}`,
+      projectId,
+      tag: `space-to-mm-entry-${entryId}`,
+    });
     res.status(201).json({ mode: 'EXISTING_ENTRY', projectId, entryId });
     return;
   }
@@ -2751,7 +2989,9 @@ router.post('/from-mindmap/event', (req: Request, res: Response) => {
   const location = String(req.body?.location || '').trim();
   const confirmImmediately = req.body?.confirmImmediately !== false;
   const eventStatus = confirmImmediately ? 'CONFIRMED' : 'PROPOSED';
-  const attendeeIds = getSpaceMembers(spaceId).map((m) => Number(m.user_id));
+  const attendeeIds = Array.isArray(req.body?.attendee_ids)
+    ? filterValidSpaceAttendees(spaceId, parseAttendeeIds(req.body.attendee_ids))
+    : filterValidSpaceAttendees(spaceId, getMindmapProjectMemberIds(projectId));
 
   const eventId = db.transaction(() => {
     const eRes = db
@@ -2813,7 +3053,9 @@ router.post('/from-mindmap/event', (req: Request, res: Response) => {
   })();
 
   const space = getSpaceById(spaceId);
-  const summary = `${req.user!.name}님이 마인드맵에서 '${title}' (${startDate}) 일정을 공유 캘린더에 연결했습니다.`;
+  const spaceName = space?.name || '공유 캘린더';
+  const actorName = req.user!.name;
+  const summary = `${actorName}님이 마인드맵에서 '${title}' (${startDate}) 일정을 공유 캘린더에 연결했습니다.`;
   recordActivity(
     spaceId,
     userId,
@@ -2823,9 +3065,13 @@ router.post('/from-mindmap/event', (req: Request, res: Response) => {
     summary,
     { startDate, projectId }
   );
-  notifySpacePeers(spaceId, userId, {
-    title: `📅 ${space?.name || '공유 캘린더'}`,
-    body: summary,
+  notifyEventAttendees(spaceId, attendeeIds, userId, {
+    titleKo: `📅 ${spaceName}`,
+    bodyKo: summary,
+    titleJa: `📅 ${spaceName}`,
+    bodyJa: `${actorName}さんがマインドマップから「${title}」(${startDate})を共有カレンダーに連携しました。`,
+    titleEn: `📅 ${spaceName}`,
+    bodyEn: `${actorName} linked '${title}' (${startDate}) from Mindmap to Shared Calendar.`,
     url: `/?tab=calendar&space=${spaceId}&event=${eventId}`,
     tag: `mm-to-ev-${eventId}`,
   });
