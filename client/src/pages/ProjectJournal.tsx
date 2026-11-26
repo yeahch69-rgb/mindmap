@@ -62,6 +62,7 @@ import {
 import { JournalHorizontalTimeline } from '../components/journal/JournalHorizontalTimeline';
 import { JournalMindMap } from '../components/journal/JournalMindMap';
 import { JournalFreeMindMap } from '../components/journal/JournalFreeMindMap';
+import { TimelineCardActionItem, TimelineCardActionsMenu } from '../components/journal/TimelineCardActionsMenu';
 import {
   CreateJournalEntryPayload,
   CreateJournalIdeaPayload,
@@ -3996,6 +3997,85 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 const completedLogs = completedTargetsMap.get(targetKey) || [];
                                 const isCompleted = completedLogs.length > 0;
                                 const latestComp = completedLogs[completedLogs.length - 1];
+                                const { compact: ideaCompactDt, full: ideaFullDt } = formatCompactTimelineDateTime(
+                                  item.dateKey,
+                                  item.timeKey
+                                );
+                                const isBranchActive = timelineParentNodeKey === `idea-${idea.id}`;
+                                const ideaActions: TimelineCardActionItem[] = [
+                                  {
+                                    key: 'map',
+                                    label: L('맵에서 위치 보기', 'マップで位置を見る', 'Locate on Mind Map'),
+                                    icon: <GitBranch className="w-3.5 h-3.5 text-forest-700" />,
+                                    onClick: () => handleJumpFromTimelineToMindMap(`idea-${idea.id}`),
+                                  },
+                                  {
+                                    key: 'branch',
+                                    label: L('이어쓰기', '続けて記録', 'Branch from Here'),
+                                    icon: <CornerDownRight className="w-3.5 h-3.5 text-emerald-700" />,
+                                    active: isBranchActive,
+                                    onClick: () => {
+                                      setTimelineParentNodeKey(`idea-${idea.id}`);
+                                      composerFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                                    },
+                                  },
+                                  {
+                                    key: 'complete',
+                                    label: L('완료 기록 작성', '完了記録を作成', 'Mark as Done'),
+                                    icon: <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />,
+                                    tone: 'emerald',
+                                    onClick: () => handleStartCompleteTarget(targetKey),
+                                  },
+                                  {
+                                    key: 'edit',
+                                    label: L('아이디어 수정', 'アイデアを編集', 'Edit Idea'),
+                                    icon: <Edit2 className="w-3.5 h-3.5 text-charcoal-600" />,
+                                    onClick: () => handleStartEditIdea(idea),
+                                  },
+                                ];
+                                if (spaces.length > 0) {
+                                  ideaActions.push(
+                                    {
+                                      key: 'to-thought',
+                                      label: L('공유 메모장으로 보내기', '共有メモ帳へ送る', 'Send to Shared Thought Pad'),
+                                      icon: <Lightbulb className="w-3.5 h-3.5 text-amber-700" />,
+                                      tone: 'amber',
+                                      dividerBefore: true,
+                                      onClick: () =>
+                                        setSpaceBridgeSource({
+                                          sourceType: 'IDEA',
+                                          sourceId: idea.id,
+                                          projectId: detailProject.id,
+                                          defaultTitle: idea.title,
+                                          defaultContent: idea.note || idea.title,
+                                          initialDestination: 'thought',
+                                        }),
+                                    },
+                                    {
+                                      key: 'to-calendar',
+                                      label: L('공유 캘린더에 등록', '共有カレンダーへ登録', 'Send to Shared Calendar'),
+                                      icon: <Calendar className="w-3.5 h-3.5 text-emerald-700" />,
+                                      tone: 'emerald',
+                                      onClick: () =>
+                                        setSpaceBridgeSource({
+                                          sourceType: 'IDEA',
+                                          sourceId: idea.id,
+                                          projectId: detailProject.id,
+                                          defaultTitle: idea.title,
+                                          defaultContent: idea.note || '',
+                                          initialDestination: 'calendar',
+                                        }),
+                                    }
+                                  );
+                                }
+                                ideaActions.push({
+                                  key: 'delete',
+                                  label: t('common.delete'),
+                                  icon: <Trash2 className="w-3.5 h-3.5 text-rose-600" />,
+                                  tone: 'danger',
+                                  dividerBefore: true,
+                                  onClick: () => handleDeleteIdea(idea.id),
+                                });
 
                                 return (
                                   <div
@@ -4009,25 +4089,22 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                         : 'bg-yellow-50/50 border-amber-300'
                                     } ${highlightTimelineKey === `idea-${idea.id}` ? 'ring-2 ring-inset ring-amber-500 border-amber-500 shadow-md' : ''}`}
                                   >
-                                    <div className="flex items-center justify-between gap-1.5 min-w-0">
-                                      <div className="flex items-center gap-1.5 min-w-0 flex-nowrap">
-                                        <span className="font-bold text-charcoal-900 truncate whitespace-nowrap">
+                                    <div className="flex items-start sm:items-center justify-between gap-2 min-w-0">
+                                      <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                                        <span className="font-bold text-charcoal-900 leading-snug break-keep">
                                           {L('💡 아이디어', '💡 アイデア', '💡 Idea')}
                                         </span>
-                                        {(() => {
-                                          const { compact, full } = formatCompactTimelineDateTime(item.dateKey, item.timeKey);
-                                          return compact ? (
-                                            <span
-                                              className="font-mono text-[10.5px] text-charcoal-500 whitespace-nowrap shrink-0"
-                                              title={full}
-                                            >
-                                              {compact}
-                                            </span>
-                                          ) : null;
-                                        })()}
+                                        {ideaCompactDt && (
+                                          <span
+                                            className="hidden sm:inline font-mono text-[10.5px] text-charcoal-500 whitespace-nowrap shrink-0"
+                                            title={ideaFullDt}
+                                          >
+                                            {ideaCompactDt}
+                                          </span>
+                                        )}
                                       </div>
 
-                                      <div className="flex items-center gap-0.5 shrink-0 flex-wrap justify-end">
+                                      <div className="flex items-center gap-1 shrink-0">
                                         <TranslateButton
                                           size="xs"
                                           visible={tr.shouldShowButton(idea.title, idea.note)}
@@ -4045,96 +4122,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                             )
                                           }
                                         />
-                                        <button
-                                          type="button"
-                                          onClick={() => handleJumpFromTimelineToMindMap(`idea-${idea.id}`)}
-                                          className="px-1.5 py-1 rounded-lg border bg-white border-ivory-300 text-charcoal-700 hover:bg-sky-50 hover:border-sky-300 text-[11px] font-bold inline-flex items-center gap-0.5 transition"
-                                          title={L('마인드맵에서 이 아이디어 위치 보기', 'マインドマップで位置を見る', 'Locate on Mind Map')}
-                                        >
-                                          <GitBranch className="w-3.5 h-3.5 text-forest-700" />
-                                          <span className="hidden sm:inline">{L('맵', 'マップ', 'Map')}</span>
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setTimelineParentNodeKey(`idea-${idea.id}`);
-                                            composerFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                                          }}
-                                          className={`px-1.5 py-1 rounded-lg border text-[11px] font-bold inline-flex items-center gap-0.5 transition ${
-                                            timelineParentNodeKey === `idea-${idea.id}`
-                                              ? 'bg-emerald-700 text-white border-emerald-800'
-                                              : 'bg-white border-ivory-300 text-charcoal-700 hover:bg-emerald-50 hover:border-emerald-300'
-                                          }`}
-                                          title={L('이 아이디어 노드에 이어서 새 가지 작성', 'このアイデアの先に続けて記録', 'Branch next entry from this idea')}
-                                        >
-                                          <CornerDownRight className="w-3.5 h-3.5" />
-                                          <span className="hidden sm:inline">{L('이어쓰기', '続けて記録', 'Branch')}</span>
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => handleStartCompleteTarget(targetKey)}
-                                          className="p-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 inline-flex items-center justify-center transition"
-                                          title={L('완료 기록 작성', '完了記録を作成', 'Mark as done')}
-                                          aria-label={L('완료 기록 작성', '完了記録を作成', 'Mark as done')}
-                                        >
-                                          <CheckCircle2 className="w-4 h-4" />
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => handleStartEditIdea(idea)}
-                                          className="p-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 hover:bg-ivory-100 inline-flex items-center justify-center transition"
-                                          title={L('아이디어 수정', 'アイデアを編集', 'Edit idea')}
-                                          aria-label={L('아이디어 수정', 'アイデアを編集', 'Edit idea')}
-                                        >
-                                          <Edit2 className="w-4 h-4" />
-                                        </button>
-                                        {spaces.length > 0 && (
-                                          <>
-                                            <button
-                                              type="button"
-                                              onClick={() =>
-                                                setSpaceBridgeSource({
-                                                  sourceType: 'IDEA',
-                                                  sourceId: idea.id,
-                                                  projectId: detailProject.id,
-                                                  defaultTitle: idea.title,
-                                                  defaultContent: idea.note || idea.title,
-                                                  initialDestination: 'thought',
-                                                })
-                                              }
-                                              className="p-1 rounded-lg bg-amber-50 border border-amber-300 text-amber-800 hover:bg-amber-100 inline-flex items-center justify-center transition"
-                                              title={L('공유 메모장으로 보내기', '共有メモ帳へ送る', 'Send to Shared Thought Pad')}
-                                            >
-                                              <Lightbulb className="w-4 h-4" />
-                                            </button>
-                                            <button
-                                              type="button"
-                                              onClick={() =>
-                                                setSpaceBridgeSource({
-                                                  sourceType: 'IDEA',
-                                                  sourceId: idea.id,
-                                                  projectId: detailProject.id,
-                                                  defaultTitle: idea.title,
-                                                  defaultContent: idea.note || '',
-                                                  initialDestination: 'calendar',
-                                                })
-                                              }
-                                              className="p-1 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-800 hover:bg-emerald-100 inline-flex items-center justify-center transition"
-                                              title={L('공유 캘린더에 등록', '共有カレンダーへ登録', 'Send to Shared Calendar')}
-                                            >
-                                              <Calendar className="w-4 h-4" />
-                                            </button>
-                                          </>
-                                        )}
-                                        <button
-                                          type="button"
-                                          onClick={() => handleDeleteIdea(idea.id)}
-                                          className="p-1 rounded-lg text-charcoal-400 hover:text-rose-600 hover:bg-rose-50 inline-flex items-center justify-center transition"
-                                          title={t('common.delete')}
-                                          aria-label={t('common.delete')}
-                                        >
-                                          <Trash2 className="w-4 h-4" />
-                                        </button>
+                                        <TimelineCardActionsMenu items={ideaActions} hasActive={isBranchActive} />
                                       </div>
                                     </div>
 
@@ -4207,6 +4195,14 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                       >
                                         {idea.status === 'ARCHIVED' ? L('다시 꺼내기', '復元', 'Restore') : L('보관', '保管', 'Archive')}
                                       </button>
+                                      {ideaCompactDt && (
+                                        <span
+                                          className="sm:hidden ml-auto font-mono text-[10.5px] text-charcoal-500 whitespace-nowrap"
+                                          title={ideaFullDt}
+                                        >
+                                          {ideaCompactDt}
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
                                 );
@@ -4262,6 +4258,110 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                   ? L('👤 상대방', '👤 相手', '👤 Partner')
                                   : L('🧭 의도·결정', '🧭 意図', '🧭 Intent');
 
+                              const displayDate = en.entry_date || (en.created_at ? getJstDateKey(en.created_at) : '');
+                              const displayTime = en.entry_time || (en.created_at ? formatJstTime(en.created_at) : '');
+                              const { compact: entryCompactDt, full: entryFullDt } = formatCompactTimelineDateTime(
+                                displayDate,
+                                displayTime
+                              );
+                              const isEntryBranchActive = timelineParentNodeKey === `entry-${en.id}`;
+                              const isOwnEntry = Number(en.author_id) === Number(user?.id);
+                              const canDeleteEntry = isOwnEntry || Number(detailProject.created_by) === Number(user?.id);
+
+                              const entryActions: TimelineCardActionItem[] = [
+                                {
+                                  key: 'map',
+                                  label: L('맵에서 위치 보기', 'マップで位置を見る', 'Locate on Mind Map'),
+                                  icon: <GitBranch className="w-3.5 h-3.5 text-forest-700" />,
+                                  onClick: () => handleJumpFromTimelineToMindMap(`entry-${en.id}`),
+                                },
+                                {
+                                  key: 'branch',
+                                  label: L('이어쓰기', '続けて記録', 'Branch from Here'),
+                                  icon: <CornerDownRight className="w-3.5 h-3.5 text-emerald-700" />,
+                                  active: isEntryBranchActive,
+                                  onClick: () => {
+                                    setTimelineParentNodeKey(`entry-${en.id}`);
+                                    composerFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                                  },
+                                },
+                              ];
+                              if (!isProgress) {
+                                entryActions.push({
+                                  key: 'complete',
+                                  label: L('완료 기록 작성', '完了記録を作成', 'Mark as Done'),
+                                  icon: <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />,
+                                  tone: 'emerald',
+                                  onClick: () => handleStartCompleteTarget(targetKey),
+                                });
+                              }
+                              if (isOwnEntry) {
+                                entryActions.push({
+                                  key: 'edit',
+                                  label: L('기록 수정', '記録を編集', 'Edit Entry'),
+                                  icon: <Edit2 className="w-3.5 h-3.5 text-charcoal-600" />,
+                                  onClick: () => handleStartEditEntry(en),
+                                });
+                              } else {
+                                entryActions.push({
+                                  key: 'request-edit',
+                                  label: L('수정 요청', '修正依頼', 'Request Edit'),
+                                  icon: <AlertTriangle className="w-3.5 h-3.5 text-amber-700" />,
+                                  tone: 'amber',
+                                  onClick: () => {
+                                    setRevisionFormEntryId(revisionFormEntryId === en.id ? null : en.id);
+                                    setRevisionReason('');
+                                  },
+                                });
+                              }
+                              if (spaces.length > 0) {
+                                entryActions.push(
+                                  {
+                                    key: 'to-thought',
+                                    label: L('공유 메모장으로 보내기', '共有メモ帳へ送る', 'Send to Shared Thought Pad'),
+                                    icon: <Lightbulb className="w-3.5 h-3.5 text-amber-700" />,
+                                    tone: 'amber',
+                                    dividerBefore: true,
+                                    onClick: () =>
+                                      setSpaceBridgeSource({
+                                        sourceType: 'ENTRY',
+                                        sourceId: en.id,
+                                        projectId: detailProject.id,
+                                        defaultTitle: en.content.slice(0, 42),
+                                        defaultContent: en.content,
+                                        defaultDate: en.due_date || en.entry_date,
+                                        initialDestination: 'thought',
+                                      }),
+                                  },
+                                  {
+                                    key: 'to-calendar',
+                                    label: L('공유 캘린더에 등록', '共有カレンダーへ登録', 'Send to Shared Calendar'),
+                                    icon: <Calendar className="w-3.5 h-3.5 text-emerald-700" />,
+                                    tone: 'emerald',
+                                    onClick: () =>
+                                      setSpaceBridgeSource({
+                                        sourceType: 'ENTRY',
+                                        sourceId: en.id,
+                                        projectId: detailProject.id,
+                                        defaultTitle: en.content.slice(0, 42),
+                                        defaultContent: en.content,
+                                        defaultDate: en.due_date || en.entry_date,
+                                        initialDestination: 'calendar',
+                                      }),
+                                  }
+                                );
+                              }
+                              if (canDeleteEntry) {
+                                entryActions.push({
+                                  key: 'delete',
+                                  label: t('common.delete'),
+                                  icon: <Trash2 className="w-3.5 h-3.5 text-rose-600" />,
+                                  tone: 'danger',
+                                  dividerBefore: true,
+                                  onClick: () => handleDeleteEntry(en.id),
+                                });
+                              }
+
                               return (
                                 <div key={`tl-entry-${en.id}`} id={`tl-node-entry-${en.id}`} className={wrapperStyle}>
                                   <div
@@ -4269,25 +4369,20 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                       highlightTimelineKey === `entry-${en.id}` ? 'ring-2 ring-inset ring-amber-500 border-amber-500 shadow-md' : ''
                                     }`}
                                   >
-                                  <div className="flex items-center justify-between gap-1.5 min-w-0">
-                                    <div className="flex items-center gap-1.5 min-w-0 flex-nowrap">
-                                      <span className="font-bold text-charcoal-900 truncate whitespace-nowrap">{badgeLabel}</span>
-                                      {(() => {
-                                        const displayDate = en.entry_date || (en.created_at ? getJstDateKey(en.created_at) : '');
-                                        const displayTime = en.entry_time || (en.created_at ? formatJstTime(en.created_at) : '');
-                                        const { compact, full } = formatCompactTimelineDateTime(displayDate, displayTime);
-                                        return compact ? (
-                                          <span
-                                            className="font-mono text-[10.5px] text-charcoal-500 whitespace-nowrap shrink-0"
-                                            title={full}
-                                          >
-                                            {compact}
-                                          </span>
-                                        ) : null;
-                                      })()}
+                                  <div className="flex items-start sm:items-center justify-between gap-2 min-w-0">
+                                    <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                                      <span className="font-bold text-charcoal-900 leading-snug break-keep">{badgeLabel}</span>
+                                      {entryCompactDt && (
+                                        <span
+                                          className="hidden sm:inline font-mono text-[10.5px] text-charcoal-500 whitespace-nowrap shrink-0"
+                                          title={entryFullDt}
+                                        >
+                                          {entryCompactDt}
+                                        </span>
+                                      )}
                                     </div>
 
-                                    <div className="flex items-center gap-0.5 shrink-0 flex-wrap justify-end">
+                                    <div className="flex items-center gap-1 shrink-0">
                                       <TranslateButton
                                         size="xs"
                                         visible={tr.shouldShowButton(
@@ -4309,117 +4404,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                           void tr.toggleTranslate(`jentry-${en.id}`, fields, 'journal');
                                         }}
                                       />
-                                      <button
-                                        type="button"
-                                        onClick={() => handleJumpFromTimelineToMindMap(`entry-${en.id}`)}
-                                        className="px-1.5 py-1 rounded-lg border bg-white border-ivory-300 text-charcoal-700 hover:bg-sky-50 hover:border-sky-300 text-[11px] font-bold inline-flex items-center gap-0.5 transition"
-                                        title={L('마인드맵에서 이 기록 위치 보기', 'マインドマップで位置を見る', 'Locate on Mind Map')}
-                                      >
-                                        <GitBranch className="w-3.5 h-3.5 text-forest-700" />
-                                        <span className="hidden sm:inline">{L('맵', 'マップ', 'Map')}</span>
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          setTimelineParentNodeKey(`entry-${en.id}`);
-                                          composerFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                                        }}
-                                        className={`px-1.5 py-1 rounded-lg border text-[11px] font-bold inline-flex items-center gap-0.5 transition ${
-                                          timelineParentNodeKey === `entry-${en.id}`
-                                            ? 'bg-emerald-700 text-white border-emerald-800'
-                                            : 'bg-white border-ivory-300 text-charcoal-700 hover:bg-emerald-50 hover:border-emerald-300'
-                                        }`}
-                                        title={L('이 노드에 이어서 새 가지 작성', 'このノードの先に続けて記録', 'Branch next entry from this node')}
-                                      >
-                                        <CornerDownRight className="w-3.5 h-3.5" />
-                                        <span className="hidden sm:inline">{L('이어쓰기', '続けて記録', 'Branch')}</span>
-                                      </button>
-                                      {!isProgress && (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleStartCompleteTarget(targetKey)}
-                                          className="p-1 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 inline-flex items-center justify-center transition"
-                                          title={L('이 기록을 완료 대상으로 완료 기록 작성', 'この記録の完了記録を作成', 'Log completion for this entry')}
-                                          aria-label={L('완료 기록 작성', '完了記録を作成', 'Log completion for this entry')}
-                                        >
-                                          <CheckCircle2 className="w-4 h-4" />
-                                        </button>
-                                      )}
-                                      {Number(en.author_id) === Number(user?.id) ? (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleStartEditEntry(en)}
-                                          className="p-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 hover:bg-ivory-100 inline-flex items-center justify-center transition"
-                                          title={L('이 기록 수정', 'この記録を編集', 'Edit this entry')}
-                                          aria-label={t('common.edit')}
-                                        >
-                                          <Edit2 className="w-4 h-4" />
-                                        </button>
-                                      ) : (
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setRevisionFormEntryId(revisionFormEntryId === en.id ? null : en.id);
-                                            setRevisionReason('');
-                                          }}
-                                          className="px-1.5 py-0.5 rounded-md bg-amber-50 border border-amber-300 text-amber-900 font-bold text-[11px] hover:bg-amber-100 inline-flex items-center gap-1 whitespace-nowrap"
-                                          title={L('작성자에게 내용 수정 요청 보내기', '作成者に修正を依頼', 'Request revision from author')}
-                                        >
-                                          <AlertTriangle className="w-3 h-3" />
-                                          <span>{L('수정 요청', '修正依頼', 'Request Edit')}</span>
-                                        </button>
-                                      )}
-                                      {spaces.length > 0 && (
-                                        <>
-                                          <button
-                                            type="button"
-                                            onClick={() =>
-                                              setSpaceBridgeSource({
-                                                sourceType: 'ENTRY',
-                                                sourceId: en.id,
-                                                projectId: detailProject.id,
-                                                defaultTitle: en.content.slice(0, 42),
-                                                defaultContent: en.content,
-                                                defaultDate: en.due_date || en.entry_date,
-                                                initialDestination: 'thought',
-                                              })
-                                            }
-                                            className="p-1 rounded-lg bg-amber-50 border border-amber-300 text-amber-800 hover:bg-amber-100 inline-flex items-center justify-center transition"
-                                            title={L('공유 메모장으로 보내기', '共有メモ帳へ送る', 'Send to Shared Thought Pad')}
-                                          >
-                                            <Lightbulb className="w-4 h-4" />
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() =>
-                                              setSpaceBridgeSource({
-                                                sourceType: 'ENTRY',
-                                                sourceId: en.id,
-                                                projectId: detailProject.id,
-                                                defaultTitle: en.content.slice(0, 42),
-                                                defaultContent: en.content,
-                                                defaultDate: en.due_date || en.entry_date,
-                                                initialDestination: 'calendar',
-                                              })
-                                            }
-                                            className="p-1 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-800 hover:bg-emerald-100 inline-flex items-center justify-center transition"
-                                            title={L('공유 캘린더에 등록', '共有カレンダーへ登録', 'Send to Shared Calendar')}
-                                          >
-                                            <Calendar className="w-4 h-4" />
-                                          </button>
-                                        </>
-                                      )}
-                                      {(Number(en.author_id) === Number(user?.id) || Number(detailProject.created_by) === Number(user?.id)) && (
-                                        <button
-                                          type="button"
-                                          onClick={() => handleDeleteEntry(en.id)}
-                                          className="p-1 rounded-lg text-charcoal-400 hover:text-rose-600 hover:bg-rose-50 inline-flex items-center justify-center transition"
-                                          title={t('common.delete')}
-                                          aria-label={t('common.delete')}
-                                        >
-                                          <Trash2 className="w-4 h-4" />
-                                        </button>
-                                      )}
+                                      <TimelineCardActionsMenu items={entryActions} hasActive={isEntryBranchActive} />
                                     </div>
                                   </div>
 
@@ -4568,6 +4553,16 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                             {lnk.entity_type === 'THOUGHT' ? '💡' : '📅'} {lnk.entity_type === 'EVENT' && lnk.start_date ? `${lnk.start_date.slice(5)} ` : ''}{lnk.title}
                                           </button>
                                         ))}
+                                      </div>
+                                    )}
+                                    {entryCompactDt && (
+                                      <div className="sm:hidden flex justify-end pt-0.5">
+                                        <span
+                                          className="font-mono text-[10.5px] text-charcoal-500 whitespace-nowrap"
+                                          title={entryFullDt}
+                                        >
+                                          {entryCompactDt}
+                                        </span>
                                       </div>
                                     )}
                                   </div>
