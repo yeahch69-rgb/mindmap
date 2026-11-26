@@ -316,7 +316,7 @@ export const SendFromMindmapModal: React.FC<SendFromMindmapModalProps> = ({
                   }`}
                 >
                   <Sparkles className="w-3.5 h-3.5 text-amber-700" />
-                  {L('제안 일정 (가확정)', '提案予定（仮）', 'Proposed')}
+                  {L('제안 일정', '提案予定', 'Proposed')}
                 </button>
               </div>
 

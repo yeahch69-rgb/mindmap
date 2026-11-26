@@ -3,6 +3,7 @@ import { useLanguage } from '../../context/LanguageContext';
 import { TranslateButton } from '../common/TranslateButton';
 import { useContentTranslation } from '../../hooks/useContentTranslation';
 import { MobileNodeBottomSheet } from './MobileNodeBottomSheet';
+import { TimelineCardActionItem, TimelineCardActionsMenu } from './TimelineCardActionsMenu';
 import {
   Archive,
   Check,
@@ -306,8 +307,10 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
   const [highlightedNodeKey, setHighlightedNodeKey] = useState<string | null>(null);
   const [wireLabelDraft, setWireLabelDraft] = useState('');
 
+  const lastSelfSelectedKeyRef = useRef<string | null>(null);
   const selectAndSyncNode = useCallback(
     (nextKey: string | null) => {
+      lastSelfSelectedKeyRef.current = nextKey;
       setSelectedNodeKey(nextKey);
       setHighlightedNodeKey(nextKey);
       onSelectNodeKey?.(nextKey);
@@ -1382,6 +1385,7 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
   // External focus jump from Timeline or tab sync between Mind Map <-> Free Mind Map
   useEffect(() => {
     if (!focusNodeKey) return;
+    if (lastSelfSelectedKeyRef.current === focusNodeKey) return;
     const remapped = remapMindMapKey(focusNodeKey, duplicateInitialEntryId);
 
     setCollapsedKeys((prev) => {
@@ -1403,7 +1407,10 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
 
     const node = resolvedNodes.allMap.get(remapped);
     if (node) {
-      setSelectedNodeKey(remapped);
+      lastSelfSelectedKeyRef.current = null;
+      const isSheetViewport =
+        typeof window !== 'undefined' && window.matchMedia('(max-width: 1279px)').matches;
+      setSelectedNodeKey(isSheetViewport ? null : remapped);
       setHighlightedNodeKey(remapped);
       const centerOnNode = (behavior: ScrollBehavior) => {
         const vp = viewportRef.current;
@@ -1863,168 +1870,27 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
   return (
     <div className="bg-white rounded-xl border border-ivory-300 shadow-2xs overflow-hidden">
       {/* Toolbar */}
-      <div className="px-3 py-2.5 bg-ivory-50 border-b border-ivory-200 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex items-center gap-1.5 text-xs font-bold text-charcoal-900">
-            <Move className="w-4 h-4 text-forest-700" />
-            <span>
+      <div className="px-3 py-2.5 bg-ivory-50 border-b border-ivory-200 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="flex items-center gap-1.5 text-xs font-bold text-charcoal-900 min-w-0">
+            <Move className="w-4 h-4 text-forest-700 shrink-0" />
+            <span className="truncate">
               {project
                 ? L(`자유 마인드맵 · ${project.title}`, `フリーマインドマップ · ${project.title}`, `Free Mind Map · ${project.title}`)
                 : L('전체 자유 마인드맵', '全体フリーマインドマップ', 'Workspace Free Mind Map')}
             </span>
           </div>
 
-          <span className="hidden xl:inline-flex items-center gap-1.5 text-[11px] font-bold text-charcoal-500 pl-2 border-l border-ivory-300">
+          <span className="hidden xl:inline-flex items-center gap-1.5 text-[11px] font-bold text-charcoal-500 pl-2 border-l border-ivory-300 shrink-0">
             {L(
-              '노드 드래그: 자유 이동 · 연결/종속은 우측 버튼으로 켜기',
-              'ノードドラッグ: 自由配置 · 接続/従属は右ボタンで切替',
-              'Drag nodes to move · Toggle Connect / Nest on the right'
+              '노드 드래그: 자유 이동 · 연결/종속은 우측 더 보기에서 켜기',
+              'ノードドラッグ: 自由配置 · 接続/従属は右のメニューで切替',
+              'Drag nodes to move · Toggle Connect / Nest in More menu'
             )}
           </span>
         </div>
 
-        <div className="flex items-center gap-1.5 flex-wrap">
-          {project && (onAddIdea || onAddEntry) && (
-            <button
-              type="button"
-              onClick={() => openComposerForNode(null)}
-              className="px-2.5 py-1 rounded-lg bg-forest-800 text-white text-xs font-bold hover:bg-forest-900 inline-flex items-center gap-1"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>{L('새 노드 / 기록', '新規追加', 'New Node')}</span>
-            </button>
-          )}
-
-          {project && onOpenProjectDetail && (
-            <button
-              type="button"
-              onClick={() => onOpenProjectDetail(project.id)}
-              className="px-2.5 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-800 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-              <span>{L('상세 열기', '詳細を開く', 'Open Project')}</span>
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={() => fitAllNodesInViewport('smooth')}
-            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
-            title={L('모든 노드가 한눈에 보이도록 화면 맞춤', '全ノードが画面に収まるようフィット', 'Fit all nodes to viewport')}
-          >
-            <Maximize2 className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">{L('전체 보기', '全体表示', 'Fit')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => centerViewport('smooth')}
-            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
-            title={L('프로젝트 중심 노드로 이동', '中央ノードへ移動', 'Center on root')}
-          >
-            <Crosshair className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">{L('중앙', '中央', 'Center')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setMoveSubtreeWithParent((v) => !v)}
-            className={`px-2 py-1 rounded-lg border text-xs font-bold inline-flex items-center gap-1 transition ${
-              moveSubtreeWithParent
-                ? 'bg-forest-100 text-forest-900 border-forest-300'
-                : 'bg-white text-charcoal-600 border-ivory-300 hover:bg-ivory-100'
-            }`}
-            title={L(
-              '켜짐: 부모 노드 드래그 시 하위 가지가 함께 이동 (드래그 중 Shift 키로 임시 반전)',
-              'ON: 親ノード移動時に子ノードも連動移動 (Shiftキーで一時切替)',
-              'ON: Dragging a parent moves its entire subtree (hold Shift to invert)'
-            )}
-          >
-            <GitBranch className="w-3.5 h-3.5" />
-            <span className="hidden lg:inline">{L('하위 함께 이동', '子も連動移動', 'Move Subtree')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleResetRadialPositions}
-            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
-            title={L('방사형 기본 위치로 재정렬 (연결선은 유지)', '放射状に自動整列 (接続線は維持)', 'Reset radial positions (keeps links)')}
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">{L('재정렬', '再整列', 'Arrange')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleUndo}
-            disabled={undoStack.length === 0}
-            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 disabled:opacity-40 inline-flex items-center gap-1"
-            title={L('직전 작업 되돌리기 (Ctrl+Z)', '直前の操作を元に戻す (Ctrl+Z)', 'Undo last change (Ctrl+Z)')}
-          >
-            <Undo2 className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">{L('되돌리기', '戻す', 'Undo')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => void handleCopyMarkdown()}
-            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
-            title={L('마인드맵 계층 구조를 마크다운으로 복사', 'Markdown形式でコピー', 'Copy mind map as Markdown')}
-          >
-            {copiedMd ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-            <span className="hidden xl:inline">{copiedMd ? L('복사됨', 'コピー済', 'Copied') : 'MD'}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleExportPng}
-            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
-            title={L('현재 마인드맵을 PNG 이미지로 저장', 'PNG画像として保存', 'Download as PNG image')}
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span className="hidden xl:inline">PNG</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setConnectMode((prev) => {
-                const next = !prev;
-                if (next) setNestMode(false);
-                return next;
-              });
-            }}
-            className={`px-2.5 py-1 rounded-lg border text-xs font-bold inline-flex items-center gap-1 transition ${
-              connectMode
-                ? 'bg-violet-700 text-white border-violet-800 shadow-2xs'
-                : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
-            }`}
-            title={L('노드 상하좌우 연결점(●) 표시 및 드래그 연결', 'ノード上下左右の接続点(●)を表示', 'Show 4-way connection dots')}
-          >
-            <Link2 className="w-3.5 h-3.5" />
-            <span>{L('노드 연결', 'ノード接続', 'Connect')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setNestMode((prev) => {
-                const next = !prev;
-                if (next) setConnectMode(false);
-                return next;
-              });
-            }}
-            className={`px-2.5 py-1 rounded-lg border text-xs font-bold inline-flex items-center gap-1 transition ${
-              nestMode
-                ? 'bg-emerald-700 text-white border-emerald-800 shadow-2xs'
-                : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
-            }`}
-            title={L('노드를 다른 노드 위에 겹쳐 놓아 하위 노드로 종속', 'ノードを他ノードに重ねて従属させる', 'Drag & drop one node onto another to nest')}
-          >
-            <CornerDownRight className="w-3.5 h-3.5" />
-            <span>{L('노드 종속', 'ノード従属', 'Nest')}</span>
-          </button>
-
+        <div className="flex items-center gap-1.5 shrink-0">
           <div className="flex items-center gap-1 bg-white border border-ivory-300 rounded-lg p-0.5">
             <button
               type="button"
@@ -2048,6 +1914,120 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
           </div>
+
+          {(() => {
+            const toolbarActions: TimelineCardActionItem[] = [];
+            if (project && (onAddIdea || onAddEntry)) {
+              toolbarActions.push({
+                key: 'new-node',
+                label: L('새 노드 / 기록', '新規ノード / 記録', 'New Node / Entry'),
+                icon: <Plus className="w-3.5 h-3.5 text-forest-700" />,
+                tone: 'emerald',
+                onClick: () => openComposerForNode(null),
+              });
+            }
+            if (project && onOpenProjectDetail) {
+              toolbarActions.push({
+                key: 'open-detail',
+                label: L('프로젝트 상세 열기', 'プロジェクト詳細を開く', 'Open Project Detail'),
+                icon: <ExternalLink className="w-3.5 h-3.5 text-charcoal-600" />,
+                onClick: () => onOpenProjectDetail(project.id),
+              });
+            }
+            toolbarActions.push(
+              {
+                key: 'connect',
+                label: L('노드 연결', 'ノード接続', 'Connect Nodes'),
+                icon: <Link2 className="w-3.5 h-3.5 text-violet-700" />,
+                tone: 'violet',
+                active: connectMode,
+                badge: connectMode ? 'ON' : undefined,
+                dividerBefore: toolbarActions.length > 0,
+                onClick: () => {
+                  setConnectMode((prev) => {
+                    const next = !prev;
+                    if (next) setNestMode(false);
+                    return next;
+                  });
+                },
+              },
+              {
+                key: 'nest',
+                label: L('노드 종속', 'ノード従属', 'Nest Nodes'),
+                icon: <CornerDownRight className="w-3.5 h-3.5 text-emerald-700" />,
+                tone: 'emerald',
+                active: nestMode,
+                badge: nestMode ? 'ON' : undefined,
+                onClick: () => {
+                  setNestMode((prev) => {
+                    const next = !prev;
+                    if (next) setConnectMode(false);
+                    return next;
+                  });
+                },
+              },
+              {
+                key: 'move-subtree',
+                label: L('하위 함께 이동', '子ノードも連動移動', 'Move Subtree Together'),
+                icon: <GitBranch className="w-3.5 h-3.5 text-forest-700" />,
+                tone: 'emerald',
+                active: moveSubtreeWithParent,
+                badge: moveSubtreeWithParent ? 'ON' : 'OFF',
+                onClick: () => setMoveSubtreeWithParent((v) => !v),
+              },
+              {
+                key: 'fit',
+                label: L('전체 보기', '全体表示', 'Fit to Screen'),
+                icon: <Maximize2 className="w-3.5 h-3.5 text-charcoal-600" />,
+                dividerBefore: true,
+                onClick: () => fitAllNodesInViewport('smooth'),
+              },
+              {
+                key: 'center',
+                label: L('중앙으로 이동', '中央ノードへ移動', 'Center on Root'),
+                icon: <Crosshair className="w-3.5 h-3.5 text-charcoal-600" />,
+                onClick: () => centerViewport('smooth'),
+              },
+              {
+                key: 'reset-radial',
+                label: L('방사형 재정렬', '放射状に再整列', 'Reset Radial Layout'),
+                icon: <RotateCcw className="w-3.5 h-3.5 text-charcoal-600" />,
+                onClick: handleResetRadialPositions,
+              },
+              {
+                key: 'undo',
+                label: L('되돌리기', '元に戻す', 'Undo'),
+                icon: <Undo2 className="w-3.5 h-3.5 text-charcoal-600" />,
+                disabled: undoStack.length === 0,
+                dividerBefore: true,
+                onClick: handleUndo,
+              },
+              {
+                key: 'copy-md',
+                label: copiedMd
+                  ? L('마크다운 복사됨', 'Markdownコピー済', 'Markdown Copied')
+                  : L('마크다운 복사', 'Markdownコピー', 'Copy Markdown'),
+                icon: copiedMd ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-600" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5 text-charcoal-600" />
+                ),
+                onClick: () => void handleCopyMarkdown(),
+              },
+              {
+                key: 'export-png',
+                label: L('PNG 이미지 저장', 'PNG画像として保存', 'Save as PNG'),
+                icon: <Download className="w-3.5 h-3.5 text-charcoal-600" />,
+                onClick: handleExportPng,
+              }
+            );
+            return (
+              <TimelineCardActionsMenu
+                items={toolbarActions}
+                hasActive={connectMode || nestMode}
+              />
+            );
+          })()}
         </div>
       </div>
 
@@ -2880,23 +2860,25 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                 </div>
               )}
             </div>
-            <button
-              type="button"
-              onClick={() => selectAndSyncNode(null)}
-              className="p-1 rounded-lg hover:bg-ivory-200 text-charcoal-500"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            {!isMobileViewport && (
+              <button
+                type="button"
+                onClick={() => selectAndSyncNode(null)}
+                className="p-1 rounded-lg hover:bg-ivory-200 text-charcoal-500"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
           </div>
 
           {project && (onAddIdea || onAddEntry) && selectedNode.kind !== 'ROOT' && selectedNode.kind !== 'PROJECT_CARD' && (
-            <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-ivory-200">
+            <div className="grid grid-cols-2 sm:flex sm:flex-wrap sm:items-center gap-1.5 pt-2 border-t border-ivory-200">
               <button
                 type="button"
                 onClick={() => openComposerForNode(selectedNode)}
-                className="px-2.5 py-1 rounded-lg bg-forest-800 text-white font-bold hover:bg-forest-900 inline-flex items-center gap-1"
+                className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-forest-800 text-white font-bold hover:bg-forest-900 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
               >
-                <Plus className="w-3.5 h-3.5" />
+                <Plus className="w-3.5 h-3.5 shrink-0" />
                 <span>{L('이 노드에서 가지 뻗기', 'ここから分岐を追加', 'Add Child Node')}</span>
               </button>
               {parentOverrides[selectedNode.key] !== ROOT_SUBTOPIC_KEY && (
@@ -2911,19 +2893,19 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                     setParentOverrides(nextParents);
                     persistLayout(positions, customEdges, nextParents);
                   }}
-                  className="px-2.5 py-1 rounded-lg bg-white border border-purple-300 text-purple-800 font-bold hover:bg-purple-50 inline-flex items-center gap-1"
+                  className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-purple-300 text-purple-800 font-bold hover:bg-purple-50 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                 >
-                  <GitBranch className="w-3.5 h-3.5" />
-                  <span>{L('🌿 루트 서브토픽으로 분리', '🌿 ルートサブトピック化', '🌿 Make Root Subtopic')}</span>
+                  <span aria-hidden="true" className="shrink-0">🌿</span>
+                  <span>{L('루트 서브토픽으로 분리', 'ルートサブトピック化', 'Make Root Subtopic')}</span>
                 </button>
               )}
               {onJumpToTimeline && (selectedEntry || selectedIdea) && (
                 <button
                   type="button"
                   onClick={() => onJumpToTimeline(selectedNode.key)}
-                  className="px-2.5 py-1 rounded-lg bg-white border border-sky-300 text-sky-900 font-bold hover:bg-sky-50 inline-flex items-center gap-1"
+                  className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-sky-300 text-sky-900 font-bold hover:bg-sky-50 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                 >
-                  <MessageSquare className="w-3.5 h-3.5" />
+                  <MessageSquare className="w-3.5 h-3.5 shrink-0" />
                   <span>{L('타임라인에서 보기', 'タイムラインで見る', 'View in Timeline')}</span>
                 </button>
               )}
@@ -2936,9 +2918,9 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                         setEntryEditContent(selectedEntry.content);
                         setEditingEntryInline((prev) => !prev);
                       }}
-                      className="px-2.5 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-800 font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
+                      className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-800 font-bold hover:bg-ivory-100 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                     >
-                      <Edit2 className="w-3.5 h-3.5" />
+                      <Edit2 className="w-3.5 h-3.5 shrink-0" />
                       <span>{L('내용 수정', '内容を編集', 'Edit')}</span>
                     </button>
                   )}
@@ -2948,9 +2930,9 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                       onClick={() =>
                         openComposerForNode(selectedNode, null, false, 'PROGRESS', `ENTRY:${selectedEntry.id}`)
                       }
-                      className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 inline-flex items-center gap-1"
+                      className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                     >
-                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                       <span>{L('완료 기록', '完了記録', 'Mark Done')}</span>
                     </button>
                   )}
@@ -2960,9 +2942,9 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                       <button
                         type="button"
                         onClick={() => void onPromoteEntryToNextStep(selectedEntry)}
-                        className="px-2.5 py-1 rounded-lg bg-amber-500 text-white font-bold hover:bg-amber-600 inline-flex items-center gap-1"
+                        className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-amber-500 text-white font-bold hover:bg-amber-600 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                       >
-                        <Sparkles className="w-3.5 h-3.5" />
+                        <Sparkles className="w-3.5 h-3.5 shrink-0" />
                         <span>{L('다음 할 일(토픽) 승격', 'Next Step昇格', 'Promote to Topic')}</span>
                       </button>
                     )}
@@ -2986,9 +2968,9 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                           void onDeleteEntry(selectedEntry.id);
                           selectAndSyncNode(null);
                         }}
-                        className="px-2.5 py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center gap-1"
+                        className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        <Trash2 className="w-3.5 h-3.5 shrink-0" />
                         <span>{L('삭제', '削除', 'Delete')}</span>
                       </button>
                     )}
@@ -2998,9 +2980,9 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                 <button
                   type="button"
                   onClick={() => void onPromoteIdea(selectedIdea)}
-                  className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 inline-flex items-center gap-1"
+                  className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                 >
-                  <Sparkles className="w-3.5 h-3.5" />
+                  <Sparkles className="w-3.5 h-3.5 shrink-0" />
                   <span>{L('Next Step 승격', 'Next Stepへ昇格', 'Promote to Next Step')}</span>
                 </button>
               )}
@@ -3013,9 +2995,9 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                       selectedIdea.status === 'ARCHIVED' ? 'OPEN' : 'ARCHIVED'
                     )
                   }
-                  className="px-2.5 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
+                  className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 font-bold hover:bg-ivory-100 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                 >
-                  <Archive className="w-3.5 h-3.5" />
+                  <Archive className="w-3.5 h-3.5 shrink-0" />
                   <span>
                     {selectedIdea.status === 'ARCHIVED'
                       ? L('다시 열기', '再開', 'Reopen')
@@ -3039,9 +3021,9 @@ export const JournalFreeMindMap: React.FC<JournalFreeMindMapProps> = ({
                     void onDeleteIdea(selectedIdea);
                     selectAndSyncNode(null);
                   }}
-                  className="px-2.5 py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center gap-1"
+                  className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
+                  <Trash2 className="w-3.5 h-3.5 shrink-0" />
                   <span>{L('삭제', '削除', 'Delete')}</span>
                 </button>
               )}

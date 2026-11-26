@@ -3,6 +3,7 @@ import { useLanguage } from '../../context/LanguageContext';
 import { TranslateButton } from '../common/TranslateButton';
 import { useContentTranslation } from '../../hooks/useContentTranslation';
 import { MobileNodeBottomSheet } from './MobileNodeBottomSheet';
+import { TimelineCardActionItem, TimelineCardActionsMenu } from './TimelineCardActionsMenu';
 import {
   Archive,
   Check,
@@ -189,8 +190,10 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
   const [highlightedNodeKey, setHighlightedNodeKey] = useState<string | null>(null);
   const [wireLabelDraft, setWireLabelDraft] = useState('');
 
+  const lastSelfSelectedKeyRef = useRef<string | null>(null);
   const selectAndSyncNode = useCallback(
     (nextKey: string | null) => {
+      lastSelfSelectedKeyRef.current = nextKey;
       setSelectedNodeKey(nextKey);
       setHighlightedNodeKey(nextKey);
       onSelectNodeKey?.(nextKey);
@@ -1614,6 +1617,7 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
   // External focus jump from Timeline or tab sync between Mind Map <-> Free Mind Map
   useEffect(() => {
     if (!focusNodeKey) return;
+    if (lastSelfSelectedKeyRef.current === focusNodeKey) return;
     const remapped = remapMindMapKey(focusNodeKey, duplicateInitialEntryId);
 
     // Ensure all ancestors are expanded so the target node is visible
@@ -1636,7 +1640,10 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
 
     const node = layout.nodeMap.get(remapped);
     if (node) {
-      setSelectedNodeKey(remapped);
+      lastSelfSelectedKeyRef.current = null;
+      const isSheetViewport =
+        typeof window !== 'undefined' && window.matchMedia('(max-width: 1279px)').matches;
+      setSelectedNodeKey(isSheetViewport ? null : remapped);
       setHighlightedNodeKey(remapped);
       const centerOnNode = (behavior: ScrollBehavior) => {
         const vp = viewportRef.current;
@@ -1985,18 +1992,18 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
   return (
     <div className="bg-white rounded-xl border border-ivory-300 shadow-2xs overflow-hidden">
       {/* Mind Map Top Toolbar */}
-      <div className="px-3 py-2.5 bg-ivory-50 border-b border-ivory-200 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="flex items-center gap-1.5 text-xs font-bold text-charcoal-900">
-            <GitBranch className="w-4 h-4 text-forest-700" />
-            <span>
+      <div className="px-3 py-2.5 bg-ivory-50 border-b border-ivory-200 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="flex items-center gap-1.5 text-xs font-bold text-charcoal-900 min-w-0">
+            <GitBranch className="w-4 h-4 text-forest-700 shrink-0" />
+            <span className="truncate">
               {project
                 ? L(`마인드맵 · ${project.title}`, `マインドマップ · ${project.title}`, `Mind Map · ${project.title}`)
                 : L('전체 프로젝트 관계 마인드맵', '全体プロジェクト・マインドマップ', 'Workspace Mind Map')}
             </span>
           </div>
 
-          <div className="hidden lg:flex items-center gap-2 text-[11px] font-bold text-charcoal-600 pl-2 border-l border-ivory-300">
+          <div className="hidden lg:flex items-center gap-2 text-[11px] font-bold text-charcoal-600 pl-2 border-l border-ivory-300 shrink-0">
             <span className="inline-flex items-center gap-1">
               <span className="w-3 h-0.5 bg-amber-600 inline-block" />
               {L('가지 분기', '分岐', 'Branch')}
@@ -2012,118 +2019,7 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5 flex-wrap">
-          {project && (onAddIdea || onAddEntry) && (
-            <button
-              type="button"
-              onClick={() => openComposerForNode(null)}
-              className="px-2.5 py-1 rounded-lg bg-forest-800 text-white text-xs font-bold hover:bg-forest-900 inline-flex items-center gap-1"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>{L('새 노드 / 기록', '新規追加', 'New Node')}</span>
-            </button>
-          )}
-
-          {project && onOpenProjectDetail && (
-            <button
-              type="button"
-              onClick={() => onOpenProjectDetail(project.id)}
-              className="px-2.5 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-800 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-              <span>{L('상세 열기', '詳細を開く', 'Open Project')}</span>
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={() => {
-              setConnectMode((prev) => {
-                const next = !prev;
-                if (next) {
-                  setNestMode(false);
-                  setNestSourceKey(null);
-                } else {
-                  setConnectPendingSource(null);
-                }
-                return next;
-              });
-            }}
-            className={`px-2.5 py-1 rounded-lg border text-xs font-bold inline-flex items-center gap-1 transition ${
-              connectMode
-                ? 'bg-violet-700 text-white border-violet-800 shadow-2xs'
-                : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
-            }`}
-            title={L(
-              '노드 연결 (클릭 또는 ● 포트 드래그 · 자유 마인드맵과 공유)',
-              'ノード接続 (クリックまたは●ドラッグ・自由マップと共有)',
-              'Connect nodes (2-click or port drag · synced with Free Mind Map)'
-            )}
-          >
-            <Link2 className="w-3.5 h-3.5" />
-            <span>{L('노드 연결', 'ノード接続', 'Connect')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setNestMode((prev) => {
-                const next = !prev;
-                if (next) {
-                  setConnectMode(false);
-                  setConnectPendingSource(null);
-                } else {
-                  setNestSourceKey(null);
-                }
-                return next;
-              });
-            }}
-            className={`px-2.5 py-1 rounded-lg border text-xs font-bold inline-flex items-center gap-1 transition ${
-              nestMode
-                ? 'bg-emerald-700 text-white border-emerald-800 shadow-2xs'
-                : 'bg-white text-charcoal-700 border-ivory-300 hover:bg-ivory-100'
-            }`}
-            title={L(
-              '노드 종속 (2클릭 또는 드래그 드롭 · 자유 마인드맵과 공유)',
-              'ノード従属 (2クリックまたはドラッグ・自由マップと共有)',
-              'Nest nodes (2-click or drag & drop · synced with Free Mind Map)'
-            )}
-          >
-            <CornerDownRight className="w-3.5 h-3.5" />
-            <span>{L('노드 종속', 'ノード従属', 'Nest')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleUndo}
-            disabled={undoStack.length === 0}
-            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 disabled:opacity-40 inline-flex items-center gap-1"
-            title={L('직전 연결/종속 작업 되돌리기 (Ctrl+Z)', '直前の操作を元に戻す (Ctrl+Z)', 'Undo last change (Ctrl+Z)')}
-          >
-            <Undo2 className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">{L('되돌리기', '戻す', 'Undo')}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => void handleCopyMarkdown()}
-            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
-            title={L('마인드맵 계층 구조를 마크다운으로 복사', 'Markdown形式でコピー', 'Copy mind map as Markdown')}
-          >
-            {copiedMd ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-            <span className="hidden md:inline">{copiedMd ? L('복사됨', 'コピー済', 'Copied') : 'MD'}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleExportPng}
-            className="px-2 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 text-xs font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
-            title={L('현재 마인드맵을 PNG 이미지로 저장', 'PNG画像として保存', 'Download as PNG image')}
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">PNG</span>
-          </button>
-
+        <div className="flex items-center gap-1.5 shrink-0">
           <div className="flex items-center gap-1 bg-white border border-ivory-300 rounded-lg p-0.5">
             <button
               type="button"
@@ -2147,6 +2043,102 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
           </div>
+
+          {(() => {
+            const toolbarActions: TimelineCardActionItem[] = [];
+            if (project && (onAddIdea || onAddEntry)) {
+              toolbarActions.push({
+                key: 'new-node',
+                label: L('새 노드 / 기록', '新規ノード / 記録', 'New Node / Entry'),
+                icon: <Plus className="w-3.5 h-3.5 text-forest-700" />,
+                tone: 'emerald',
+                onClick: () => openComposerForNode(null),
+              });
+            }
+            if (project && onOpenProjectDetail) {
+              toolbarActions.push({
+                key: 'open-detail',
+                label: L('프로젝트 상세 열기', 'プロジェクト詳細を開く', 'Open Project Detail'),
+                icon: <ExternalLink className="w-3.5 h-3.5 text-charcoal-600" />,
+                onClick: () => onOpenProjectDetail(project.id),
+              });
+            }
+            toolbarActions.push(
+              {
+                key: 'connect',
+                label: L('노드 연결', 'ノード接続', 'Connect Nodes'),
+                icon: <Link2 className="w-3.5 h-3.5 text-violet-700" />,
+                tone: 'violet',
+                active: connectMode,
+                badge: connectMode ? 'ON' : undefined,
+                dividerBefore: toolbarActions.length > 0,
+                onClick: () => {
+                  setConnectMode((prev) => {
+                    const next = !prev;
+                    if (next) {
+                      setNestMode(false);
+                      setNestSourceKey(null);
+                    } else {
+                      setConnectPendingSource(null);
+                    }
+                    return next;
+                  });
+                },
+              },
+              {
+                key: 'nest',
+                label: L('노드 종속', 'ノード従属', 'Nest Nodes'),
+                icon: <CornerDownRight className="w-3.5 h-3.5 text-emerald-700" />,
+                tone: 'emerald',
+                active: nestMode,
+                badge: nestMode ? 'ON' : undefined,
+                onClick: () => {
+                  setNestMode((prev) => {
+                    const next = !prev;
+                    if (next) {
+                      setConnectMode(false);
+                      setConnectPendingSource(null);
+                    } else {
+                      setNestSourceKey(null);
+                    }
+                    return next;
+                  });
+                },
+              },
+              {
+                key: 'undo',
+                label: L('되돌리기', '元に戻す', 'Undo'),
+                icon: <Undo2 className="w-3.5 h-3.5 text-charcoal-600" />,
+                disabled: undoStack.length === 0,
+                dividerBefore: true,
+                onClick: handleUndo,
+              },
+              {
+                key: 'copy-md',
+                label: copiedMd
+                  ? L('마크다운 복사됨', 'Markdownコピー済', 'Markdown Copied')
+                  : L('마크다운 복사', 'Markdownコピー', 'Copy Markdown'),
+                icon: copiedMd ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-600" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5 text-charcoal-600" />
+                ),
+                onClick: () => void handleCopyMarkdown(),
+              },
+              {
+                key: 'export-png',
+                label: L('PNG 이미지 저장', 'PNG画像として保存', 'Save as PNG'),
+                icon: <Download className="w-3.5 h-3.5 text-charcoal-600" />,
+                onClick: handleExportPng,
+              }
+            );
+            return (
+              <TimelineCardActionsMenu
+                items={toolbarActions}
+                hasActive={connectMode || nestMode}
+              />
+            );
+          })()}
         </div>
       </div>
 
@@ -3226,17 +3218,19 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
               )}
             </div>
 
-            <button
-              type="button"
-              onClick={() => selectAndSyncNode(null)}
-              className="p-1 rounded-lg hover:bg-ivory-200 text-charcoal-500"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            {!isMobileViewport && (
+              <button
+                type="button"
+                onClick={() => selectAndSyncNode(null)}
+                className="p-1 rounded-lg hover:bg-ivory-200 text-charcoal-500"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
           </div>
 
           {/* Quick Actions Footer */}
-          <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-ivory-200">
+          <div className="grid grid-cols-2 sm:flex sm:flex-wrap sm:items-center gap-1.5 pt-2 border-t border-ivory-200">
             {isNodeConnectable(selectedNode) && (
               <button
                 type="button"
@@ -3246,9 +3240,9 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                   setConnectMode(true);
                   setConnectPendingSource({ key: selectedNode.key });
                 }}
-                className="px-2.5 py-1 rounded-lg bg-white border border-violet-300 text-violet-800 font-bold hover:bg-violet-50 inline-flex items-center gap-1"
+                className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-violet-300 text-violet-800 font-bold hover:bg-violet-50 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
               >
-                <Link2 className="w-3.5 h-3.5" />
+                <Link2 className="w-3.5 h-3.5 shrink-0" />
                 <span>{L('이 노드에서 연결 시작', 'ここから接続開始', 'Connect From Here')}</span>
               </button>
             )}
@@ -3263,9 +3257,9 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                     setNestMode(true);
                     setNestSourceKey(selectedNode.key);
                   }}
-                  className="px-2.5 py-1 rounded-lg bg-white border border-emerald-300 text-emerald-800 font-bold hover:bg-emerald-50 inline-flex items-center gap-1"
+                  className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-emerald-300 text-emerald-800 font-bold hover:bg-emerald-50 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                 >
-                  <CornerDownRight className="w-3.5 h-3.5" />
+                  <CornerDownRight className="w-3.5 h-3.5 shrink-0" />
                   <span>{L('다른 노드 아래로 종속', '他ノードへ従属', 'Nest Under Another')}</span>
                 </button>
                 {project && parentOverrides[selectedNode.key] !== ROOT_SUBTOPIC_KEY && (
@@ -3280,10 +3274,10 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                       setParentOverrides(nextParents);
                       persistLayout(customEdges, nextParents);
                     }}
-                    className="px-2.5 py-1 rounded-lg bg-white border border-purple-300 text-purple-800 font-bold hover:bg-purple-50 inline-flex items-center gap-1"
+                    className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-purple-300 text-purple-800 font-bold hover:bg-purple-50 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                   >
-                    <GitBranch className="w-3.5 h-3.5" />
-                    <span>{L('🌿 루트 서브토픽으로 분리', '🌿 ルートサブトピック化', '🌿 Make Root Subtopic')}</span>
+                    <span aria-hidden="true" className="shrink-0">🌿</span>
+                    <span>{L('루트 서브토픽으로 분리', 'ルートサブトピック化', 'Make Root Subtopic')}</span>
                   </button>
                 )}
               </>
@@ -3293,9 +3287,9 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
               <button
                 type="button"
                 onClick={() => openComposerForNode(selectedNode)}
-                className="px-2.5 py-1 rounded-lg bg-forest-800 text-white font-bold hover:bg-forest-900 inline-flex items-center gap-1"
+                className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-forest-800 text-white font-bold hover:bg-forest-900 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
               >
-                <Plus className="w-3.5 h-3.5" />
+                <Plus className="w-3.5 h-3.5 shrink-0" />
                 <span>{L('이 노드에서 가지 뻗기', 'ここから分岐を追加', 'Add Child Node')}</span>
               </button>
             )}
@@ -3304,9 +3298,9 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
               <button
                 type="button"
                 onClick={() => onJumpToTimeline(selectedNode.key)}
-                className="px-2.5 py-1 rounded-lg bg-white border border-sky-300 text-sky-900 font-bold hover:bg-sky-50 inline-flex items-center gap-1"
+                className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-sky-300 text-sky-900 font-bold hover:bg-sky-50 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
               >
-                <MessageSquare className="w-3.5 h-3.5" />
+                <MessageSquare className="w-3.5 h-3.5 shrink-0" />
                 <span>{L('타임라인에서 보기', 'タイムラインで見る', 'View in Timeline')}</span>
               </button>
             )}
@@ -3320,9 +3314,9 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                       setEntryEditContent(selectedEntry.content);
                       setEditingEntryInline((prev) => !prev);
                     }}
-                    className="px-2.5 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-800 font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
+                    className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-800 font-bold hover:bg-ivory-100 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                   >
-                    <Edit2 className="w-3.5 h-3.5" />
+                    <Edit2 className="w-3.5 h-3.5 shrink-0" />
                     <span>{L('내용 수정', '内容を編集', 'Edit')}</span>
                   </button>
                 )}
@@ -3333,9 +3327,9 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                     onClick={() =>
                       openComposerForNode(selectedNode, 'PROGRESS', false, `ENTRY:${selectedEntry.id}`)
                     }
-                    className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 inline-flex items-center gap-1"
+                    className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                   >
-                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                     <span>{L('완료 기록', '完了記録', 'Mark Done')}</span>
                   </button>
                 )}
@@ -3346,9 +3340,9 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                     <button
                       type="button"
                       onClick={() => void onPromoteEntryToNextStep(selectedEntry)}
-                      className="px-2.5 py-1 rounded-lg bg-amber-500 text-white font-bold hover:bg-amber-600 inline-flex items-center gap-1"
+                      className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-amber-500 text-white font-bold hover:bg-amber-600 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                     >
-                      <Sparkles className="w-3.5 h-3.5" />
+                      <Sparkles className="w-3.5 h-3.5 shrink-0" />
                       <span>{L('다음 할 일(토픽) 승격', 'Next Step昇格', 'Promote to Topic')}</span>
                     </button>
                   )}
@@ -3373,9 +3367,9 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                         void onDeleteEntry(selectedEntry.id);
                         selectAndSyncNode(null);
                       }}
-                      className="px-2.5 py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center gap-1"
+                      className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      <Trash2 className="w-3.5 h-3.5 shrink-0" />
                       <span>{L('삭제', '削除', 'Delete')}</span>
                     </button>
                   )}
@@ -3388,9 +3382,9 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                   <button
                     type="button"
                     onClick={() => void onPromoteIdea(selectedIdea)}
-                    className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 inline-flex items-center gap-1"
+                    className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-emerald-600 text-white font-bold hover:bg-emerald-700 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                   >
-                    <Sparkles className="w-3.5 h-3.5" />
+                    <Sparkles className="w-3.5 h-3.5 shrink-0" />
                     <span>{L('Next Step 승격', 'Next Stepへ昇格', 'Promote to Next Step')}</span>
                   </button>
                 )}
@@ -3404,16 +3398,16 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                         selectedIdea.status === 'ARCHIVED' ? 'OPEN' : 'ARCHIVED'
                       )
                     }
-                    className="px-2.5 py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 font-bold hover:bg-ivory-100 inline-flex items-center gap-1"
+                    className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-ivory-300 text-charcoal-700 font-bold hover:bg-ivory-100 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                   >
                     {selectedIdea.status === 'ARCHIVED' ? (
                       <>
-                        <RotateCcw className="w-3.5 h-3.5" />
+                        <RotateCcw className="w-3.5 h-3.5 shrink-0" />
                         <span>{L('다시 열기', '再開', 'Reopen')}</span>
                       </>
                     ) : (
                       <>
-                        <Archive className="w-3.5 h-3.5" />
+                        <Archive className="w-3.5 h-3.5 shrink-0" />
                         <span>{L('보관', '保管', 'Archive')}</span>
                       </>
                     )}
@@ -3436,9 +3430,9 @@ export const JournalMindMap: React.FC<JournalMindMapProps> = ({
                       void onDeleteIdea(selectedIdea);
                       selectAndSyncNode(null);
                     }}
-                    className="px-2.5 py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center gap-1"
+                    className="w-full sm:w-auto min-h-[34px] sm:min-h-0 px-2 sm:px-2.5 py-1.5 sm:py-1 rounded-lg bg-white border border-rose-200 text-rose-700 font-bold hover:bg-rose-50 inline-flex items-center justify-center gap-1 text-[11px] sm:text-xs leading-tight text-center break-keep"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <Trash2 className="w-3.5 h-3.5 shrink-0" />
                     <span>{L('삭제', '削除', 'Delete')}</span>
                   </button>
                 )}

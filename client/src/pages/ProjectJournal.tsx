@@ -2711,10 +2711,10 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
             </button>
           </div>
 
-          {/* Project Header & Edit/Delete (Title spans full width below badges/actions on mobile) */}
+          {/* Project Header & Actions (Mode badge on left, Translate + More menu on right) */}
           <div className="!mt-0 lg:!mt-3 pb-2.5 border-b border-ivory-200 space-y-2">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
                   {detailProject?.mode === 'SOLO' || detailProject?.is_private === 1 ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-stone-100 text-stone-700 border border-stone-300 whitespace-nowrap">
                       <span>{L('🔒 개인', '🔒 個人', '🔒 Solo')}</span>
@@ -2729,66 +2729,10 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                       </span>
                     </span>
                   )}
-
-                  {detailProject?.resolved_partner_name && (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-sky-50 text-sky-900 border border-sky-200 whitespace-nowrap">
-                      {L('상대:', '相手:', 'With:')} {detailProject.resolved_partner_name}
-                    </span>
-                  )}
-
-                  {detailProject?.linked_space && (
-                    <div className="inline-flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => onJumpToLinkedSpace?.(detailProject.linked_space!.id)}
-                        className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 transition whitespace-nowrap"
-                        title={L(
-                          `연동 공유 스페이스 열기: ${detailProject.linked_space.name}`,
-                          `連携共有スペースを開く: ${detailProject.linked_space.name}`,
-                          `Open linked Shared Space: ${detailProject.linked_space.name}`
-                        )}
-                      >
-                        <span
-                          className="w-2 h-2 rounded-full shrink-0"
-                          style={{ backgroundColor: detailProject.linked_space.color }}
-                        />
-                        <CalendarRange className="w-3 h-3 text-emerald-700 shrink-0" />
-                        <span>{detailProject.linked_space.name}</span>
-                        <ExternalLink className="w-2.5 h-2.5 text-emerald-600 shrink-0" />
-                      </button>
-                      {(Number(detailProject.created_by) === Number(user?.id) ||
-                        detailProject.linked_space.is_space_owner) && (
-                        <button
-                          type="button"
-                          disabled={isUnlinkingSpace}
-                          onClick={() => void handleUnlinkSpace()}
-                          className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-white hover:bg-rose-50 text-charcoal-500 hover:text-rose-700 border border-ivory-300 hover:border-rose-200 transition whitespace-nowrap disabled:opacity-50"
-                          title={L('공유 스페이스 연동 해제', '共有スペース連携解除', 'Unlink Shared Space')}
-                        >
-                          <Unlink2 className="w-2.5 h-2.5 shrink-0" />
-                          <span>{L('연동 해제', '解除', 'Unlink')}</span>
-                        </button>
-                      )}
-                    </div>
-                  )}
-
-                  {detailProject &&
-                    detailProject.mode === 'COLLAB' &&
-                    !detailProject.linked_space &&
-                    Number(detailProject.created_by) === Number(user?.id) && (
-                      <button
-                        type="button"
-                        onClick={() => void handleOpenLinkSpaceModal()}
-                        className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-white hover:bg-emerald-50 text-emerald-800 border border-dashed border-emerald-400 transition whitespace-nowrap"
-                      >
-                        <Link2 className="w-3 h-3 shrink-0" />
-                        <span>{L('공유 스페이스 연동', '共有スペース連携', 'Link Shared Space')}</span>
-                      </button>
-                    )}
                 </div>
 
                 {detailProject && (
-                  <div className="flex items-center gap-1.5 shrink-0 ml-auto flex-wrap">
+                  <div className="flex items-center gap-1.5 shrink-0 ml-auto">
                     <TranslateButton
                       size="xs"
                       visible={tr.shouldShowButton(
@@ -2813,44 +2757,99 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         )
                       }
                     />
-                    <button
-                      type="button"
-                      onClick={() => handleOpenParticipantsModal('STAKEHOLDERS')}
-                      className="relative px-2.5 py-1.5 rounded-lg bg-sky-50 text-sky-900 border border-sky-200 hover:bg-sky-100 text-xs font-bold inline-flex items-center gap-1 transition whitespace-nowrap"
-                      title={L('관계자 명단 및 협업 초대·멤버 관리', '関係者・招待・メンバー管理', 'Configure stakeholders & invite members')}
-                    >
-                      <Users className="w-3.5 h-3.5" />
-                      <span>
-                        {L(
-                          `관계자 (${detailProject.participants?.length || 0})`,
-                          `関係者 (${detailProject.participants?.length || 0})`,
-                          `People (${detailProject.participants?.length || 0})`
-                        )}
-                      </span>
-                      {(detailProject.pending_join_requests?.length || 0) > 0 && (
-                        <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-amber-500 text-white text-[10px] font-bold">
-                          {detailProject.pending_join_requests?.length}
-                        </span>
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleOpenEditModal(detailProject)}
-                      className="p-1.5 rounded-lg text-charcoal-500 hover:text-forest-700 hover:bg-ivory-100 transition"
-                      title={t('common.edit')}
-                    >
-                      <Edit2 className="w-4 h-4" />
-                    </button>
-                    {Number(detailProject.created_by) === Number(user?.id) && (
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteProject(detailProject)}
-                        className="p-1.5 rounded-lg text-charcoal-500 hover:text-rose-600 hover:bg-rose-50 transition"
-                        title={t('common.delete')}
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    )}
+                    {(() => {
+                      const headerActions: TimelineCardActionItem[] = [];
+                      const pendingCount = detailProject.pending_join_requests?.length || 0;
+
+                      if (detailProject.linked_space) {
+                        headerActions.push({
+                          key: 'open-space',
+                          label: L(
+                            `공유 스페이스 열기 (${detailProject.linked_space.name})`,
+                            `共有スペースを開く (${detailProject.linked_space.name})`,
+                            `Open Shared Space (${detailProject.linked_space.name})`
+                          ),
+                          icon: <CalendarRange className="w-3.5 h-3.5 text-emerald-700" />,
+                          tone: 'emerald',
+                          onClick: () => onJumpToLinkedSpace?.(detailProject.linked_space!.id),
+                        });
+                      }
+                      if (
+                        detailProject.linked_space &&
+                        (Number(detailProject.created_by) === Number(user?.id) ||
+                          detailProject.linked_space.is_space_owner)
+                      ) {
+                        headerActions.push({
+                          key: 'unlink-space',
+                          label: L('공유 스페이스 연동 해제', '共有スペース連携解除', 'Unlink Shared Space'),
+                          icon: <Unlink2 className="w-3.5 h-3.5 text-rose-600" />,
+                          tone: 'danger',
+                          disabled: isUnlinkingSpace,
+                          onClick: () => void handleUnlinkSpace(),
+                        });
+                      }
+                      if (
+                        detailProject.mode === 'COLLAB' &&
+                        !detailProject.linked_space &&
+                        Number(detailProject.created_by) === Number(user?.id)
+                      ) {
+                        headerActions.push({
+                          key: 'link-space',
+                          label: L('공유 스페이스 연동', '共有スペース連携', 'Link Shared Space'),
+                          icon: <Link2 className="w-3.5 h-3.5 text-emerald-700" />,
+                          tone: 'emerald',
+                          onClick: () => void handleOpenLinkSpaceModal(),
+                        });
+                      }
+
+                      headerActions.push({
+                        key: 'participants',
+                        label: L(
+                          `관계자 · 멤버 관리 (${detailProject.participants?.length || 0})`,
+                          `関係者・メンバー管理 (${detailProject.participants?.length || 0})`,
+                          `People & Members (${detailProject.participants?.length || 0})`
+                        ),
+                        icon: <Users className="w-3.5 h-3.5 text-sky-700" />,
+                        badge: pendingCount > 0 ? pendingCount : undefined,
+                        dividerBefore: headerActions.length > 0,
+                        onClick: () => handleOpenParticipantsModal('STAKEHOLDERS'),
+                      });
+
+                      headerActions.push({
+                        key: 'edit-project',
+                        label: L('프로젝트 수정', 'プロジェクト編集', 'Edit Project'),
+                        icon: <Edit2 className="w-3.5 h-3.5 text-charcoal-600" />,
+                        dividerBefore: true,
+                        onClick: () => handleOpenEditModal(detailProject),
+                      });
+
+                      if (Number(detailProject.created_by) === Number(user?.id)) {
+                        headerActions.push({
+                          key: 'delete-project',
+                          label: L('프로젝트 삭제', 'プロジェクト削除', 'Delete Project'),
+                          icon: <Trash2 className="w-3.5 h-3.5 text-rose-600" />,
+                          tone: 'danger',
+                          onClick: () => handleDeleteProject(detailProject),
+                        });
+                      }
+
+                      const infoHeaderNode = detailProject.resolved_partner_name ? (
+                        <div className="flex items-center gap-1.5 text-sky-900">
+                          <span aria-hidden="true">👤</span>
+                          <span>
+                            {L('상대:', '相手:', 'With:')} {detailProject.resolved_partner_name}
+                          </span>
+                        </div>
+                      ) : undefined;
+
+                      return (
+                        <TimelineCardActionsMenu
+                          items={headerActions}
+                          badgeCount={pendingCount}
+                          infoHeader={infoHeaderNode}
+                        />
+                      );
+                    })()}
                   </div>
                 )}
               </div>
@@ -3558,32 +3557,37 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                             </div>
                           )}
 
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            {(
-                              [
-                                { id: 'DIALOGUE_ME' as EntryType | 'IDEA', label: L('🗣️ 나', '🗣️ 自分', '🗣️ Me'), cls: 'bg-forest-700 text-white border-forest-800' },
-                                { id: 'DIALOGUE_THEM' as EntryType | 'IDEA', label: L('👤 상대방', '👤 相手', '👤 Partner'), cls: 'bg-sky-600 text-white border-sky-700' },
-                                { id: 'IDEA' as EntryType | 'IDEA', label: L('💡 아이디어', '💡 アイデア', '💡 Idea'), cls: 'bg-yellow-500 text-stone-950 border-yellow-600' },
-                                { id: 'INTENT' as EntryType | 'IDEA', label: L('🧭 내 의도·결정', '🧭 意図・決定', '🧭 Intent'), cls: 'bg-amber-500 text-white border-amber-600' },
-                                { id: 'PROGRESS' as EntryType | 'IDEA', label: L('✅ 완료 기록', '✅ 完了記録', '✅ Done'), cls: 'bg-emerald-600 text-white border-emerald-700' },
-                              ]
-                            ).map(tBtn => (
-                              <button
-                                key={tBtn.id}
-                                type="button"
-                                onClick={() => {
-                                  if ((tBtn.id === 'IDEA' && editingEntryId) || (tBtn.id !== 'IDEA' && editingIdeaId)) {
-                                    handleCancelEditEntry();
-                                  }
-                                  setComposerKind(tBtn.id);
-                                }}
-                                className={`px-2.5 py-1 rounded-lg border font-bold transition whitespace-nowrap ${
-                                  composerKind === tBtn.id ? tBtn.cls : 'bg-white text-charcoal-700 border-ivory-300'
-                                }`}
-                              >
-                                {tBtn.label}
-                              </button>
-                            ))}
+                          <div className="flex items-center gap-2">
+                            <label className="text-[11px] font-bold text-charcoal-600 shrink-0">
+                              {L('기록 유형', '記録タイプ', 'Entry Type')}
+                            </label>
+                            <select
+                              value={composerKind}
+                              onChange={(e) => {
+                                const nextKind = e.target.value as EntryType | 'IDEA';
+                                if ((nextKind === 'IDEA' && editingEntryId) || (nextKind !== 'IDEA' && editingIdeaId)) {
+                                  handleCancelEditEntry();
+                                }
+                                setComposerKind(nextKind);
+                              }}
+                              className={`flex-1 sm:flex-initial sm:min-w-[180px] px-2.5 py-1.5 rounded-lg border text-xs font-bold focus:outline-none focus:ring-2 focus:ring-forest-500/30 transition ${
+                                composerKind === 'DIALOGUE_ME'
+                                  ? 'bg-forest-50 text-forest-900 border-forest-400'
+                                  : composerKind === 'DIALOGUE_THEM'
+                                  ? 'bg-sky-50 text-sky-900 border-sky-400'
+                                  : composerKind === 'IDEA'
+                                  ? 'bg-yellow-50 text-amber-950 border-yellow-500'
+                                  : composerKind === 'INTENT'
+                                  ? 'bg-amber-50 text-amber-950 border-amber-400'
+                                  : 'bg-emerald-50 text-emerald-900 border-emerald-400'
+                              }`}
+                            >
+                              <option value="DIALOGUE_ME">{L('🗣️ 나', '🗣️ 自分', '🗣️ Me')}</option>
+                              <option value="DIALOGUE_THEM">{L('👤 상대방', '👤 相手', '👤 Partner')}</option>
+                              <option value="IDEA">{L('💡 아이디어', '💡 アイデア', '💡 Idea')}</option>
+                              <option value="INTENT">{L('🧭 내 의도·결정', '🧭 意図・決定', '🧭 Intent')}</option>
+                              <option value="PROGRESS">{L('✅ 완료 기록', '✅ 完了記録', '✅ Done')}</option>
+                            </select>
                           </div>
 
                           {!editingEntryId && !editingIdeaId && (
@@ -4037,7 +4041,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                   ideaActions.push(
                                     {
                                       key: 'to-thought',
-                                      label: L('공유 메모장으로 보내기', '共有メモ帳へ送る', 'Send to Shared Thought Pad'),
+                                      label: L('공유 메모장에 등록', '共有メモ帳に登録', 'Add to Thought Pad'),
                                       icon: <Lightbulb className="w-3.5 h-3.5 text-amber-700" />,
                                       tone: 'amber',
                                       dividerBefore: true,
@@ -4318,7 +4322,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                                 entryActions.push(
                                   {
                                     key: 'to-thought',
-                                    label: L('공유 메모장으로 보내기', '共有メモ帳へ送る', 'Send to Shared Thought Pad'),
+                                    label: L('공유 메모장에 등록', '共有メモ帳に登録', 'Add to Thought Pad'),
                                     icon: <Lightbulb className="w-3.5 h-3.5 text-amber-700" />,
                                     tone: 'amber',
                                     dividerBefore: true,

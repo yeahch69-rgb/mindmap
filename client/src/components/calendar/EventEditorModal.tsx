@@ -252,7 +252,7 @@ export const EventEditorModal: React.FC<EventEditorModalProps> = ({
               }`}
             >
               <Sparkles className="w-3.5 h-3.5" />
-              {L('제안 일정 (가확정)', '提案予定（仮）', 'Proposed (Tentative)')}
+              {L('제안 일정', '提案予定', 'Proposed')}
             </button>
           </div>
         )}
