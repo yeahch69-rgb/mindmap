@@ -228,9 +228,9 @@ const AppShell: React.FC = () => {
                   `Your join request for '${res.name}' is already awaiting owner approval.`
                 )
               : L(
-                  `'${res.name}' 참여 요청을 보냈습니다! 방장이 승인하면 프로젝트와 공유 스페이스에 함께 합류됩니다.`,
-                  `「${res.name}」への参加申請を送信しました！オーナー承認後にプロジェクトと共有スペースへ同時参加します。`,
-                  `Join request sent for '${res.name}'! You will join both the project and space once the owner approves.`
+                  `'${res.name}' 스페이스 참여 요청을 보냈습니다! 스페이스 방장이 승인하면 공유 스페이스에 합류됩니다.`,
+                  `「${res.name}」への参加申請を送信しました！オーナー承認後に共有スペースへ参加します。`,
+                  `Join request sent for '${res.name}'! You will join the shared space once the owner approves.`
                 )
           );
           window.setTimeout(() => setSpaceJoinBanner(''), 6000);

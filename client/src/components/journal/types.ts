@@ -96,6 +96,10 @@ export interface LinkedSpaceSummary {
   name: string;
   color: string;
   member_count: number;
+  linked_project_count?: number;
+  owner_id?: number | null;
+  is_space_owner?: boolean;
+  can_delete_with_project?: boolean;
 }
 
 export interface JournalProject {

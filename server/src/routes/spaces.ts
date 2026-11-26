@@ -12,13 +12,15 @@ import { getJstDateStr, getJstDateTimeStr, getJstTimeStr } from '../utils/jstTim
 import { PushNotificationPayload, sendPushToUsers } from '../utils/webPush.js';
 import { broadcastSpaceUpdate, subscribeSpaceStream } from '../utils/spaceRealtime.js';
 import {
-  addUserToProjectAndLinkedSpace,
-  createJoinRequestForProject,
-  getLinkedProjectForSpace,
+  addUserToSpaceOnly,
+  createJoinRequest,
+  getLinkedProjectCountForSpace,
+  getLinkedProjectsForSpace,
   getMyPendingJoinRequests,
-  getPendingJoinRequestsForProject,
-  removeUserFromProjectAndLinkedSpace,
+  getPendingJoinRequestsForSpace,
+  removeUserFromSpaceCascade,
   resolveJoinRequest,
+  unlinkSpaceFromProject,
 } from '../utils/linkedSpaceSync.js';
 import {
   createCrossLink,
@@ -479,20 +481,25 @@ router.get('/', (req: Request, res: Response) => {
   const spaces = rows.map((s) => {
     const sid = Number(s.id);
     const parsedLabels = safeJsonParse<SpaceLabelPreset[]>(s.labels_json, DEFAULT_SPACE_LABELS);
-    const linkedProject = getLinkedProjectForSpace(s);
-    const pendingJoinRequests = linkedProject ? getPendingJoinRequestsForProject(linkedProject.id) : [];
     const isOwner = s.my_role === 'OWNER';
+    const linkedInfo = getLinkedProjectsForSpace(sid, userId, isOwner);
+    const pendingJoinRequests = getPendingJoinRequestsForSpace(sid, userId, isOwner);
+    const firstLinked = linkedInfo.linked_projects[0] || null;
+    const hasAnyLinkedProject = linkedInfo.total_count > 0;
     return {
       id: sid,
       name: s.name,
       description: s.description || '',
       color: s.color || '#1B4D3E',
       is_personal: Boolean(s.is_personal),
-      linked_project_id: linkedProject ? linkedProject.id : null,
-      linked_project: linkedProject,
+      linked_project_id: firstLinked ? firstLinked.id : null,
+      linked_project: firstLinked,
+      linked_projects: linkedInfo.linked_projects,
+      managed_linked_projects: linkedInfo.managed_linked_projects,
+      linked_project_count: linkedInfo.total_count,
       pending_join_requests: pendingJoinRequests,
       pending_join_request_count: pendingJoinRequests.length,
-      invite_token: linkedProject && !isOwner ? null : s.invite_token,
+      invite_token: hasAnyLinkedProject && !isOwner ? null : s.invite_token,
       member_invite_token: s.member_invite_token || null,
       labels: parsedLabels.length > 0 ? parsedLabels : DEFAULT_SPACE_LABELS,
       created_by: Number(s.created_by),
@@ -593,8 +600,44 @@ router.delete('/:spaceId', (req: Request, res: Response) => {
     return;
   }
 
-  db.prepare('DELETE FROM collab_spaces WHERE id = ?').run(spaceId);
+  db.transaction(() => {
+    db.prepare("DELETE FROM collab_join_requests WHERE space_id = ? AND status = 'PENDING' AND approver_type = 'SPACE_OWNER'").run(spaceId);
+    db.prepare("UPDATE collab_join_requests SET space_id = NULL, scope = 'PROJECT_ONLY', approver_type = 'PROJECT_OWNER' WHERE space_id = ? AND status = 'PENDING'").run(spaceId);
+    db.prepare('DELETE FROM collab_spaces WHERE id = ?').run(spaceId);
+  })();
+  broadcastSpaceUpdate(spaceId, 'SPACE_DELETED', { actorId: userId });
   res.json({ ok: true });
+});
+
+router.delete('/:spaceId/linked-projects/:projectId', (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const spaceId = Number(req.params.spaceId);
+  const projectId = Number(req.params.projectId);
+  const membership = getMembership(spaceId, userId);
+  if (!membership) {
+    res.status(403).json({ error: '스페이스 접근 권한이 없습니다.' });
+    return;
+  }
+
+  const proj = db
+    .prepare('SELECT id, linked_space_id FROM journal_projects WHERE id = ?')
+    .get(projectId) as { id: number; linked_space_id: number | null } | undefined;
+  if (!proj || Number(proj.linked_space_id || 0) !== spaceId) {
+    res.status(404).json({ error: '해당 스페이스에 연동된 프로젝트를 찾을 수 없습니다.' });
+    return;
+  }
+
+  try {
+    unlinkSpaceFromProject({
+      projectId,
+      actorId: userId,
+      actorName: req.user!.name,
+      reason: 'MANUAL',
+    });
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(403).json({ error: err.message || '연동 해제에 실패했습니다.' });
+  }
 });
 
 router.post('/:spaceId/regenerate-invite', (req: Request, res: Response) => {
@@ -662,39 +705,42 @@ router.post('/:spaceId/invite-email', (req: Request, res: Response) => {
   }
 
   const space = getSpaceById(spaceId);
-  const linkedProject = getLinkedProjectForSpace(space);
+  const linkedProjectCount = getLinkedProjectCountForSpace(spaceId);
 
-  if (linkedProject) {
-    const isProjectOwner = Number(linkedProject.created_by) === userId;
-    if (isProjectOwner) {
-      addUserToProjectAndLinkedSpace({
-        projectId: linkedProject.id,
+  // Linked space (1:N): adding a member joins the SPACE ONLY (never auto-adds to linked projects).
+  if (linkedProjectCount > 0) {
+    const isOwner = membership.role === 'OWNER';
+    if (isOwner) {
+      addUserToSpaceOnly({
+        spaceId,
         targetUserId: Number(targetUser.id),
         actorId: userId,
         actorName: req.user!.name,
-        source: 'SPACE',
       });
       res.status(201).json({
         member: targetUser,
         pendingApproval: false,
-        pending_join_requests: getPendingJoinRequestsForProject(linkedProject.id),
+        pending_join_requests: getPendingJoinRequestsForSpace(spaceId, userId, true),
       });
       return;
     }
 
-    const reqRes = createJoinRequestForProject({
-      projectId: linkedProject.id,
+    const reqRes = createJoinRequest({
+      projectId: null,
+      spaceId,
       targetUserId: Number(targetUser.id),
       invitedByUserId: userId,
       invitedByName: req.user!.name,
       source: 'SPACE',
+      scope: 'SPACE_ONLY',
+      approverType: 'SPACE_OWNER',
     });
     res.status(202).json({
       member: targetUser,
       pendingApproval: true,
       alreadyPending: reqRes.alreadyPending,
       request: reqRes.request,
-      pending_join_requests: getPendingJoinRequestsForProject(linkedProject.id),
+      pending_join_requests: getPendingJoinRequestsForSpace(spaceId, userId, false),
     });
     return;
   }
@@ -745,27 +791,29 @@ router.post('/join/:inviteToken', (req: Request, res: Response) => {
 
   const spaceId = Number(space.id);
   const existing = getMembership(spaceId, userId);
-  const linkedProject = getLinkedProjectForSpace(space);
+  const linkedProjectCount = getLinkedProjectCountForSpace(spaceId);
 
-  if (linkedProject) {
+  if (linkedProjectCount > 0) {
     if (existing) {
       res.json({
         spaceId,
         name: space.name,
         alreadyMember: true,
-        linked_project_id: linkedProject.id,
       });
       return;
     }
 
     const isMemberToken = space.member_invite_token === inviteToken;
     if (isMemberToken) {
-      const reqRes = createJoinRequestForProject({
-        projectId: linkedProject.id,
+      const reqRes = createJoinRequest({
+        projectId: null,
+        spaceId,
         targetUserId: userId,
         invitedByUserId: null,
         invitedByName: '',
         source: 'SPACE',
+        scope: 'SPACE_ONLY',
+        approverType: 'SPACE_OWNER',
       });
       res.status(202).json({
         spaceId,
@@ -773,17 +821,15 @@ router.post('/join/:inviteToken', (req: Request, res: Response) => {
         pendingApproval: true,
         alreadyPending: reqRes.alreadyPending,
         requestId: reqRes.request.id,
-        linked_project_id: linkedProject.id,
       });
       return;
     }
 
-    addUserToProjectAndLinkedSpace({
-      projectId: linkedProject.id,
+    addUserToSpaceOnly({
+      spaceId,
       targetUserId: userId,
       actorId: userId,
       actorName: req.user!.name,
-      source: 'SPACE',
       viaLink: true,
     });
     res.json({
@@ -791,7 +837,6 @@ router.post('/join/:inviteToken', (req: Request, res: Response) => {
       name: space.name,
       alreadyMember: false,
       joined: true,
-      linked_project_id: linkedProject.id,
     });
     return;
   }
@@ -854,30 +899,21 @@ router.delete('/:spaceId/members/:memberUserId', (req: Request, res: Response) =
     return;
   }
 
-  const linkedProject = getLinkedProjectForSpace(getSpaceById(spaceId));
-  if (linkedProject) {
-    if (targetUserId === Number(linkedProject.created_by)) {
-      res.status(400).json({ error: '방장은 나갈 수 없습니다. 스페이스를 삭제해 주세요.' });
-      return;
-    }
-    try {
-      removeUserFromProjectAndLinkedSpace({
-        projectId: linkedProject.id,
-        targetUserId,
-        actorId: userId,
-        actorName: req.user!.name,
-      });
-      res.json({ ok: true });
-      return;
-    } catch (err: any) {
-      res.status(400).json({ error: err.message || '처리에 실패했습니다.' });
-      return;
-    }
+  try {
+    const cascadeRes = removeUserFromSpaceCascade({
+      spaceId,
+      targetUserId,
+      actorId: userId,
+      actorName: req.user!.name,
+    });
+    res.json({
+      ok: true,
+      removed_project_ids: cascadeRes.removedProjectIds,
+      unlinked_owned_projects: cascadeRes.unlinkedOwnedProjects,
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || '처리에 실패했습니다.' });
   }
-
-  db.prepare('DELETE FROM collab_space_members WHERE space_id = ? AND user_id = ?').run(spaceId, targetUserId);
-  broadcastSpaceUpdate(spaceId, 'MEMBER_REMOVED', { actorId: userId, targetUserId });
-  res.json({ ok: true });
 });
 
 router.get('/:spaceId/join-requests', (req: Request, res: Response) => {
@@ -888,12 +924,7 @@ router.get('/:spaceId/join-requests', (req: Request, res: Response) => {
     res.status(403).json({ error: '스페이스 접근 권한이 없습니다.' });
     return;
   }
-  const linkedProject = getLinkedProjectForSpace(getSpaceById(spaceId));
-  if (!linkedProject) {
-    res.json({ requests: [] });
-    return;
-  }
-  res.json({ requests: getPendingJoinRequestsForProject(linkedProject.id) });
+  res.json({ requests: getPendingJoinRequestsForSpace(spaceId, userId, membership.role === 'OWNER') });
 });
 
 router.post('/:spaceId/join-requests/:requestId/approve', (req: Request, res: Response) => {
@@ -916,7 +947,7 @@ router.post('/:spaceId/join-requests/:requestId/approve', (req: Request, res: Re
       ok: true,
       request: result.request,
       members: getSpaceMembers(spaceId),
-      pending_join_requests: getPendingJoinRequestsForProject(result.request.project_id),
+      pending_join_requests: getPendingJoinRequestsForSpace(spaceId, userId, membership.role === 'OWNER'),
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message || '승인 처리에 실패했습니다.' });
@@ -942,7 +973,7 @@ router.post('/:spaceId/join-requests/:requestId/reject', (req: Request, res: Res
     res.json({
       ok: true,
       request: result.request,
-      pending_join_requests: getPendingJoinRequestsForProject(result.request.project_id),
+      pending_join_requests: getPendingJoinRequestsForSpace(spaceId, userId, membership.role === 'OWNER'),
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message || '거절 처리에 실패했습니다.' });

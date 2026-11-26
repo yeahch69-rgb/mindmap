@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   BookMarked,
   Check,
@@ -6,11 +6,13 @@ import {
   Copy,
   ExternalLink,
   Link2,
+  Lock,
   Mail,
   Plus,
   RefreshCw,
   Tag,
   Trash2,
+  Unlink2,
   UserMinus,
   Users,
   X,
@@ -65,8 +67,20 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
   const [errorMsg, setErrorMsg] = useState('');
   const [saving, setSaving] = useState(false);
   const [resolvingReqId, setResolvingReqId] = useState<number | null>(null);
+  const [unlinkingProjId, setUnlinkingProjId] = useState<number | null>(null);
 
-  const isLinkedSpace = Boolean(space?.linked_project);
+  const managedLinkedProjects = useMemo(() => {
+    if (!space) return [];
+    if (space.managed_linked_projects && space.managed_linked_projects.length > 0) {
+      return space.managed_linked_projects;
+    }
+    if (space.linked_projects && space.linked_projects.length > 0) {
+      return space.linked_projects;
+    }
+    return space.linked_project ? [space.linked_project] : [];
+  }, [space]);
+
+  const isLinkedSpace = (space?.linked_project_count || managedLinkedProjects.length) > 0;
   const isOwner = space?.my_role === 'OWNER';
   const pendingRequests = space?.pending_join_requests || [];
 
@@ -162,18 +176,18 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
                 `${res.member.name} already has a pending approval request.`
               )
             : L(
-                `${res.member.name}님의 초대 승인 요청을 방장에게 보냈습니다! 승인 후 프로젝트와 스페이스에 함께 합류됩니다.`,
-                `${res.member.name}さんの招待承認リクエストをオーナーへ送信しました！`,
-                `Sent invite approval request for ${res.member.name} to the owner!`
+                `${res.member.name}님의 스페이스 초대 승인 요청을 방장에게 보냈습니다! 승인 후 공유 스페이스에 합류됩니다(프로젝트 자동 투입 안 함).`,
+                `${res.member.name}さんのスペース招待承認リクエストをオーナーへ送信しました！`,
+                `Sent space invite approval request for ${res.member.name} to the space owner!`
               )
         );
       } else {
         setFeedbackMsg(
           isLinkedSpace
             ? L(
-                `${res.member.name}님을 연동 프로젝트와 공유 스페이스에 함께 초대했습니다!`,
-                `${res.member.name}さんを連携プロジェクトと共有スペースに招待しました！`,
-                `Invited ${res.member.name} to both the linked project and space!`
+                `${res.member.name}님을 공유 스페이스에 초대했습니다! (연결된 프로젝트에는 자동 투입되지 않으며, 프로젝트에서 원클릭으로 추가할 수 있습니다.)`,
+                `${res.member.name}さんを共有スペースに招待しました！（連携プロジェクトには自動追加されません。）`,
+                `Invited ${res.member.name} to this Shared Space! (Not auto-added to linked projects.)`
               )
             : L(
                 `${res.member.name}님을 스페이스에 초대했습니다!`,
@@ -199,11 +213,7 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
       await api.post(`/spaces/${space.id}/join-requests/${requestId}/${decision}`);
       setFeedbackMsg(
         decision === 'approve'
-          ? L(
-              '초대 요청을 승인했습니다! 프로젝트와 스페이스에 함께 합류되었습니다.',
-              '招待申請を承認しました！プロジェクトとスペースに同時参加しました。',
-              'Approved! The user has joined both project & space.'
-            )
+          ? L('초대 요청을 승인했습니다!', '招待申請を承認しました！', 'Approved the join request!')
           : L('초대 요청을 거절했습니다.', '招待申請を却下しました。', 'Declined the invite request.')
       );
       await onSaved(space.id);
@@ -214,13 +224,55 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
     }
   };
 
+  const handleUnlinkProject = async (projectId: number, projectTitle: string) => {
+    if (!space || unlinkingProjId !== null) return;
+    const ok = window.confirm(
+      L(
+        `'${projectTitle}' 프로젝트의 스페이스 연동을 해제할까요? 양쪽 데이터와 기존 멤버는 모두 보존됩니다.`,
+        `「${projectTitle}」プロジェクトのスペース連携を解除しますか？双方のデータとメンバーは保持されます。`,
+        `Unlink project '${projectTitle}' from this space? All data and existing members will be preserved.`
+      )
+    );
+    if (!ok) return;
+    setErrorMsg('');
+    setFeedbackMsg('');
+    try {
+      setUnlinkingProjId(projectId);
+      await api.delete(`/spaces/${space.id}/linked-projects/${projectId}`);
+      setFeedbackMsg(
+        L(
+          `'${projectTitle}' 프로젝트 연동을 해제했습니다.`,
+          `「${projectTitle}」の連携を解除しました。`,
+          `Unlinked '${projectTitle}'.`
+        )
+      );
+      await onSaved(space.id);
+    } catch (err: any) {
+      setErrorMsg(err.message || L('연동 해제에 실패했습니다.', '連携解除に失敗しました。', 'Failed to unlink project.'));
+    } finally {
+      setUnlinkingProjId(null);
+    }
+  };
+
   const handleRemoveMember = async (memberUserId: number, memberName: string) => {
     if (!space) return;
     const isSelf = memberUserId === user?.id;
     const ok = window.confirm(
       isSelf
-        ? L('이 공유 스페이스에서 나가시겠습니까?', 'このスペースから退出しますか？', 'Leave this space?')
-        : L(`${memberName}님을 스페이스에서 내보낼까요?`, `${memberName}さんを退出させますか？`, `Remove ${memberName}?`)
+        ? isLinkedSpace
+          ? L(
+              '이 공유 스페이스에서 나가시겠습니까? 연결된 타인 소유 프로젝트에서도 함께 제거되며, 본인 소유 프로젝트는 데이터 보존 후 연동만 자동 해제됩니다.',
+              'このスペースから退出しますか？連携された他メンバー所有プロジェクトからも除外され、自身の所有プロジェクトは連携のみ自動解除されます。',
+              'Leave this space? You will also be removed from linked projects owned by others, while projects you own will be auto-unlinked with data preserved.'
+            )
+          : L('이 공유 스페이스에서 나가시겠습니까?', 'このスペースから退出しますか？', 'Leave this space?')
+        : isLinkedSpace
+          ? L(
+              `${memberName}님을 스페이스에서 내보낼까요? 연결된 타인 소유 프로젝트에서도 함께 제거되며, 해당 멤버 소유 프로젝트는 연동만 자동 해제됩니다.`,
+              `${memberName}さんをスペースから退出させますか？連携プロジェクトからも除外され、本人所有プロジェクトは連携のみ自動解除されます。`,
+              `Remove ${memberName} from this space? They will also be removed from linked projects owned by others, while projects they own will be auto-unlinked.`
+            )
+          : L(`${memberName}님을 스페이스에서 내보낼까요?`, `${memberName}さんを退出させますか？`, `Remove ${memberName}?`)
     );
     if (!ok) return;
     try {
@@ -309,39 +361,94 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
       }
     >
       <div className="space-y-5">
-        {mode === 'edit' && space?.linked_project && (
-          <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 flex flex-wrap items-center justify-between gap-2 text-xs">
-            <div className="flex items-center gap-2 min-w-0">
-              <Link2 className="w-4 h-4 text-indigo-700 shrink-0" />
+        {mode === 'edit' && managedLinkedProjects.length > 0 && (
+          <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 space-y-2.5 text-xs">
+            <div className="flex items-start gap-2">
+              <Link2 className="w-4 h-4 text-indigo-700 shrink-0 mt-0.5" />
               <div className="min-w-0">
-                <div className="font-bold text-indigo-950 truncate">
-                  {L('협업 프로젝트 1:1 연동 중', '協業プロジェクト 1:1 連携中', '1:1 Linked with Project')}
-                  {': '}
-                  {space.linked_project.title}
+                <div className="font-bold text-indigo-950">
+                  {L(
+                    `연동된 협업 프로젝트 (${managedLinkedProjects.length}개)`,
+                    `連携中の協業プロジェクト (${managedLinkedProjects.length}件)`,
+                    `Linked Collaboration Projects (${managedLinkedProjects.length})`
+                  )}
                 </div>
                 <div className="text-[11px] text-indigo-700">
                   {L(
-                    '멤버 추가·추방·나가기가 프로젝트와 양방향 자동 동기화됩니다.',
-                    'メンバーの追加・除外・退出がプロジェクトと双方向で同期されます。',
-                    'Membership syncs bidirectionally with the linked project.'
+                    '스페이스에 멤버를 추가해도 프로젝트에 자동 투입되지 않으며, 스페이스 이탈 시 타인 소유 연결 프로젝트에서도 함께 제거됩니다.',
+                    'スペースにメンバーを追加してもプロジェクトへ自動追加されません。スペース退出時は他者所有の連携プロジェクトからも除外されます。',
+                    'New space members are not auto-added to linked projects. Leaving removes membership from linked projects owned by others.'
                   )}
                 </div>
               </div>
             </div>
-            {onJumpToLinkedProject && (
-              <button
-                type="button"
-                onClick={() => {
-                  onClose();
-                  onJumpToLinkedProject(space.linked_project!.id);
-                }}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-[11px] font-bold transition shrink-0"
-              >
-                <BookMarked className="w-3.5 h-3.5" />
-                <span>{L('연동 프로젝트 열기', '連携プロジェクトを開く', 'Open Linked Project')}</span>
-                <ExternalLink className="w-3 h-3" />
-              </button>
-            )}
+            <div className="divide-y divide-indigo-200/70 rounded-lg border border-indigo-200 bg-white overflow-hidden">
+              {managedLinkedProjects.map((proj) => {
+                const isMember = proj.is_member !== false;
+                const canUnlink = isOwner || Number(proj.created_by) === Number(user?.id);
+                return (
+                  <div key={proj.id} className="px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: proj.color || '#1B4D3E' }}
+                      />
+                      <div className="min-w-0">
+                        <div className="font-bold text-charcoal-900 flex items-center gap-1.5 flex-wrap">
+                          <span className="truncate">{proj.title}</span>
+                          {!isMember && (
+                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-charcoal-100 text-charcoal-600 text-[10px] font-bold">
+                              <Lock className="w-2.5 h-2.5" />
+                              {L('비공개 · 미참여', '非公開・未参加', 'Private · Not joined')}
+                            </span>
+                          )}
+                        </div>
+                        {proj.owner_name && (
+                          <div className="text-[10px] text-charcoal-500">
+                            {L(`소유자: ${proj.owner_name}`, `オーナー: ${proj.owner_name}`, `Owner: ${proj.owner_name}`)}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {isMember && onJumpToLinkedProject ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onClose();
+                            onJumpToLinkedProject(proj.id);
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-[11px] font-bold transition"
+                        >
+                          <BookMarked className="w-3 h-3" />
+                          <span>{L('열기', '開く', 'Open')}</span>
+                          <ExternalLink className="w-2.5 h-2.5" />
+                        </button>
+                      ) : !isMember ? (
+                        <span
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-ivory-100 text-charcoal-400 text-[11px] font-bold cursor-not-allowed"
+                          title={L('미참여 프로젝트 본문은 열람할 수 없습니다.', '未参加プロジェクトの本文は閲覧できません。', 'Cannot view content of projects you are not a member of.')}
+                        >
+                          <Lock className="w-3 h-3" />
+                          <span>{L('열람 불가', '閲覧不可', 'No Access')}</span>
+                        </span>
+                      ) : null}
+                      {canUnlink && (
+                        <button
+                          type="button"
+                          disabled={unlinkingProjId === proj.id}
+                          onClick={() => void handleUnlinkProject(proj.id, proj.title)}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-bold transition disabled:opacity-50"
+                        >
+                          <Unlink2 className="w-3 h-3" />
+                          <span>{L('연동 해제', '連携解除', 'Unlink')}</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
@@ -563,16 +670,16 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
               </div>
             </form>
 
-            {/* Pending Join Requests (Linked Space) */}
-            {isLinkedSpace && pendingRequests.length > 0 && (
+            {/* Pending Join Requests (Space Owner Approval) */}
+            {pendingRequests.length > 0 && (
               <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
                 <div className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
                   <Clock className="w-3.5 h-3.5 text-amber-700" />
                   <span>
                     {L(
-                      `방장 승인 대기 목록 (${pendingRequests.length}건)`,
-                      `オーナー承認待ち (${pendingRequests.length}件)`,
-                      `Pending Owner Approval (${pendingRequests.length})`
+                      `스페이스 방장 승인 대기 목록 (${pendingRequests.length}건)`,
+                      `スペースオーナー承認待ち (${pendingRequests.length}件)`,
+                      `Pending Space Owner Approval (${pendingRequests.length})`
                     )}
                   </span>
                 </div>
@@ -580,7 +687,18 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
                   {pendingRequests.map((req) => (
                     <div key={req.id} className="px-3 py-2 flex items-center justify-between gap-2 text-xs">
                       <div className="min-w-0">
-                        <div className="font-bold text-charcoal-900 truncate">{req.target_user_name}</div>
+                        <div className="font-bold text-charcoal-900 flex items-center gap-1.5 flex-wrap">
+                          <span className="truncate">{req.target_user_name}</span>
+                          <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                            {req.scope === 'SPACE_AND_PROJECT' && req.project_title
+                              ? L(
+                                  `스페이스+프로젝트: ${req.project_title}`,
+                                  `スペース+PJ: ${req.project_title}`,
+                                  `Space + Project: ${req.project_title}`
+                                )
+                              : L('스페이스 합류', 'スペース参加', 'Space Join')}
+                          </span>
+                        </div>
                         <div className="text-[11px] text-charcoal-500 truncate">
                           {req.invited_by_name
                             ? L(`요청자: ${req.invited_by_name}`, `申請者: ${req.invited_by_name}`, `Requested by: ${req.invited_by_name}`)
@@ -588,7 +706,7 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
                           {req.target_user_email ? ` · ${req.target_user_email}` : ''}
                         </div>
                       </div>
-                      {Number(space.linked_project?.created_by) === Number(user?.id) ? (
+                      {req.can_resolve || isOwner ? (
                         <div className="flex items-center gap-1 shrink-0">
                           <button
                             type="button"
@@ -611,7 +729,7 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
                         </div>
                       ) : (
                         <span className="text-[11px] font-bold text-amber-700 shrink-0">
-                          {L('승인 대기 중', '承認待ち', 'Pending')}
+                          {L('스페이스 방장 대기', 'スペースオーナー待ち', 'Awaiting space owner')}
                         </span>
                       )}
                     </div>
@@ -665,9 +783,9 @@ export const SpaceSettingsModal: React.FC<SpaceSettingsModalProps> = ({
                 <span className="text-[11px] text-charcoal-500">
                   {isLinkedSpace
                     ? L(
-                        '스페이스를 삭제해도 연동된 프로젝트와 기록은 유지되며 연동만 해제됩니다.',
-                        'スペースを削除しても連携プロジェクトと記録は保持され、連携のみ解除されます。',
-                        'Deleting this space only unlinks it; the linked project and its logs are preserved.'
+                        '스페이스를 삭제해도 연결된 모든 프로젝트와 기록은 유지되며 연동만 일괄 해제됩니다.',
+                        'スペースを削除しても連携中のすべてのプロジェクトと記録は保持され、連携のみ解除されます。',
+                        'Deleting this space only unlinks all linked projects; their logs and members are preserved.'
                       )
                     : L('방장 권한으로 스페이스를 영구 삭제할 수 있습니다.', 'オーナーはスペースを削除できます。', 'Owner can permanently delete this space.')}
                 </span>

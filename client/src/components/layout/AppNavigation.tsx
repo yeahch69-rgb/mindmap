@@ -196,7 +196,7 @@ export const DesktopSidebar: React.FC<DesktopSidebarProps> = ({
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1">
                         <span className="text-xs font-bold truncate">{space.name}</span>
-                        {space.linked_project && (
+                        {((space.linked_project_count || 0) > 0 || space.linked_project) && (
                           <Link2
                             className="w-3 h-3 text-indigo-600 shrink-0"
                             aria-label={L('프로젝트 연동됨', 'プロジェクト連携中', 'Linked to project')}

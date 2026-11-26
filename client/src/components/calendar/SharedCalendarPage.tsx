@@ -8,7 +8,6 @@ import {
   Clock,
   Copy,
   Edit2,
-  ExternalLink,
   Lightbulb,
   MessageSquare,
   Move,
@@ -43,6 +42,7 @@ import { EventEditorModal } from './EventEditorModal';
 import { EventDetailChatModal } from './EventDetailChatModal';
 import { MobileDayBottomSheet } from './MobileDayBottomSheet';
 import { QuickAddBottomSheet } from './QuickAddBottomSheet';
+import { LinkedProjectsHeaderControl } from '../spaces/LinkedProjectsHeaderControl';
 
 interface SharedCalendarPageProps {
   spaces: CollabSpace[];
@@ -1361,7 +1361,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
             >
               {spaces.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.linked_project ? '🔗 ' : ''}{s.name} ({s.members.length})
+                  {(s.linked_project_count || 0) > 0 || s.linked_project ? '🔗 ' : ''}{s.name} ({s.members.length})
                 </option>
               ))}
               <option value="__NEW__">+ {L('새 공유 스페이스 만들기', '新しいスペース作成', 'New Space')}</option>
@@ -1401,24 +1401,12 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
           </button>
         </div>
 
-        {/* Right: Actions (Linked Project, Feed Bell, Space Settings, Add Event) */}
+        {/* Right: Actions (Linked Project(s), Feed Bell, Space Settings, Add Event) */}
         <div className="flex items-center gap-1.5 flex-wrap">
-          {activeSpace.linked_project && (
-            <button
-              type="button"
-              onClick={() => onJumpToMindmapProject(activeSpace.linked_project!.id)}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 text-xs font-bold transition max-w-[200px]"
-              title={L(
-                `연동 프로젝트 열기: ${activeSpace.linked_project.title}`,
-                `連携プロジェクトを開く: ${activeSpace.linked_project.title}`,
-                `Open linked project: ${activeSpace.linked_project.title}`
-              )}
-            >
-              <BookMarked className="w-3.5 h-3.5 text-indigo-700 shrink-0" />
-              <span className="truncate hidden sm:inline">{L('연동 프로젝트 열기', '連携プロジェクト', 'Linked Project')}</span>
-              <ExternalLink className="w-3 h-3 text-indigo-500 shrink-0" />
-            </button>
-          )}
+          <LinkedProjectsHeaderControl
+            space={activeSpace}
+            onJumpToMindmapProject={onJumpToMindmapProject}
+          />
 
           <button
             type="button"

@@ -14,36 +14,66 @@ export interface SpaceMember {
   joined_at: string;
 }
 
+export type JoinRequestScope = 'PROJECT_ONLY' | 'SPACE_ONLY' | 'SPACE_AND_PROJECT';
+export type JoinRequestApproverType = 'PROJECT_OWNER' | 'SPACE_OWNER';
+
 export interface LinkedProjectSummary {
   id: number;
   title: string;
   color: string;
   mode: string;
   created_by: number;
+  owner_name?: string;
+  is_member?: boolean;
+}
+
+export interface LinkableSpaceOption {
+  id: number;
+  name: string;
+  color: string;
+  is_personal: boolean;
+  is_owner: boolean;
+  member_count: number;
+  linked_project_count: number;
+}
+
+export interface LinkableSpaceMemberItem {
+  user_id: number;
+  name: string;
+  email: string;
+  role: 'OWNER' | 'MEMBER';
+  already_pending: boolean;
 }
 
 export interface CollabJoinRequest {
   id: number;
-  project_id: number;
+  project_id: number | null;
+  project_title?: string | null;
   space_id: number | null;
+  space_name?: string | null;
   target_user_id: number;
   target_user_name: string;
   target_user_email: string;
   invited_by_user_id: number | null;
   invited_by_name: string;
   source: 'PROJECT' | 'SPACE';
+  scope: JoinRequestScope;
+  approver_type: JoinRequestApproverType;
   status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  can_resolve?: boolean;
   created_at: string;
 }
 
 export interface MyPendingJoinRequest {
   id: number;
-  project_id: number;
-  project_title: string;
+  project_id: number | null;
+  project_title: string | null;
   space_id: number | null;
   space_name: string | null;
   invited_by_name: string;
   source: 'PROJECT' | 'SPACE';
+  scope?: JoinRequestScope;
+  approver_type?: JoinRequestApproverType;
   created_at: string;
 }
 
@@ -55,6 +85,9 @@ export interface CollabSpace {
   is_personal: boolean;
   linked_project_id?: number | null;
   linked_project?: LinkedProjectSummary | null;
+  linked_projects?: LinkedProjectSummary[];
+  managed_linked_projects?: LinkedProjectSummary[];
+  linked_project_count?: number;
   pending_join_requests?: CollabJoinRequest[];
   pending_join_request_count?: number;
   invite_token: string | null;

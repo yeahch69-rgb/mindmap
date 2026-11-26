@@ -145,6 +145,7 @@ export function initDatabase() {
       last_activity_at TEXT NOT NULL,
       stale_push_last_sent_at TEXT,
       color TEXT NOT NULL DEFAULT '#1B4D3E',
+      linked_space_id INTEGER REFERENCES collab_spaces(id) ON DELETE SET NULL,
       created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -414,14 +415,16 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_cross_links_target ON cross_entity_links(target_type, target_id);
     CREATE INDEX IF NOT EXISTS idx_cross_links_project ON cross_entity_links(project_id);
 
-    -- Owner-approval join requests for linked Collaboration Projects <-> Shared Spaces
+    -- Approval join requests for Collaboration Projects <-> Shared Spaces (1:N hierarchical)
     CREATE TABLE IF NOT EXISTS collab_join_requests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      project_id INTEGER NOT NULL REFERENCES journal_projects(id) ON DELETE CASCADE,
+      project_id INTEGER REFERENCES journal_projects(id) ON DELETE CASCADE,
       space_id INTEGER REFERENCES collab_spaces(id) ON DELETE SET NULL,
       target_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       invited_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
       source TEXT NOT NULL DEFAULT 'PROJECT', -- 'PROJECT' | 'SPACE'
+      scope TEXT NOT NULL DEFAULT 'PROJECT_ONLY', -- 'PROJECT_ONLY' | 'SPACE_ONLY' | 'SPACE_AND_PROJECT'
+      approver_type TEXT NOT NULL DEFAULT 'PROJECT_OWNER', -- 'PROJECT_OWNER' | 'SPACE_OWNER'
       status TEXT NOT NULL DEFAULT 'PENDING', -- 'PENDING' | 'APPROVED' | 'REJECTED'
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       resolved_at DATETIME,
@@ -431,9 +434,6 @@ export function initDatabase() {
       ON collab_join_requests(project_id, status, id DESC);
     CREATE INDEX IF NOT EXISTS idx_collab_join_requests_space
       ON collab_join_requests(space_id, status, id DESC);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_join_requests_pending_uniq
-      ON collab_join_requests(project_id, target_user_id)
-      WHERE status = 'PENDING';
   `);
 
   const userCols = db.prepare("PRAGMA table_info(users)").all() as { name: string }[];
@@ -472,27 +472,116 @@ export function initDatabase() {
   if (!projColNames.has('member_invite_token')) {
     db.exec('ALTER TABLE journal_projects ADD COLUMN member_invite_token TEXT;');
   }
+  if (!projColNames.has('linked_space_id')) {
+    db.exec('ALTER TABLE journal_projects ADD COLUMN linked_space_id INTEGER REFERENCES collab_spaces(id) ON DELETE SET NULL;');
+  }
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_journal_projects_member_invite_token
       ON journal_projects(member_invite_token)
       WHERE member_invite_token IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_journal_projects_linked_space
+      ON journal_projects(linked_space_id)
+      WHERE linked_space_id IS NOT NULL;
   `);
 
   const collabSpacesCols = db.prepare("PRAGMA table_info(collab_spaces)").all() as { name: string }[];
   const collabSpacesColNames = new Set(collabSpacesCols.map((c) => c.name));
-  if (!collabSpacesColNames.has('linked_project_id')) {
-    db.exec('ALTER TABLE collab_spaces ADD COLUMN linked_project_id INTEGER REFERENCES journal_projects(id) ON DELETE SET NULL;');
-  }
   if (!collabSpacesColNames.has('member_invite_token')) {
     db.exec('ALTER TABLE collab_spaces ADD COLUMN member_invite_token TEXT;');
   }
+  // One-time zero-loss migration: collab_spaces.linked_project_id (1:1) -> journal_projects.linked_space_id (1:N)
+  if (collabSpacesColNames.has('linked_project_id')) {
+    db.transaction(() => {
+      db.exec(`
+        UPDATE journal_projects
+        SET linked_space_id = (
+          SELECT s.id FROM collab_spaces s
+          WHERE s.linked_project_id = journal_projects.id
+          LIMIT 1
+        )
+        WHERE linked_space_id IS NULL
+          AND EXISTS (
+            SELECT 1 FROM collab_spaces s WHERE s.linked_project_id = journal_projects.id
+          );
+      `);
+      db.exec('DROP INDEX IF EXISTS idx_collab_spaces_linked_project;');
+      db.exec('UPDATE collab_spaces SET linked_project_id = NULL WHERE linked_project_id IS NOT NULL;');
+    })();
+  }
   db.exec(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_spaces_linked_project
-      ON collab_spaces(linked_project_id)
-      WHERE linked_project_id IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_spaces_member_invite_token
       ON collab_spaces(member_invite_token)
       WHERE member_invite_token IS NOT NULL;
+  `);
+
+  // Upgrade collab_join_requests if project_id was NOT NULL or scope/approver_type columns are missing
+  const joinReqCols = db.prepare('PRAGMA table_info(collab_join_requests)').all() as Array<{
+    name: string;
+    notnull: number;
+  }>;
+  const joinReqColMap = new Map(joinReqCols.map((c) => [c.name, c]));
+  const needsJoinReqRebuild =
+    (joinReqColMap.get('project_id')?.notnull ?? 0) === 1 ||
+    !joinReqColMap.has('scope') ||
+    !joinReqColMap.has('approver_type');
+
+  if (needsJoinReqRebuild) {
+    const prevFk = db.pragma('foreign_keys', { simple: true });
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec('DROP TABLE IF EXISTS collab_join_requests__mig;');
+        db.exec(`
+          CREATE TABLE collab_join_requests__mig (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER REFERENCES journal_projects(id) ON DELETE CASCADE,
+            space_id INTEGER REFERENCES collab_spaces(id) ON DELETE SET NULL,
+            target_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            invited_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            source TEXT NOT NULL DEFAULT 'PROJECT',
+            scope TEXT NOT NULL DEFAULT 'PROJECT_ONLY',
+            approver_type TEXT NOT NULL DEFAULT 'PROJECT_OWNER',
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            resolved_at DATETIME,
+            resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+          );
+        `);
+        const hasScope = joinReqColMap.has('scope');
+        const hasApproverType = joinReqColMap.has('approver_type');
+        db.exec(`
+          INSERT INTO collab_join_requests__mig (
+            id, project_id, space_id, target_user_id, invited_by_user_id,
+            source, scope, approver_type, status, created_at, resolved_at, resolved_by
+          )
+          SELECT
+            id, project_id, space_id, target_user_id, invited_by_user_id,
+            source,
+            ${hasScope ? 'scope' : "CASE WHEN space_id IS NOT NULL THEN 'SPACE_AND_PROJECT' ELSE 'PROJECT_ONLY' END"},
+            ${hasApproverType ? 'approver_type' : "CASE WHEN space_id IS NOT NULL THEN 'SPACE_OWNER' ELSE 'PROJECT_OWNER' END"},
+            status, created_at, resolved_at, resolved_by
+          FROM collab_join_requests;
+        `);
+        db.exec('DROP TABLE collab_join_requests;');
+        db.exec('ALTER TABLE collab_join_requests__mig RENAME TO collab_join_requests;');
+      })();
+    } finally {
+      db.pragma(`foreign_keys = ${prevFk ? 'ON' : 'OFF'}`);
+    }
+  }
+
+  db.exec(`
+    DROP INDEX IF EXISTS idx_collab_join_requests_pending_uniq;
+    CREATE INDEX IF NOT EXISTS idx_collab_join_requests_project
+      ON collab_join_requests(project_id, status, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_collab_join_requests_space
+      ON collab_join_requests(space_id, status, id DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_join_requests_pending_proj_uniq
+      ON collab_join_requests(project_id, target_user_id)
+      WHERE status = 'PENDING' AND project_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_collab_join_requests_pending_space_uniq
+      ON collab_join_requests(space_id, target_user_id)
+      WHERE status = 'PENDING' AND project_id IS NULL AND space_id IS NOT NULL;
   `);
 
   // Safe backfill of member_invite_token for existing COLLAB projects and spaces

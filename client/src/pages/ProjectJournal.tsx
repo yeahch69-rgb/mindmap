@@ -44,6 +44,7 @@ import {
   Clock,
   ExternalLink,
   Link2,
+  Unlink2,
   Search,
   RefreshCw,
   GitBranch,
@@ -81,7 +82,13 @@ import {
   JournalIdea,
   MindMapLayoutData,
 } from '../components/journal/types';
-import { CollabSpace, CrossLinkBadge, MyPendingJoinRequest } from '../types/spaces';
+import {
+  CollabSpace,
+  CrossLinkBadge,
+  LinkableSpaceMemberItem,
+  LinkableSpaceOption,
+  MyPendingJoinRequest,
+} from '../types/spaces';
 import { MindmapSendSource, SendFromMindmapModal } from '../components/spaces/SendFromMindmapModal';
 
 /** Format timeline date/time compactly as YY.MM.DD HH:MM. */
@@ -253,7 +260,10 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   const [formNextActionDate, setFormNextActionDate] = useState('');
   const [formThresholdDays, setFormThresholdDays] = useState(7);
   const [formColor, setFormColor] = useState('#1B4D3E');
-  const [formCreateLinkedSpace, setFormCreateLinkedSpace] = useState(true);
+  const [formSpaceLinkMode, setFormSpaceLinkMode] = useState<'create' | 'link' | 'none'>('create');
+  const [formLinkedSpaceId, setFormLinkedSpaceId] = useState('');
+  const [createLinkableSpaces, setCreateLinkableSpaces] = useState<LinkableSpaceOption[]>([]);
+  const [loadingCreateLinkableSpaces, setLoadingCreateLinkableSpaces] = useState(false);
   const [isSubmittingProject, setIsSubmittingProject] = useState(false);
 
   // Modal Sub-Tabs (Join merged into New Project modal, Invite/Members merged into People modal)
@@ -271,13 +281,15 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
   // Linked Space & Join Approval State
   const [myPendingJoinRequests, setMyPendingJoinRequests] = useState<MyPendingJoinRequest[]>([]);
   const [isLinkSpaceModalOpen, setIsLinkSpaceModalOpen] = useState(false);
-  const [linkableSpaces, setLinkableSpaces] = useState<
-    Array<{ id: number; name: string; color: string; is_personal: boolean; member_count: number }>
-  >([]);
+  const [linkableSpaces, setLinkableSpaces] = useState<LinkableSpaceOption[]>([]);
   const [loadingLinkableSpaces, setLoadingLinkableSpaces] = useState(false);
   const [selectedLinkSpaceId, setSelectedLinkSpaceId] = useState('');
   const [isLinkingSpace, setIsLinkingSpace] = useState(false);
+  const [isUnlinkingSpace, setIsUnlinkingSpace] = useState(false);
   const [resolvingJoinReqId, setResolvingJoinReqId] = useState<number | null>(null);
+  const [linkableSpaceMembers, setLinkableSpaceMembers] = useState<LinkableSpaceMemberItem[]>([]);
+  const [loadingSpaceMembers, setLoadingSpaceMembers] = useState(false);
+  const [addingSpaceMemberId, setAddingSpaceMemberId] = useState<number | null>(null);
 
   // Project Delete Confirmation Modal
   const [deleteTargetProject, setDeleteTargetProject] = useState<JournalProject | null>(null);
@@ -577,9 +589,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                   `Your join request for '${res.title || ''}' is already pending owner approval.`
                 )
               : L(
-                  `'${res.title || ''}' 참여 요청을 보냈습니다! 방장 승인 후 프로젝트와 공유 스페이스에 함께 합류됩니다.`,
-                  `「${res.title || ''}」への参加申請を送信しました！オーナー承認後に同時参加します。`,
-                  `Join request sent for '${res.title || ''}'! You'll join both project & space after owner approval.`
+                  `'${res.title || ''}' 참여 요청을 보냈습니다! 방장 승인 후 합류됩니다.`,
+                  `「${res.title || ''}」への参加申請を送信しました！オーナー承認後に参加します。`,
+                  `Join request sent for '${res.title || ''}'! You'll join after owner approval.`
                 )
           );
           return;
@@ -741,8 +753,19 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     setFormNextActionDate('');
     setFormThresholdDays(7);
     setFormColor('#1B4D3E');
-    setFormCreateLinkedSpace(true);
+    setFormSpaceLinkMode('create');
+    setFormLinkedSpaceId('');
     setIsProjectModalOpen(true);
+    setLoadingCreateLinkableSpaces(true);
+    api
+      .get<{ spaces: LinkableSpaceOption[] }>('/journal/linkable-spaces')
+      .then((res) => {
+        const list = res.spaces || [];
+        setCreateLinkableSpaces(list);
+        if (list.length > 0) setFormLinkedSpaceId(String(list[0].id));
+      })
+      .catch(() => setCreateLinkableSpaces([]))
+      .finally(() => setLoadingCreateLinkableSpaces(false));
   };
 
   const handleOpenEditModal = (proj: JournalProject) => {
@@ -777,7 +800,11 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
         stale_threshold_days: formThresholdDays,
         color: formColor,
         ...(!editingProject && formMode === 'COLLAB' && formPartnerType === 'SHARED'
-          ? { create_linked_space: formCreateLinkedSpace }
+          ? formSpaceLinkMode === 'create'
+            ? { create_linked_space: true }
+            : formSpaceLinkMode === 'link' && formLinkedSpaceId
+              ? { linked_space_id: Number(formLinkedSpaceId) }
+              : {}
           : {}),
       };
 
@@ -846,29 +873,46 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       const res = await api.post<{
         pendingApproval?: boolean;
         alreadyPending?: boolean;
-        request?: { target_user_name?: string };
+        fromSpaceMember?: boolean;
+        request?: { target_user_name?: string; approver_type?: 'PROJECT_OWNER' | 'SPACE_OWNER' };
       }>(`/journal/projects/${detailProject.id}/members`, { email: inviteEmail.trim() });
       setInviteEmail('');
       await fetchOverview();
       await fetchProjectDetail(detailProject.id);
+      if (detailProject.linked_space) {
+        void loadLinkableSpaceMembers(detailProject.id);
+      }
       onSpacesNeedRefresh?.();
       if (res?.pendingApproval) {
+        const isSpaceOwnerReq = res.request?.approver_type === 'SPACE_OWNER';
         setInviteFeedback(
           res.alreadyPending
-            ? L('이미 방장 승인 대기 중인 사용자입니다.', 'すでにオーナー承認待ちのユーザーです。', 'Already awaiting owner approval.')
-            : L(
-                '방장에게 초대 승인 요청을 보냈습니다! 방장이 승인하면 프로젝트와 공유 스페이스에 함께 합류됩니다.',
-                'オーナーへ招待承認リクエストを送信しました！承認後にプロジェクトとスペースへ同時参加します。',
-                'Invite approval request sent to the owner!'
-              )
+            ? L('이미 승인 대기 중인 사용자입니다.', 'すでに承認待ちのユーザーです。', 'Already awaiting approval.')
+            : isSpaceOwnerReq
+              ? L(
+                  '스페이스 미소속 인원이므로 공유 스페이스 방장에게 승인 요청을 보냈습니다! 승인 후 스페이스와 프로젝트에 함께 합류됩니다.',
+                  'スペース未所属のため共有スペースオーナーへ承認申請を送信しました！承認後にスペースとプロジェクトへ同時参加します。',
+                  'Sent approval request to the Shared Space owner (non-space member).'
+                )
+              : L(
+                  '프로젝트 방장에게 초대 승인 요청을 보냈습니다! 승인 후 프로젝트에 합류됩니다.',
+                  'プロジェクトオーナーへ招待承認リクエストを送信しました！承認後にプロジェクトへ参加します。',
+                  'Sent invite approval request to the project owner!'
+                )
         );
       } else {
         setInviteFeedback(
-          L(
-            '멤버를 초대했습니다! 연동된 공유 스페이스에도 자동 반영됩니다.',
-            'メンバーを招待しました！連携共有スペースにも自動反映されます。',
-            'Member invited and synced with linked Shared Space!'
-          )
+          res?.fromSpaceMember
+            ? L(
+                '연동 공유 스페이스 멤버를 프로젝트에 바로 추가했습니다!',
+                '連携共有スペースメンバーをプロジェクトへ追加しました！',
+                'Added Shared Space member directly to this project!'
+              )
+            : L(
+                '멤버를 프로젝트에 초대했습니다!',
+                'メンバーをプロジェクトに招待しました！',
+                'Member invited to this project!'
+              )
         );
       }
     } catch (err: any) {
@@ -880,15 +924,35 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
 
   const handleRemoveMember = async (memberUserId: number) => {
     if (!detailProject) return;
+    const isSelf = memberUserId === Number(user?.id);
+    if (detailProject.linked_space) {
+      const ok = window.confirm(
+        isSelf
+          ? L(
+              '이 협업 프로젝트에서 나가시겠습니까? (연동된 공유 스페이스 및 다른 프로젝트 소속은 유지됩니다.)',
+              'このプロジェクトから退出しますか？（連携共有スペースと他プロジェクトの参加は維持されます。）',
+              'Leave this project? (Your Shared Space and other linked projects will be preserved.)'
+            )
+          : L(
+              '이 멤버를 프로젝트에서 제외할까요? (공유 스페이스 소속은 유지됩니다.)',
+              'このメンバーをプロジェクトから除外しますか？（共有スペースの参加は維持されます。）',
+              'Remove this member from the project? (Their Shared Space membership will be preserved.)'
+            )
+      );
+      if (!ok) return;
+    }
     try {
       await api.delete(`/journal/projects/${detailProject.id}/members/${memberUserId}`);
       await fetchOverview();
       onSpacesNeedRefresh?.();
-      if (memberUserId === Number(user?.id)) {
+      if (isSelf) {
         setIsParticipantsModalOpen(false);
         navigateProjectSelection(null);
       } else {
         await fetchProjectDetail(detailProject.id);
+        if (detailProject.linked_space) {
+          void loadLinkableSpaceMembers(detailProject.id);
+        }
       }
     } catch (err: any) {
       alert(err.message || t('common.error'));
@@ -946,7 +1010,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     try {
       setLoadingLinkableSpaces(true);
       const res = await api.get<{
-        spaces: Array<{ id: number; name: string; color: string; is_personal: boolean; member_count: number }>;
+        spaces: LinkableSpaceOption[];
       }>(`/journal/projects/${detailProject.id}/linkable-spaces`);
       setLinkableSpaces(res.spaces || []);
       if (res.spaces && res.spaces.length > 0) {
@@ -964,7 +1028,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     if (mode === 'link' && !selectedLinkSpaceId) return;
     try {
       setIsLinkingSpace(true);
-      await api.post(`/journal/projects/${detailProject.id}/linked-space`, {
+      const res = await api.post<{
+        pending_space_approval_requests?: Array<{ id: number; target_user_name: string }>;
+      }>(`/journal/projects/${detailProject.id}/linked-space`, {
         mode,
         ...(mode === 'link' ? { space_id: Number(selectedLinkSpaceId) } : {}),
       });
@@ -972,15 +1038,112 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       await fetchOverview();
       await fetchProjectDetail(detailProject.id);
       onSpacesNeedRefresh?.();
-      showSpaceBridgeToast(
-        mode === 'create'
-          ? L('새 연동 공유 스페이스를 만들었습니다!', '新しい連携共有スペースを作成しました！', 'Created a new linked Shared Space!')
-          : L('기존 공유 스페이스를 1:1 연동하고 양쪽 멤버를 병합했습니다!', '既存スペースを連携しメンバーを統合しました！', 'Linked existing space & merged members!')
-      );
+      const pendingOutsiders = res?.pending_space_approval_requests || [];
+      if (mode === 'create') {
+        showSpaceBridgeToast(
+          L('새 연동 공유 스페이스를 만들었습니다!', '新しい連携共有スペースを作成しました！', 'Created a new linked Shared Space!')
+        );
+      } else if (pendingOutsiders.length > 0) {
+        showSpaceBridgeToast(
+          L(
+            `공유 스페이스에 연결했습니다! 스페이스 미소속 멤버 ${pendingOutsiders.length}명은 스페이스 방장 승인 요청이 자동 생성되었습니다.`,
+            `共有スペースに連携しました！未所属メンバー${pendingOutsiders.length}名はスペースオーナーへ承認申請を送信しました。`,
+            `Linked to Shared Space! Sent space owner approval request(s) for ${pendingOutsiders.length} non-space member(s).`
+          )
+        );
+      } else {
+        showSpaceBridgeToast(
+          L(
+            '기존 공유 스페이스에 연결했습니다! (스페이스 멤버는 프로젝트에서 원클릭으로 추가할 수 있습니다.)',
+            '既存共有スペースに連携しました！（スペースメンバーはプロジェクトからワンクリックで追加できます。）',
+            'Linked to existing Shared Space! (Add space members in one click anytime.)'
+          )
+        );
+      }
     } catch (err: any) {
       alert(err.message || t('common.error'));
     } finally {
       setIsLinkingSpace(false);
+    }
+  };
+
+  const handleUnlinkSpace = async () => {
+    if (!detailProject?.linked_space || isUnlinkingSpace) return;
+    const ok = window.confirm(
+      L(
+        `'${detailProject.linked_space.name}' 공유 스페이스와의 연동을 해제할까요? 프로젝트와 스페이스의 데이터·기존 멤버는 모두 보존되며, 해제 후 다른 스페이스에 다시 연결할 수 있습니다.`,
+        `共有スペース「${detailProject.linked_space.name}」との連携を解除しますか？双方のデータ・メンバーはすべて保持され、別のスペースに再連携できます。`,
+        `Unlink from Shared Space '${detailProject.linked_space.name}'? All data and existing members are preserved.`
+      )
+    );
+    if (!ok) return;
+    try {
+      setIsUnlinkingSpace(true);
+      await api.delete(`/journal/projects/${detailProject.id}/linked-space`);
+      setLinkableSpaceMembers([]);
+      await fetchOverview();
+      await fetchProjectDetail(detailProject.id);
+      onSpacesNeedRefresh?.();
+      showSpaceBridgeToast(
+        L('공유 스페이스 연동을 해제했습니다.', '共有スペース連携を解除しました。', 'Unlinked Shared Space.')
+      );
+    } catch (err: any) {
+      alert(err.message || t('common.error'));
+    } finally {
+      setIsUnlinkingSpace(false);
+    }
+  };
+
+  const loadLinkableSpaceMembers = async (projectId: number) => {
+    try {
+      setLoadingSpaceMembers(true);
+      const res = await api.get<{ members: LinkableSpaceMemberItem[] }>(
+        `/journal/projects/${projectId}/linkable-space-members`
+      );
+      setLinkableSpaceMembers(res.members || []);
+    } catch {
+      setLinkableSpaceMembers([]);
+    } finally {
+      setLoadingSpaceMembers(false);
+    }
+  };
+
+  const handleQuickAddSpaceMember = async (member: LinkableSpaceMemberItem) => {
+    if (!detailProject || addingSpaceMemberId !== null) return;
+    setInviteError('');
+    setInviteFeedback('');
+    try {
+      setAddingSpaceMemberId(member.user_id);
+      const res = await api.post<{
+        pendingApproval?: boolean;
+      }>(`/journal/projects/${detailProject.id}/members`, {
+        user_id: member.user_id,
+      });
+      await fetchOverview();
+      await fetchProjectDetail(detailProject.id);
+      await loadLinkableSpaceMembers(detailProject.id);
+      onSpacesNeedRefresh?.();
+      if (res?.pendingApproval) {
+        setInviteFeedback(
+          L(
+            `${member.name}님의 프로젝트 참여 승인 요청을 프로젝트 방장에게 보냈습니다.`,
+            `${member.name}さんのプロジェクト参加承認リクエストをオーナーへ送信しました。`,
+            `Requested project owner approval to add ${member.name}.`
+          )
+        );
+      } else {
+        setInviteFeedback(
+          L(
+            `${member.name}님을 초대 링크 없이 공유 스페이스 멤버에서 바로 투입했습니다!`,
+            `${member.name}さんを招待リンクなしで共有スペースメンバーから即時追加しました！`,
+            `Added ${member.name} directly from Shared Space without an invite link!`
+          )
+        );
+      }
+    } catch (err: any) {
+      setInviteError(err.message || t('common.error'));
+    } finally {
+      setAddingSpaceMemberId(null);
     }
   };
 
@@ -991,14 +1154,13 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
       await api.post(`/journal/projects/${detailProject.id}/join-requests/${requestId}/${decision}`);
       await fetchOverview();
       await fetchProjectDetail(detailProject.id);
+      if (detailProject.linked_space) {
+        void loadLinkableSpaceMembers(detailProject.id);
+      }
       onSpacesNeedRefresh?.();
       showSpaceBridgeToast(
         decision === 'approve'
-          ? L(
-              '초대 요청을 승인했습니다! 프로젝트와 연동 스페이스에 함께 합류되었습니다.',
-              '招待申請を承認しました！プロジェクトと連携スペースに同時参加しました。',
-              'Approved! Joined both project & linked space.'
-            )
+          ? L('초대 요청을 승인했습니다!', '招待申請を承認しました！', 'Approved join request!')
           : L('초대 요청을 거절했습니다.', '招待申請を却下しました。', 'Declined invite request.')
       );
     } catch (err: any) {
@@ -1145,7 +1307,8 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     const proj = deleteTargetProject;
     try {
       setIsDeletingProject(true);
-      const q = proj.linked_space ? `?deleteLinkedSpace=${deleteWithLinkedSpace ? 'true' : 'false'}` : '';
+      const canDelSpace = Boolean(proj.linked_space?.can_delete_with_project);
+      const q = proj.linked_space ? `?deleteLinkedSpace=${canDelSpace && deleteWithLinkedSpace ? 'true' : 'false'}` : '';
       await api.delete(`/journal/projects/${proj.id}${q}`);
       setDeleteTargetProject(null);
       if (selectedProjectId === proj.id) {
@@ -1595,6 +1758,11 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
     setInviteFeedback('');
     setParticipantsModalTab(initialTab);
     setIsParticipantsModalOpen(true);
+    if (detailProject.linked_space) {
+      void loadLinkableSpaceMembers(detailProject.id);
+    } else {
+      setLinkableSpaceMembers([]);
+    }
   };
 
   const handleAddDraftParticipant = (e?: React.FormEvent) => {
@@ -2150,9 +2318,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
           <Clock className="w-4 h-4 text-sky-700 shrink-0" />
           <span>
             {L(
-              `방장 승인 대기 중인 협업 프로젝트 초대 ${myPendingJoinRequests.length}건: ${myPendingJoinRequests.map((r) => r.project_title).join(', ')}`,
-              `オーナー承認待ちの協業プロジェクト招待 ${myPendingJoinRequests.length}件: ${myPendingJoinRequests.map((r) => r.project_title).join('・')}`,
-              `${myPendingJoinRequests.length} project invite(s) pending owner approval: ${myPendingJoinRequests.map((r) => r.project_title).join(', ')}`
+              `방장 승인 대기 중인 초대 ${myPendingJoinRequests.length}건: ${myPendingJoinRequests.map((r) => r.project_title || r.space_name).filter(Boolean).join(', ')}`,
+              `オーナー承認待ちの招待 ${myPendingJoinRequests.length}件: ${myPendingJoinRequests.map((r) => r.project_title || r.space_name).filter(Boolean).join('・')}`,
+              `${myPendingJoinRequests.length} invite(s) pending owner approval: ${myPendingJoinRequests.map((r) => r.project_title || r.space_name).filter(Boolean).join(', ')}`
             )}
           </span>
         </div>
@@ -2568,24 +2736,39 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                   )}
 
                   {detailProject?.linked_space && (
-                    <button
-                      type="button"
-                      onClick={() => onJumpToLinkedSpace?.(detailProject.linked_space!.id)}
-                      className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 transition whitespace-nowrap"
-                      title={L(
-                        `연동 공유 스페이스 열기: ${detailProject.linked_space.name}`,
-                        `連携共有スペースを開く: ${detailProject.linked_space.name}`,
-                        `Open linked Shared Space: ${detailProject.linked_space.name}`
+                    <div className="inline-flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => onJumpToLinkedSpace?.(detailProject.linked_space!.id)}
+                        className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 transition whitespace-nowrap"
+                        title={L(
+                          `연동 공유 스페이스 열기: ${detailProject.linked_space.name}`,
+                          `連携共有スペースを開く: ${detailProject.linked_space.name}`,
+                          `Open linked Shared Space: ${detailProject.linked_space.name}`
+                        )}
+                      >
+                        <span
+                          className="w-2 h-2 rounded-full shrink-0"
+                          style={{ backgroundColor: detailProject.linked_space.color }}
+                        />
+                        <CalendarRange className="w-3 h-3 text-emerald-700 shrink-0" />
+                        <span>{detailProject.linked_space.name}</span>
+                        <ExternalLink className="w-2.5 h-2.5 text-emerald-600 shrink-0" />
+                      </button>
+                      {(Number(detailProject.created_by) === Number(user?.id) ||
+                        detailProject.linked_space.is_space_owner) && (
+                        <button
+                          type="button"
+                          disabled={isUnlinkingSpace}
+                          onClick={() => void handleUnlinkSpace()}
+                          className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-white hover:bg-rose-50 text-charcoal-500 hover:text-rose-700 border border-ivory-300 hover:border-rose-200 transition whitespace-nowrap disabled:opacity-50"
+                          title={L('공유 스페이스 연동 해제', '共有スペース連携解除', 'Unlink Shared Space')}
+                        >
+                          <Unlink2 className="w-2.5 h-2.5 shrink-0" />
+                          <span>{L('연동 해제', '解除', 'Unlink')}</span>
+                        </button>
                       )}
-                    >
-                      <span
-                        className="w-2 h-2 rounded-full shrink-0"
-                        style={{ backgroundColor: detailProject.linked_space.color }}
-                      />
-                      <CalendarRange className="w-3 h-3 text-emerald-700 shrink-0" />
-                      <span>{L('연동 공유 스페이스 열기', '連携スペースを開く', 'Open Linked Space')}</span>
-                      <ExternalLink className="w-2.5 h-2.5 text-emerald-600 shrink-0" />
-                    </button>
+                    </div>
                   )}
 
                   {detailProject &&
@@ -2695,19 +2878,24 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         key={`hdr-req-${req.id}`}
                         className="px-2.5 py-1.5 rounded-lg bg-white border border-amber-200 flex flex-wrap items-center justify-between gap-2"
                       >
-                        <div className="min-w-0">
+                        <div className="min-w-0 flex items-center gap-1.5 flex-wrap">
                           <span className="font-bold text-charcoal-900">{req.target_user_name}</span>
+                          <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                            {req.approver_type === 'SPACE_OWNER'
+                              ? L('스페이스 방장 승인 필요', 'スペースオーナー承認待ち', 'Space Owner Approval')
+                              : L('프로젝트 방장 승인 필요', 'PJオーナー承認待ち', 'Project Owner Approval')}
+                          </span>
                           {req.invited_by_name ? (
-                            <span className="ml-1.5 text-[11px] text-charcoal-500">
+                            <span className="text-[11px] text-charcoal-500">
                               ({L(`요청자: ${req.invited_by_name}`, `申請者: ${req.invited_by_name}`, `By: ${req.invited_by_name}`)})
                             </span>
                           ) : (
-                            <span className="ml-1.5 text-[11px] text-charcoal-500">
+                            <span className="text-[11px] text-charcoal-500">
                               ({L('멤버용 초대 링크', 'メンバー用招待リンク', 'Member link')})
                             </span>
                           )}
                         </div>
-                        {Number(detailProject.created_by) === Number(user?.id) ? (
+                        {req.can_resolve ? (
                           <div className="flex items-center gap-1 shrink-0">
                             <button
                               type="button"
@@ -4618,28 +4806,87 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                       )}
                     </p>
                     {!editingProject && (
-                      <div className="pt-1.5 border-t border-sky-200/80 space-y-1">
-                        <label className="inline-flex items-center gap-2 font-bold text-emerald-900 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={formCreateLinkedSpace}
-                            onChange={(e) => setFormCreateLinkedSpace(e.target.checked)}
-                          />
-                          <span>
+                      <div className="pt-1.5 border-t border-sky-200/80 space-y-2">
+                        <div className="text-[11px] font-bold text-emerald-950 flex items-center gap-1.5">
+                          <Link2 className="w-3.5 h-3.5 text-emerald-700" />
+                          <span>{L('공유 스페이스 연동 설정 (캘린더 · 메모장)', '共有スペース連携設定（カレンダー・メモ帳）', 'Shared Space Link Option (Calendar & Thoughts)')}</span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setFormSpaceLinkMode('create')}
+                            className={`p-2 rounded-lg border text-left text-[11px] font-bold transition ${
+                              formSpaceLinkMode === 'create'
+                                ? 'bg-emerald-700 text-white border-emerald-800'
+                                : 'bg-white text-charcoal-700 border-sky-200 hover:bg-emerald-50'
+                            }`}
+                          >
+                            {L('새 연동 스페이스 만들기', '新しい連携スペースを作成', 'Create New Space')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setFormSpaceLinkMode('link')}
+                            className={`p-2 rounded-lg border text-left text-[11px] font-bold transition ${
+                              formSpaceLinkMode === 'link'
+                                ? 'bg-emerald-700 text-white border-emerald-800'
+                                : 'bg-white text-charcoal-700 border-sky-200 hover:bg-emerald-50'
+                            }`}
+                          >
+                            {L('기존 공유 스페이스에 연결', '既存共有スペースに連携', 'Link Existing Space')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setFormSpaceLinkMode('none')}
+                            className={`p-2 rounded-lg border text-left text-[11px] font-bold transition ${
+                              formSpaceLinkMode === 'none'
+                                ? 'bg-charcoal-800 text-white border-charcoal-900'
+                                : 'bg-white text-charcoal-700 border-sky-200 hover:bg-ivory-100'
+                            }`}
+                          >
+                            {L('연동 안 함', '連携しない', 'Do Not Link')}
+                          </button>
+                        </div>
+
+                        {formSpaceLinkMode === 'create' && (
+                          <p className="text-[11px] text-charcoal-600">
                             {L(
-                              '연동 공유 스페이스 함께 만들기 (공유 캘린더 · 공유 메모장)',
-                              '連携共有スペースを一緒に作成（共有カレンダー・共有メモ）',
-                              'Also create linked Shared Space (Calendar & Thoughts)'
+                              '프로젝트 이름·색상으로 새 공유 스페이스를 함께 만들고, 생성 후에는 각각 독립 수정할 수 있습니다.',
+                              'プロジェクトの名前・色で新しい共有スペースを同時作成します（作成後は個別編集可）。',
+                              'Creates a new Shared Space using this project title & color (editable independently afterward).'
                             )}
-                          </span>
-                        </label>
-                        <p className="text-[11px] text-charcoal-600 pl-5">
-                          {L(
-                            '초기 이름과 색상은 프로젝트에서 복사되며, 생성 후에는 각각 독립적으로 수정할 수 있습니다. 참여 멤버는 양방향 자동 동기화됩니다.',
-                            '初期の名前と色はプロジェクトからコピーされ、作成後はそれぞれ個別に編集できます。メンバーは双方向で自動同期されます。',
-                            'Initial name and color are copied from this project and can be edited independently later. Members sync bidirectionally.'
-                          )}
-                        </p>
+                          </p>
+                        )}
+
+                        {formSpaceLinkMode === 'link' && (
+                          <div className="space-y-1.5">
+                            {loadingCreateLinkableSpaces ? (
+                              <div className="text-[11px] text-charcoal-400">{t('common.loading')}</div>
+                            ) : createLinkableSpaces.length === 0 ? (
+                              <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                                {L('연결 가능한 소속 공유 스페이스가 없습니다.', '連携可能な共有スペースがありません。', 'No joined Shared Spaces available.')}
+                              </div>
+                            ) : (
+                              <select
+                                value={formLinkedSpaceId}
+                                onChange={(e) => setFormLinkedSpaceId(e.target.value)}
+                                className="w-full p-2 bg-white border border-emerald-300 rounded-lg font-bold text-charcoal-900"
+                              >
+                                {createLinkableSpaces.map((sp) => (
+                                  <option key={sp.id} value={sp.id}>
+                                    {sp.name} [{sp.is_owner ? L('방장', 'オーナー', 'Owner') : L('멤버', 'メンバー', 'Member')}] ({L(`${sp.member_count}명 · 프로젝트 ${sp.linked_project_count}개`, `${sp.member_count}名・PJ ${sp.linked_project_count}件`, `${sp.member_count} members · ${sp.linked_project_count} projects`)})
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                            <p className="text-[11px] text-charcoal-600">
+                              {L(
+                                '스페이스 기존 멤버는 자동 투입되지 않으며, 생성 후 [초대·멤버] 탭에서 초대 링크 없이 원클릭으로 투입할 수 있습니다.',
+                                'スペース既存メンバーは自動追加されず、作成後に[招待・メンバー]タブからワンクリックで追加できます。',
+                                'Existing space members are not auto-added; add them in one click from [Invite & Members] after creation.'
+                              )}
+                            </p>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -4856,27 +5103,114 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               <>
                 {/* Linked Space Banner */}
                 {detailProject.linked_space && (
-                  <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-2 text-[11px] font-bold text-emerald-950">
+                  <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-[11px] font-bold text-emerald-950">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <Link2 className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
                       <span className="truncate">
                         {L(
-                          `공유 스페이스 '${detailProject.linked_space.name}'와 1:1 멤버 양방향 연동 중`,
-                          `共有スペース「${detailProject.linked_space.name}」と1:1メンバー双方向連携中`,
-                          `1:1 synced with Shared Space '${detailProject.linked_space.name}'`
+                          `공유 스페이스 '${detailProject.linked_space.name}'와 계층형 연동 중`,
+                          `共有スペース「${detailProject.linked_space.name}」と階層連携中`,
+                          `Linked with Shared Space '${detailProject.linked_space.name}'`
                         )}
                       </span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsParticipantsModalOpen(false);
-                        onJumpToLinkedSpace?.(detailProject.linked_space!.id);
-                      }}
-                      className="text-emerald-800 hover:underline shrink-0"
-                    >
-                      {L('열기 →', '開く →', 'Open →')}
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsParticipantsModalOpen(false);
+                          onJumpToLinkedSpace?.(detailProject.linked_space!.id);
+                        }}
+                        className="text-emerald-800 hover:underline"
+                      >
+                        {L('열기 →', '開く →', 'Open →')}
+                      </button>
+                      {(Number(detailProject.created_by) === Number(user?.id) ||
+                        detailProject.linked_space.is_space_owner) && (
+                        <button
+                          type="button"
+                          disabled={isUnlinkingSpace}
+                          onClick={() => void handleUnlinkSpace()}
+                          className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-bold disabled:opacity-50"
+                        >
+                          <Unlink2 className="w-3 h-3" />
+                          <span>{L('연동 해제', '連携解除', 'Unlink')}</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* One-Click Add from Linked Shared Space Members (No Invite Link Needed!) */}
+                {detailProject.linked_space && (
+                  <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-2">
+                    <div className="text-[11px] font-bold text-indigo-950 flex items-center gap-1.5">
+                      <Users className="w-3.5 h-3.5 text-indigo-700" />
+                      <span>
+                        {Number(detailProject.created_by) === Number(user?.id)
+                          ? L(
+                              '연동 공유 스페이스 멤버에서 바로 추가 (초대 링크 없이 즉시 투입)',
+                              '連携共有スペースメンバーからワンクリック追加（招待リンク不要）',
+                              'Quick-Add from Linked Shared Space (Instant, No Link Needed)'
+                            )
+                          : L(
+                              '연동 공유 스페이스 멤버에서 참여 요청 (프로젝트 방장 승인)',
+                              '連携共有スペースメンバーから参加申請（プロジェクトオーナー承認）',
+                              'Request Member from Linked Space (Project Owner Approval)'
+                            )}
+                      </span>
+                    </div>
+                    {loadingSpaceMembers ? (
+                      <div className="py-2 text-center text-[11px] text-charcoal-400">{t('common.loading')}</div>
+                    ) : linkableSpaceMembers.length === 0 ? (
+                      <div className="py-2 text-center text-[11px] text-indigo-800/70 bg-white/80 rounded-lg border border-indigo-100">
+                        {L(
+                          '연동 스페이스의 모든 멤버가 이미 이 프로젝트에 참여 중입니다.',
+                          '連携スペースのすべてのメンバーがすでにこのプロジェクトに参加しています。',
+                          'All members of the linked Shared Space are already in this project.'
+                        )}
+                      </div>
+                    ) : (
+                      <div className="max-h-40 overflow-y-auto divide-y divide-indigo-100 rounded-lg border border-indigo-200 bg-white">
+                        {linkableSpaceMembers.map((sm) => {
+                          const isProjOwner = Number(detailProject.created_by) === Number(user?.id);
+                          return (
+                            <div key={sm.user_id} className="px-2.5 py-1.5 flex items-center justify-between gap-2 text-xs">
+                              <div className="min-w-0">
+                                <div className="font-bold text-charcoal-900 flex items-center gap-1.5">
+                                  <span className="truncate">{sm.name}</span>
+                                  {sm.role === 'OWNER' && (
+                                    <span className="px-1.5 py-0.2 rounded bg-forest-100 text-forest-900 text-[9px] font-bold">
+                                      {L('스페이스 방장', 'スペースオーナー', 'Space Owner')}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[10px] text-charcoal-500 truncate">{sm.email}</div>
+                              </div>
+                              {sm.already_pending ? (
+                                <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold shrink-0">
+                                  {L('승인 대기 중', '承認待ち', 'Pending')}
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={addingSpaceMemberId === sm.user_id}
+                                  onClick={() => void handleQuickAddSpaceMember(sm)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-[11px] font-bold transition shrink-0 disabled:opacity-50"
+                                >
+                                  <UserPlus className="w-3 h-3" />
+                                  <span>
+                                    {isProjOwner
+                                      ? L('바로 추가', '即時追加', 'Add Now')
+                                      : L('승인 요청', '承認申請', 'Request')}
+                                  </span>
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -5014,7 +5348,14 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                           className="px-2.5 py-2 rounded-lg bg-white border border-amber-200 flex items-center justify-between gap-2"
                         >
                           <div className="min-w-0">
-                            <div className="font-bold text-charcoal-900 truncate">{req.target_user_name}</div>
+                            <div className="font-bold text-charcoal-900 flex items-center gap-1.5 flex-wrap">
+                              <span className="truncate">{req.target_user_name}</span>
+                              <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-bold">
+                                {req.approver_type === 'SPACE_OWNER'
+                                  ? L('스페이스 방장 승인', 'スペースオーナー承認', 'Space Owner')
+                                  : L('프로젝트 방장 승인', 'PJオーナー承認', 'Project Owner')}
+                              </span>
+                            </div>
                             <div className="text-[11px] text-charcoal-500 truncate">
                               {req.invited_by_name
                                 ? L(`요청자: ${req.invited_by_name}`, `申請者: ${req.invited_by_name}`, `Requested by: ${req.invited_by_name}`)
@@ -5022,7 +5363,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                               {req.target_user_email ? ` · ${req.target_user_email}` : ''}
                             </div>
                           </div>
-                          {Number(detailProject.created_by) === Number(user?.id) ? (
+                          {req.can_resolve ? (
                             <div className="flex items-center gap-1 shrink-0">
                               <button
                                 type="button"
@@ -5045,7 +5386,9 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                             </div>
                           ) : (
                             <span className="text-[11px] font-bold text-amber-700 shrink-0">
-                              {L('승인 대기 중', '承認待ち', 'Pending')}
+                              {req.approver_type === 'SPACE_OWNER'
+                                ? L('스페이스 방장 대기', 'スペースオーナー待ち', 'Awaiting space owner')
+                                : L('승인 대기 중', '承認待ち', 'Pending')}
                             </span>
                           )}
                         </div>
@@ -5101,15 +5444,15 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
         <Modal
           isOpen={true}
           onClose={() => setIsLinkSpaceModalOpen(false)}
-          title={L('공유 스페이스 1:1 연동', '共有スペース 1:1 連携', 'Link Shared Space (1:1)')}
+          title={L('공유 스페이스 연동 (1:N)', '共有スペース連携 (1:N)', 'Link Shared Space')}
           maxWidth="lg"
         >
           <div className="space-y-4 text-xs">
             <p className="text-charcoal-600 leading-relaxed">
               {L(
-                '협업 프로젝트와 전용 공유 스페이스(공유 캘린더·공유 메모장)를 1:1로 연동하면 참여 멤버가 양방향으로 자동 동기화됩니다.',
-                '協業プロジェクトと共有スペース（カレンダー・メモ帳）を1:1で連携すると、参加メンバーが双方向で自動同期されます。',
-                'Link this collaboration project 1:1 with a Shared Space (Calendar & Thoughts) to keep members synced bidirectionally.'
+                '하나의 공유 스페이스에 여러 협업 프로젝트를 연결할 수 있습니다. 연결 후 스페이스 기존 멤버는 초대 링크 없이 원클릭으로 프로젝트에 투입할 수 있습니다.',
+                '1つの共有スペースに複数の協業プロジェクトを連携できます。連携後、スペース既存メンバーを招待リンクなしでワンクリック追加できます。',
+                'Link multiple collaboration projects to one Shared Space and add space members to this project in one click without invite links.'
               )}
             </p>
 
@@ -5121,8 +5464,8 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               </div>
               <p className="text-[11px] text-emerald-900/80">
                 {L(
-                  `'${detailProject.title}' 이름과 색상으로 전용 공유 스페이스를 새로 만들고 현재 참여 멤버를 자동으로 등록합니다.`,
-                  `「${detailProject.title}」の名前・色で専用スペースを新規作成し、現在の参加メンバーを自動登録します。`,
+                  `'${detailProject.title}' 이름과 색상으로 새 공유 스페이스를 만들고 현재 참여 멤버를 자동으로 등록합니다.`,
+                  `「${detailProject.title}」の名前・色で新しいスペースを作成し、現在の参加メンバーを自動登録します。`,
                   `Create a new space named '${detailProject.title}' with its color and automatically sync current project members.`
                 )}
               </p>
@@ -5142,20 +5485,20 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
             <div className="p-3.5 rounded-xl bg-ivory-50 border border-ivory-300 space-y-2.5">
               <div className="font-bold text-charcoal-900 flex items-center gap-1.5">
                 <Link2 className="w-4 h-4 text-forest-700" />
-                <span>{L('기존 스페이스 연결 (1:1)', '既存スペースを連携 (1:1)', 'Link Existing Space (1:1)')}</span>
+                <span>{L('기존 공유 스페이스에 연결', '既存共有スペースに連携', 'Link Existing Shared Space')}</span>
               </div>
-              <p className="text-[11px] text-charcoal-600">
+              <p className="text-[11px] text-charcoal-600 leading-relaxed">
                 {L(
-                  '본인이 방장인 미연동 스페이스만 선택할 수 있으며, 연결 시 양쪽 멤버가 합집합으로 병합됩니다.',
-                  '自分がオーナーの未連携スペースのみ選択でき、連携時に双方のメンバーが統合（和集合）されます。',
-                  'Only unlinked spaces you own can be selected. Members from both sides will be merged as a union.'
+                  '본인이 소속된 모든 공유 스페이스(이미 다른 프로젝트가 연결된 스페이스 포함)에 연결할 수 있습니다. 스페이스 기존 멤버는 자동 투입되지 않으며, 프로젝트에 스페이스 미소속 멤버가 있으면 방장 여부에 따라 즉시 합류 또는 스페이스 방장 승인 요청이 생성됩니다.',
+                  '自分が所属するすべての共有スペース（他プロジェクト連携済み含む）に連携できます。スペース既存メンバーは自動追加されず、未所属メンバーがいる場合はスペースオーナー承認申請が作成されます。',
+                  'Link to any Shared Space you belong to (even if other projects are already linked). Space members are not auto-added; non-space project members trigger space owner approval if you are not the space owner.'
                 )}
               </p>
               {loadingLinkableSpaces ? (
                 <div className="py-3 text-center text-charcoal-400">{t('common.loading')}</div>
               ) : linkableSpaces.length === 0 ? (
                 <div className="py-3 text-center text-charcoal-400 bg-white rounded-lg border border-ivory-200">
-                  {L('연결 가능한 미연동 스페이스가 없습니다.', '連携可能な未連携スペースがありません。', 'No unlinked spaces available.')}
+                  {L('연결 가능한 소속 공유 스페이스가 없습니다.', '連携可能な共有スペースがありません。', 'No joined spaces available.')}
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -5166,7 +5509,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                   >
                     {linkableSpaces.map((sp) => (
                       <option key={sp.id} value={sp.id}>
-                        {sp.name} ({L(`${sp.member_count}명`, `${sp.member_count}名`, `${sp.member_count} members`)})
+                        {sp.name} [{sp.is_owner ? L('방장', 'オーナー', 'Owner') : L('멤버', 'メンバー', 'Member')}] ({L(`${sp.member_count}명 · 연동 프로젝트 ${sp.linked_project_count}개`, `${sp.member_count}名・連携PJ ${sp.linked_project_count}件`, `${sp.member_count} members · ${sp.linked_project_count} projects`)})
                       </option>
                     ))}
                   </select>
@@ -5179,7 +5522,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                     onClick={() => void handleLinkSpaceAction('link')}
                   >
                     <Link2 className="w-3.5 h-3.5 mr-1" />
-                    <span>{L('선택한 스페이스 연결 및 멤버 병합', '選択スペースを連携・メンバー統合', 'Link Space & Merge Members')}</span>
+                    <span>{L('선택한 공유 스페이스에 연결', '選択した共有スペースに連携', 'Link Selected Space')}</span>
                   </Button>
                 </div>
               )}
@@ -5211,7 +5554,7 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
               )}
             </p>
 
-            {deleteTargetProject.linked_space && (
+            {deleteTargetProject.linked_space && deleteTargetProject.linked_space.can_delete_with_project && (
               <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
                 <label className="inline-flex items-start gap-2 font-bold text-amber-950 cursor-pointer">
                   <input
@@ -5241,6 +5584,16 @@ export const ProjectJournal: React.FC<ProjectJournalProps> = ({
                         'Unchecked (default): Only unlinks the space; all calendar events and thoughts are preserved.'
                       )}
                 </p>
+              </div>
+            )}
+
+            {deleteTargetProject.linked_space && !deleteTargetProject.linked_space.can_delete_with_project && (
+              <div className="p-3 rounded-xl bg-ivory-50 border border-ivory-300 text-[11px] text-charcoal-700 leading-relaxed">
+                {L(
+                  `연동된 공유 스페이스('${deleteTargetProject.linked_space.name}')는 다른 프로젝트와 함께 사용 중이거나 스페이스 방장이 아니므로 삭제되지 않고 연동만 자동 해제되어 안전하게 보존됩니다.`,
+                  `連携中の共有スペース（「${deleteTargetProject.linked_space.name}」）は他プロジェクトと共用中またはスペースオーナーではないため削除されず、連携のみ自動解除されます。`,
+                  `Linked Shared Space '${deleteTargetProject.linked_space.name}' will be safely preserved (only unlinked), because other projects are linked to it or you are not its owner.`
+                )}
               </div>
             )}
 
