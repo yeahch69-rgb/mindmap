@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   BookMarked,
+  Cake,
   CalendarPlus,
   ChevronDown,
   ChevronUp,
@@ -9,15 +10,23 @@ import {
   Copy,
   Lightbulb,
   MessageSquare,
+  Moon,
   Move,
   Plus,
   Repeat,
+  Sun,
   ThumbsUp,
   X,
 } from 'lucide-react';
 import { useLanguage } from '../../context/LanguageContext';
 import { CalendarEventItem } from '../../types/spaces';
+import {
+  AnniversaryOccurrence,
+  computeAnniversaryDDay,
+  formatBaseCalendarBadge,
+} from '../../utils/anniversaryUtils';
 import { ExpandedEventInstance, formatShortDate } from '../../utils/calendarUtils';
+import { CompactShiftBadge } from '../../utils/shiftDisplay';
 import { TranslateButton } from '../common/TranslateButton';
 import { useContentTranslation } from '../../hooks/useContentTranslation';
 import { useModalBackHandler } from '../../utils/modalHistory';
@@ -27,8 +36,12 @@ interface MobileDayBottomSheetProps {
   isCardDragging?: boolean;
   onClose: () => void;
   selectedDate: string;
+  todayStr: string;
   dayEvents: ExpandedEventInstance[];
+  dayAnniversaries: AnniversaryOccurrence[];
+  dayShiftBadge?: CompactShiftBadge | null;
   onOpenEventDetail: (eventId: number) => void;
+  onOpenAnniversaryDetail: (occ: AnniversaryOccurrence) => void;
   onOpenNewEvent: (ymd: string) => void;
   onOpenRecentCopy: (ymd: string) => void;
   onStartMove: (event: CalendarEventItem) => void;
@@ -49,8 +62,12 @@ export const MobileDayBottomSheet: React.FC<MobileDayBottomSheetProps> = ({
   isCardDragging = false,
   onClose,
   selectedDate,
+  todayStr,
   dayEvents,
+  dayAnniversaries,
+  dayShiftBadge,
   onOpenEventDetail,
+  onOpenAnniversaryDetail,
   onOpenNewEvent,
   onOpenRecentCopy,
   onStartMove,
@@ -330,9 +347,28 @@ export const MobileDayBottomSheet: React.FC<MobileDayBottomSheetProps> = ({
         {/* Sheet Header (Clean 2-row on narrow smartphones so date never wraps/squishes) */}
         <div className="px-4 py-2.5 bg-ivory-50 border-b border-ivory-200 space-y-2 shrink-0">
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-baseline gap-2 min-w-0">
+            <div className="flex items-center flex-wrap gap-1.5 min-w-0">
               <div className="text-sm font-bold text-forest-900 whitespace-nowrap">{selectedDate}</div>
+              {dayShiftBadge && (
+                <span
+                  title={dayShiftBadge.title}
+                  className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-bold leading-none whitespace-nowrap ${dayShiftBadge.className}`}
+                >
+                  <span>{dayShiftBadge.label}</span>
+                  <span className="font-semibold opacity-90">{dayShiftBadge.title}</span>
+                </span>
+              )}
               <div className="text-[11px] text-charcoal-500 whitespace-nowrap">
+                {dayAnniversaries.length > 0 && (
+                  <span className="text-rose-700 font-bold mr-1.5">
+                    {L(
+                      `기념일 ${dayAnniversaries.length}`,
+                      `記念日 ${dayAnniversaries.length}`,
+                      `${dayAnniversaries.length} anniv.`
+                    )}
+                    {' · '}
+                  </span>
+                )}
                 {L(
                   `일정 ${dayEvents.length}건`,
                   `予定 ${dayEvents.length}件`,
@@ -387,9 +423,109 @@ export const MobileDayBottomSheet: React.FC<MobileDayBottomSheetProps> = ({
           </div>
         </div>
 
-        {/* Scrollable Event List */}
+        {/* Scrollable Event & Anniversary List */}
         <div className="flex-1 overflow-y-auto p-3.5 space-y-2.5 bg-white">
-          {dayEvents.length === 0 ? (
+          {/* Anniversaries on this date */}
+          {dayAnniversaries.map((occ) => {
+            const ann = occ.anniversary;
+            const dday = computeAnniversaryDDay(ann, todayStr);
+            const cardKey = `mob-anniv-${ann.id}`;
+            const cardTrans = translator.isTranslated(cardKey);
+            const showTrans = translator.shouldShowButton(ann.title, ann.memo);
+            const dispTitle = translator.getText(cardKey, 'title', ann.title);
+            const dispMemo = translator.getText(cardKey, 'memo', ann.memo);
+
+            return (
+              <div
+                key={occ.occurrenceKey}
+                onClick={() => {
+                  onClose();
+                  onOpenAnniversaryDetail(occ);
+                }}
+                className="p-3.5 rounded-2xl border border-rose-200 bg-rose-50/50 hover:border-rose-400 transition cursor-pointer"
+              >
+                <div className="flex items-start gap-2.5">
+                  <span className="w-7 h-7 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center shrink-0">
+                    <Cake className="w-4 h-4" />
+                  </span>
+                  <div className="min-w-0 flex-1 space-y-1.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {dday && (
+                        <span
+                          className={`px-1.5 py-0.5 rounded-full text-[10px] font-extrabold shrink-0 ${
+                            dday.primaryDiffDays === 0
+                              ? 'bg-rose-600 text-white'
+                              : dday.primaryDiffDays > 0
+                                ? 'bg-forest-800 text-white'
+                                : 'bg-amber-600 text-white'
+                          }`}
+                        >
+                          {dday.primaryLabel}
+                        </span>
+                      )}
+                      {dday?.elapsedLabel && (
+                        <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-950 text-[10px] font-bold shrink-0">
+                          {dday.elapsedLabel}
+                        </span>
+                      )}
+                      <span className={`text-sm font-bold text-rose-950 ${cardTrans ? 'break-words' : 'truncate'}`}>
+                        {dispTitle}
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-charcoal-600">
+                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-white border border-rose-200 font-bold text-[10px]">
+                        {ann.calendar_type === 'LUNAR' ? (
+                          <Moon className="w-3 h-3 text-indigo-700" />
+                        ) : (
+                          <Sun className="w-3 h-3 text-amber-600" />
+                        )}
+                        <span>{formatBaseCalendarBadge(ann, L)}</span>
+                      </span>
+                      {ann.is_recurring && <Repeat className="w-3 h-3 text-rose-600" />}
+                      {(occ.adjustedFromLeapToNormal || occ.adjustedFrom30To29) && (
+                        <span className="text-[10px] font-bold text-amber-800">
+                          {[
+                            occ.adjustedFromLeapToNormal ? L('평달 보정', '平月補正', 'normal mo.') : '',
+                            occ.adjustedFrom30To29 ? L('29일 보정', '29日補正', 'day 29') : '',
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </span>
+                      )}
+                    </div>
+
+                    {ann.memo && (
+                      <p className={`text-xs text-charcoal-700 whitespace-pre-wrap ${cardTrans ? '' : 'line-clamp-2'}`}>
+                        {dispMemo}
+                      </p>
+                    )}
+
+                    {showTrans && (
+                      <div>
+                        <TranslateButton
+                          visible={showTrans}
+                          translated={cardTrans}
+                          loading={translator.isTranslating(cardKey)}
+                          error={translator.getError(cardKey)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void translator.toggleTranslate(
+                              cardKey,
+                              { title: ann.title, memo: ann.memo },
+                              'shared-calendar-anniversary'
+                            );
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          {dayEvents.length === 0 && dayAnniversaries.length === 0 ? (
             <div className="py-12 text-center space-y-3">
               <p className="text-xs text-charcoal-400">
                 {L('이 날짜에 등록된 일정이 없습니다.', 'この日の予定はありません。', 'No events on this day.')}

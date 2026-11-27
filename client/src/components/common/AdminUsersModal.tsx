@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Bell,
+  CalendarDays,
   FolderKanban,
   Languages,
   RefreshCw,
@@ -16,6 +17,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { formatJstTime, getJstDateKey } from '../../utils/dateTime';
 import { useModalBackHandler } from '../../utils/modalHistory';
+import { AdminShiftSyncPanel } from './AdminShiftSyncPanel';
 
 interface AdminUserRow {
   id: number;
@@ -51,16 +53,26 @@ interface TranslationUsageSummary {
   resetAt: string | null;
 }
 
+export type AdminModalTab = 'users' | 'shift-sync';
+
 interface AdminUsersModalProps {
   isOpen: boolean;
   onClose: () => void;
+  initialTab?: AdminModalTab;
+  onShiftSyncChanged?: () => void;
 }
 
-export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClose }) => {
+export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({
+  isOpen,
+  onClose,
+  initialTab = 'users',
+  onShiftSyncChanged,
+}) => {
   const { user } = useAuth();
   const { L } = useLanguage();
   useModalBackHandler(isOpen && user?.role === 'ADMIN', onClose);
 
+  const [activeTab, setActiveTab] = useState<AdminModalTab>(initialTab);
   const [users, setUsers] = useState<AdminUserRow[]>([]);
   const [usage, setUsage] = useState<TranslationUsageSummary | null>(null);
   const [isResettingUsage, setIsResettingUsage] = useState(false);
@@ -109,9 +121,10 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
 
   useEffect(() => {
     if (isOpen && user?.role === 'ADMIN') {
+      setActiveTab(initialTab);
       void loadUsers();
     }
-  }, [isOpen, user?.role, loadUsers]);
+  }, [isOpen, user?.role, initialTab, loadUsers]);
 
   const handleToggleRole = async (target: AdminUserRow) => {
     if (target.id === user?.id) return;
@@ -153,12 +166,7 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
   if (!isOpen || user?.role !== 'ADMIN') return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-3 sm:p-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-3 sm:p-4">
       <div className="bg-white rounded-2xl border border-ivory-300 shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-ivory-200 flex items-center justify-between bg-ivory-50/70">
@@ -168,27 +176,37 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
             </div>
             <div className="min-w-0">
               <h2 className="font-bold text-sm text-charcoal-900 truncate">
-                {L('관리자 · 전체 가입 계정 목록', '管理者 · 登録アカウント一覧', 'Admin · Registered Accounts')}
+                {activeTab === 'shift-sync'
+                  ? L('관리자 · NYGC 시프트 연동 설정', '管理者 · NYGCシフト連携設定', 'Admin · NYGC Shift Sync')
+                  : L('관리자 · 전체 가입 계정 목록', '管理者 · 登録アカウント一覧', 'Admin · Registered Accounts')}
               </h2>
               <p className="text-[11px] text-charcoal-500 truncate">
-                {L(
-                  `총 ${stats.total}개 계정 (정식 가입 ${stats.regularCount} · 게스트 ${stats.demoCount} · 관리자 ${stats.adminCount})`,
-                  `合計 ${stats.total}件 (通常 ${stats.regularCount} · ゲスト ${stats.demoCount} · 管理者 ${stats.adminCount})`,
-                  `${stats.total} total (${stats.regularCount} regular · ${stats.demoCount} guest · ${stats.adminCount} admin)`
-                )}
+                {activeTab === 'shift-sync'
+                  ? L(
+                      'NYGC 비공개 피드 동기화 · 표시 스페이스 선택 · 3개 언어 변경 알림',
+                      'NYGC非公開フィード同期・表示スペース選択・3言語変更通知',
+                      'Private NYGC feed sync · space selection · 3-language change alerts'
+                    )
+                  : L(
+                      `총 ${stats.total}개 계정 (정식 가입 ${stats.regularCount} · 게스트 ${stats.demoCount} · 관리자 ${stats.adminCount})`,
+                      `合計 ${stats.total}件 (通常 ${stats.regularCount} · ゲスト ${stats.demoCount} · 管理者 ${stats.adminCount})`,
+                      `${stats.total} total (${stats.regularCount} regular · ${stats.demoCount} guest · ${stats.adminCount} admin)`
+                    )}
               </p>
             </div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={() => void loadUsers()}
-              disabled={isLoading}
-              className="p-1.5 rounded-lg text-charcoal-600 hover:text-forest-800 hover:bg-ivory-200 transition disabled:opacity-50"
-              title={L('새로고침', '更新', 'Refresh')}
-            >
-              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-            </button>
+            {activeTab === 'users' && (
+              <button
+                type="button"
+                onClick={() => void loadUsers()}
+                disabled={isLoading}
+                className="p-1.5 rounded-lg text-charcoal-600 hover:text-forest-800 hover:bg-ivory-200 transition disabled:opacity-50"
+                title={L('새로고침', '更新', 'Refresh')}
+              >
+                <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+              </button>
+            )}
             <button
               type="button"
               onClick={onClose}
@@ -199,6 +217,41 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
             </button>
           </div>
         </div>
+
+        {/* Admin Section Tabs */}
+        <div className="px-5 py-2 border-b border-ivory-200 bg-white flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setActiveTab('users')}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition ${
+              activeTab === 'users'
+                ? 'bg-forest-800 text-white shadow-xs'
+                : 'text-charcoal-600 hover:bg-ivory-100 hover:text-charcoal-900'
+            }`}
+          >
+            <Users className="w-3.5 h-3.5" />
+            <span>{L('회원 · 번역 관리', '会員・翻訳管理', 'Accounts & Usage')}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('shift-sync')}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition ${
+              activeTab === 'shift-sync'
+                ? 'bg-forest-800 text-white shadow-xs'
+                : 'text-charcoal-600 hover:bg-ivory-100 hover:text-charcoal-900'
+            }`}
+          >
+            <CalendarDays className="w-3.5 h-3.5" />
+            <span>{L('NYGC 시프트 연동', 'NYGCシフト連携', 'NYGC Shift Sync')}</span>
+          </button>
+        </div>
+
+        {activeTab === 'shift-sync' ? (
+          <div className="flex-1 overflow-y-auto p-4 sm:p-5 bg-ivory-50/50">
+            <AdminShiftSyncPanel isOpen={isOpen && activeTab === 'shift-sync'} onUpdated={onShiftSyncChanged} />
+          </div>
+        ) : (
+          <>
 
         {/* Gemini Translation API Usage Monitor */}
         {usage && (
@@ -439,6 +492,8 @@ export const AdminUsersModal: React.FC<AdminUsersModalProps> = ({ isOpen, onClos
             })
           )}
         </div>
+          </>
+        )}
       </div>
     </div>
   );

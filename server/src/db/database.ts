@@ -398,6 +398,36 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_space_activities_space
       ON space_activities(space_id, id DESC);
 
+    -- Shared Space Anniversaries (Solar & Korean Lunar + D-Day + Per-anniversary Push)
+    CREATE TABLE IF NOT EXISTS space_anniversaries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      space_id INTEGER NOT NULL REFERENCES collab_spaces(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      memo TEXT NOT NULL DEFAULT '',
+      calendar_type TEXT NOT NULL DEFAULT 'SOLAR' CHECK(calendar_type IN ('SOLAR', 'LUNAR')),
+      base_date TEXT NOT NULL,
+      is_leap_month INTEGER NOT NULL DEFAULT 0,
+      is_recurring INTEGER NOT NULL DEFAULT 1,
+      reminder_days_json TEXT NOT NULL DEFAULT '[]',
+      created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_space_anniversaries_space
+      ON space_anniversaries(space_id, id ASC);
+
+    CREATE TABLE IF NOT EXISTS space_anniversary_push_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      anniversary_id INTEGER NOT NULL REFERENCES space_anniversaries(id) ON DELETE CASCADE,
+      occurrence_date TEXT NOT NULL,
+      reminder_day INTEGER NOT NULL,
+      sent_at TEXT NOT NULL,
+      UNIQUE(anniversary_id, occurrence_date, reminder_day)
+    );
+    CREATE INDEX IF NOT EXISTS idx_space_anniv_push_logs_lookup
+      ON space_anniversary_push_logs(anniversary_id, occurrence_date, reminder_day);
+
     -- 3-way cross-entity links (Mindmap Project/Idea/Entry <-> Shared Thought <-> Calendar Event)
     CREATE TABLE IF NOT EXISTS cross_entity_links (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -655,6 +685,38 @@ export function initDatabase() {
       reset_at TEXT
     );
     INSERT OR IGNORE INTO translation_usage_stats (id) VALUES (1);
+
+    -- NYGC External Shift Sync (Admin-only pull configuration, local cache & push dedup)
+    CREATE TABLE IF NOT EXISTS nygc_shift_sync_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      enabled INTEGER NOT NULL DEFAULT 0,
+      feed_url TEXT NOT NULL DEFAULT '',
+      feed_token TEXT NOT NULL DEFAULT '',
+      enabled_space_ids_json TEXT NOT NULL DEFAULT '[]',
+      sync_interval_minutes INTEGER NOT NULL DEFAULT 20,
+      initial_sync_completed INTEGER NOT NULL DEFAULT 0,
+      last_sync_at TEXT,
+      last_success_at TEXT,
+      last_sync_status TEXT NOT NULL DEFAULT 'IDLE',
+      last_sync_error TEXT,
+      last_shift_count INTEGER NOT NULL DEFAULT 0,
+      last_change_summary TEXT,
+      updated_at TEXT
+    );
+    INSERT OR IGNORE INTO nygc_shift_sync_config (id) VALUES (1);
+
+    CREATE TABLE IF NOT EXISTS nygc_synced_shifts (
+      work_date TEXT PRIMARY KEY,
+      shift_type TEXT NOT NULL,
+      secondary_shift_type TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS nygc_shift_push_log (
+      diff_hash TEXT PRIMARY KEY,
+      sent_at TEXT NOT NULL,
+      summary TEXT NOT NULL
+    );
   `);
 }
 

@@ -1,6 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db/database.js';
 import { authenticateToken, requireAdmin } from '../middleware/auth.js';
+import {
+  getNygcShiftSyncAdminView,
+  runNygcShiftSync,
+  updateNygcShiftSyncConfig,
+} from '../services/nygcShiftSync.js';
 
 const router = Router();
 
@@ -86,6 +91,61 @@ router.patch('/users/:id/role', (req: Request, res: Response) => {
     res.json({ success: true, id: targetId, role: nextRole });
   } catch (err: any) {
     res.status(500).json({ error: '권한 변경 실패: ' + err.message });
+  }
+});
+
+// NYGC Shift Sync Admin Settings (strictly ADMIN only via router.use above)
+router.get('/nygc-shift-sync', (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    res.json(getNygcShiftSyncAdminView());
+  } catch (err: any) {
+    res.status(500).json({ error: 'NYGC 시프트 연동 설정 조회 실패: ' + err.message });
+  }
+});
+
+router.put('/nygc-shift-sync', (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const result = updateNygcShiftSyncConfig({
+      enabled: req.body?.enabled,
+      feedUrl: req.body?.feedUrl,
+      feedToken: req.body?.feedToken,
+      clearToken: Boolean(req.body?.clearToken),
+      enabledSpaceIds: req.body?.enabledSpaceIds,
+      syncIntervalMinutes: req.body?.syncIntervalMinutes,
+    });
+    if (!result.ok) {
+      res.status(400).json({ error: result.error || '설정을 저장할 수 없습니다.' });
+      return;
+    }
+    res.json({ success: true, ...result.view });
+  } catch (err: any) {
+    res.status(500).json({ error: 'NYGC 시프트 연동 설정 저장 실패: ' + err.message });
+  }
+});
+
+router.post('/nygc-shift-sync/sync-now', async (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const result = await runNygcShiftSync('manual');
+    const view = getNygcShiftSyncAdminView();
+    if (!result.ok) {
+      res.status(400).json({
+        success: false,
+        error: result.error || '동기화에 실패했습니다.',
+        result,
+        ...view,
+      });
+      return;
+    }
+    res.json({
+      success: true,
+      result,
+      ...view,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: '수동 동기화 실패: ' + err.message });
   }
 });
 

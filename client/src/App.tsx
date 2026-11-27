@@ -4,7 +4,7 @@ import { api, getStoredToken } from './api/client';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { LanguageProvider, useLanguage } from './context/LanguageContext';
 import { AuthScreen } from './components/auth/AuthScreen';
-import { AdminUsersModal } from './components/common/AdminUsersModal';
+import { AdminModalTab, AdminUsersModal } from './components/common/AdminUsersModal';
 import {
   BeforeInstallPromptEvent,
   ProfileModal,
@@ -94,7 +94,14 @@ const AppShell: React.FC = () => {
       return null;
     }
   });
-  const [calendarFocusDate, setCalendarFocusDate] = useState<string | null>(null);
+  const [calendarFocusDate, setCalendarFocusDate] = useState<string | null>(() => {
+    try {
+      const raw = new URLSearchParams(window.location.search).get('date');
+      return raw && /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null;
+    } catch {
+      return null;
+    }
+  });
   const [thoughtFocusId, setThoughtFocusId] = useState<number | null>(() => {
     try {
       const raw = Number(new URLSearchParams(window.location.search).get('thought'));
@@ -110,6 +117,7 @@ const AppShell: React.FC = () => {
   // Modals
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isAdminUsersOpen, setIsAdminUsersOpen] = useState(false);
+  const [adminModalTab, setAdminModalTab] = useState<AdminModalTab>('users');
   const [spaceModalMode, setSpaceModalMode] = useState<'create' | 'edit' | null>(null);
   const [spaceModalTarget, setSpaceModalTarget] = useState<CollabSpace | null>(null);
   const [activityFeedOpen, setActivityFeedOpen] = useState(false);
@@ -147,7 +155,7 @@ const AppShell: React.FC = () => {
   useEffect(() => {
     try {
       const url = new URL(window.location.href);
-      const keys = ['invite', 'spaceInvite', 'project', 'tab', 'space', 'event', 'thought'];
+      const keys = ['invite', 'spaceInvite', 'project', 'tab', 'space', 'event', 'thought', 'date'];
       let changed = false;
       for (const k of keys) {
         if (url.searchParams.has(k)) {
@@ -312,10 +320,12 @@ const AppShell: React.FC = () => {
           const space = Number(parsedUrl.searchParams.get('space'));
           const evId = Number(parsedUrl.searchParams.get('event'));
           const thId = Number(parsedUrl.searchParams.get('thought'));
+          const focusDate = parsedUrl.searchParams.get('date');
 
           if (tab === 'calendar' || tab === 'thoughts') {
             setActiveTab(tab);
             if (Number.isFinite(space) && space > 0) setActiveSpaceId(space);
+            if (focusDate && /^\d{4}-\d{2}-\d{2}$/.test(focusDate)) setCalendarFocusDate(focusDate);
             if (Number.isFinite(evId) && evId > 0) setCalendarFocusEventId(evId);
             if (Number.isFinite(thId) && thId > 0) setThoughtFocusId(thId);
           } else if (Number.isFinite(pid) && pid > 0) {
@@ -488,12 +498,15 @@ const AppShell: React.FC = () => {
             {user.role === 'ADMIN' && (
               <button
                 type="button"
-                onClick={() => setIsAdminUsersOpen(true)}
+                onClick={() => {
+                  setAdminModalTab('users');
+                  setIsAdminUsersOpen(true);
+                }}
                 className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300 text-xs font-bold transition"
-                title={L('관리자 · 전체 회원 계정 목록', '管理者 · 登録アカウント一覧', 'Admin · Registered Users')}
+                title={L('관리자 · 회원 관리 및 NYGC 시프트 연동', '管理者 · 会員管理・NYGCシフト連携', 'Admin · Users & Shift Sync')}
               >
                 <Shield className="w-3.5 h-3.5 shrink-0" />
-                <span className="hidden sm:inline">{L('회원 관리', '会員管理', 'Admin')}</span>
+                <span className="hidden sm:inline">{L('관리자', '管理者', 'Admin')}</span>
               </button>
             )}
 
@@ -656,6 +669,12 @@ const AppShell: React.FC = () => {
         onInstallPwa={handleInstallPwa}
         onOpenAdminUsers={() => {
           setIsProfileOpen(false);
+          setAdminModalTab('users');
+          setIsAdminUsersOpen(true);
+        }}
+        onOpenAdminShiftSync={() => {
+          setIsProfileOpen(false);
+          setAdminModalTab('shift-sync');
           setIsAdminUsersOpen(true);
         }}
       />
@@ -663,6 +682,8 @@ const AppShell: React.FC = () => {
       <AdminUsersModal
         isOpen={isAdminUsersOpen}
         onClose={() => setIsAdminUsersOpen(false)}
+        initialTab={adminModalTab}
+        onShiftSyncChanged={() => setRealtimeTick((t) => t + 1)}
       />
 
       <SpaceSettingsModal

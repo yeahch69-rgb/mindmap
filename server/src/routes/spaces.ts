@@ -29,6 +29,15 @@ import {
   removeLinksForEntity,
   syncContentAcrossLinkedEntities,
 } from '../utils/crossLinkSync.js';
+import {
+  AnniversaryCalendarType,
+  isValidGregorianYmd,
+  isValidKoreanLunarYmd,
+  normalizeReminderDays,
+  resolveBaseSolarDate,
+  SpaceAnniversaryRecord,
+} from '../utils/anniversaryLunar.js';
+import { getSyncedShiftsForSpace } from '../services/nygcShiftSync.js';
 
 const router = Router();
 
@@ -3124,6 +3133,317 @@ router.get('/links/project/:projectId', (req: Request, res: Response) => {
   }
 
   res.json({ projectLinks, ideaLinksById, entryLinksById });
+});
+
+// ==========================================
+// 7. SHARED SPACE ANNIVERSARIES (SOLAR & KOREAN LUNAR)
+// ==========================================
+function hydrateAnniversaryRow(row: any): SpaceAnniversaryRecord {
+  return {
+    id: Number(row.id),
+    space_id: Number(row.space_id),
+    title: String(row.title || ''),
+    memo: String(row.memo || ''),
+    calendar_type: row.calendar_type === 'LUNAR' ? 'LUNAR' : 'SOLAR',
+    base_date: String(row.base_date || ''),
+    is_leap_month: Boolean(row.is_leap_month),
+    is_recurring: Boolean(row.is_recurring),
+    reminder_days: normalizeReminderDays(row.reminder_days_json),
+    created_by: Number(row.created_by),
+    creator_name: String(row.creator_name || ''),
+    updated_by: row.updated_by ? Number(row.updated_by) : null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function validateAnniversaryPayload(raw: {
+  title: unknown;
+  memo: unknown;
+  calendar_type: unknown;
+  base_date: unknown;
+  is_leap_month: unknown;
+  is_recurring: unknown;
+  reminder_days: unknown;
+}):
+  | {
+      ok: true;
+      data: {
+        title: string;
+        memo: string;
+        calendar_type: AnniversaryCalendarType;
+        base_date: string;
+        is_leap_month: boolean;
+        is_recurring: boolean;
+        reminder_days: number[];
+      };
+    }
+  | { ok: false; error: string } {
+  const title = String(raw.title || '').trim();
+  if (!title) {
+    return { ok: false, error: '기념일 제목을 입력해 주세요.' };
+  }
+  if (title.length > 120) {
+    return { ok: false, error: '기념일 제목은 120자 이내로 입력해 주세요.' };
+  }
+
+  const memo = String(raw.memo || '').trim().slice(0, 1000);
+  const calendarType: AnniversaryCalendarType =
+    String(raw.calendar_type || 'SOLAR').toUpperCase() === 'LUNAR' ? 'LUNAR' : 'SOLAR';
+  const baseDate = String(raw.base_date || '').trim();
+  const isLeapMonth = calendarType === 'LUNAR' ? Boolean(raw.is_leap_month) : false;
+  const isRecurring = raw.is_recurring === undefined ? true : Boolean(raw.is_recurring);
+  const reminderDays = normalizeReminderDays(raw.reminder_days);
+
+  if (calendarType === 'SOLAR') {
+    if (!isValidGregorianYmd(baseDate)) {
+      return { ok: false, error: '올바른 양력 날짜(YYYY-MM-DD)를 입력해 주세요.' };
+    }
+  } else {
+    if (!isValidKoreanLunarYmd(baseDate)) {
+      return { ok: false, error: '올바른 한국 음력 날짜(1391~2050년, 1~12월, 1~30일)를 입력해 주세요.' };
+    }
+    const resolved = resolveBaseSolarDate({
+      calendar_type: 'LUNAR',
+      base_date: baseDate,
+      is_leap_month: isLeapMonth,
+    });
+    if (!resolved) {
+      return { ok: false, error: '해당 음력 날짜를 양력으로 변환할 수 없습니다. 지원 범위(1391~2050년)를 확인해 주세요.' };
+    }
+  }
+
+  return {
+    ok: true,
+    data: {
+      title,
+      memo,
+      calendar_type: calendarType,
+      base_date: baseDate,
+      is_leap_month: isLeapMonth,
+      is_recurring: isRecurring,
+      reminder_days: reminderDays,
+    },
+  };
+}
+
+router.get('/:spaceId/anniversaries', (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const spaceId = Number(req.params.spaceId);
+  if (!Number.isInteger(spaceId) || spaceId <= 0 || !getMembership(spaceId, userId)) {
+    res.status(403).json({ error: '이 스페이스에 접근 권한이 없습니다.' });
+    return;
+  }
+
+  const rows = db
+    .prepare(`
+      SELECT a.*, u.name as creator_name
+      FROM space_anniversaries a
+      LEFT JOIN users u ON u.id = a.created_by
+      WHERE a.space_id = ?
+      ORDER BY a.id ASC
+    `)
+    .all(spaceId) as any[];
+
+  res.json({ anniversaries: rows.map(hydrateAnniversaryRow) });
+});
+
+router.post('/:spaceId/anniversaries', (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const spaceId = Number(req.params.spaceId);
+  if (!Number.isInteger(spaceId) || spaceId <= 0 || !getMembership(spaceId, userId)) {
+    res.status(403).json({ error: '이 스페이스에 접근 권한이 없습니다.' });
+    return;
+  }
+
+  const validated = validateAnniversaryPayload({
+    title: req.body?.title,
+    memo: req.body?.memo,
+    calendar_type: req.body?.calendar_type,
+    base_date: req.body?.base_date,
+    is_leap_month: req.body?.is_leap_month,
+    is_recurring: req.body?.is_recurring,
+    reminder_days: req.body?.reminder_days,
+  });
+
+  if (!validated.ok) {
+    res.status(400).json({ error: validated.error });
+    return;
+  }
+
+  const { title, memo, calendar_type, base_date, is_leap_month, is_recurring, reminder_days } = validated.data;
+
+  const insertRes = db
+    .prepare(`
+      INSERT INTO space_anniversaries (
+        space_id, title, memo, calendar_type, base_date, is_leap_month, is_recurring,
+        reminder_days_json, created_by, updated_by
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      spaceId,
+      title,
+      memo,
+      calendar_type,
+      base_date,
+      is_leap_month ? 1 : 0,
+      is_recurring ? 1 : 0,
+      JSON.stringify(reminder_days),
+      userId,
+      userId
+    );
+
+  const annId = Number(insertRes.lastInsertRowid);
+  const actorName = req.user!.name;
+  const calLabel = calendar_type === 'LUNAR' ? (is_leap_month ? '음력 윤달' : '음력') : '양력';
+  recordActivity(
+    spaceId,
+    userId,
+    'ANNIVERSARY_CREATED',
+    'SPACE',
+    annId,
+    `${actorName}님이 기념일 '${title}' (${calLabel} ${base_date})을 등록했습니다.`,
+    { actorName, title, baseDate: base_date, calendarType: calendar_type, isLeapMonth: is_leap_month, isRecurring: is_recurring }
+  );
+
+  const created = db
+    .prepare(`SELECT a.*, u.name as creator_name FROM space_anniversaries a LEFT JOIN users u ON u.id = a.created_by WHERE a.id = ?`)
+    .get(annId);
+
+  res.status(201).json({ anniversary: hydrateAnniversaryRow(created) });
+});
+
+router.patch('/:spaceId/anniversaries/:anniversaryId', (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const spaceId = Number(req.params.spaceId);
+  const anniversaryId = Number(req.params.anniversaryId);
+  if (
+    !Number.isInteger(spaceId) ||
+    spaceId <= 0 ||
+    !Number.isInteger(anniversaryId) ||
+    anniversaryId <= 0 ||
+    !getMembership(spaceId, userId)
+  ) {
+    res.status(403).json({ error: '이 스페이스에 접근 권한이 없습니다.' });
+    return;
+  }
+
+  const existing = db
+    .prepare('SELECT * FROM space_anniversaries WHERE id = ? AND space_id = ?')
+    .get(anniversaryId, spaceId) as any;
+  if (!existing) {
+    res.status(404).json({ error: '기념일을 찾을 수 없습니다.' });
+    return;
+  }
+
+  const validated = validateAnniversaryPayload({
+    title: req.body?.title !== undefined ? req.body.title : existing.title,
+    memo: req.body?.memo !== undefined ? req.body.memo : existing.memo,
+    calendar_type: req.body?.calendar_type !== undefined ? req.body.calendar_type : existing.calendar_type,
+    base_date: req.body?.base_date !== undefined ? req.body.base_date : existing.base_date,
+    is_leap_month: req.body?.is_leap_month !== undefined ? req.body.is_leap_month : Boolean(existing.is_leap_month),
+    is_recurring: req.body?.is_recurring !== undefined ? req.body.is_recurring : Boolean(existing.is_recurring),
+    reminder_days:
+      req.body?.reminder_days !== undefined
+        ? req.body.reminder_days
+        : normalizeReminderDays(existing.reminder_days_json),
+  });
+
+  if (!validated.ok) {
+    res.status(400).json({ error: validated.error });
+    return;
+  }
+
+  const { title, memo, calendar_type, base_date, is_leap_month, is_recurring, reminder_days } = validated.data;
+
+  db.prepare(`
+    UPDATE space_anniversaries
+    SET title = ?, memo = ?, calendar_type = ?, base_date = ?, is_leap_month = ?, is_recurring = ?,
+        reminder_days_json = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND space_id = ?
+  `).run(
+    title,
+    memo,
+    calendar_type,
+    base_date,
+    is_leap_month ? 1 : 0,
+    is_recurring ? 1 : 0,
+    JSON.stringify(reminder_days),
+    userId,
+    anniversaryId,
+    spaceId
+  );
+
+  const actorName = req.user!.name;
+  const calLabel = calendar_type === 'LUNAR' ? (is_leap_month ? '음력 윤달' : '음력') : '양력';
+  recordActivity(
+    spaceId,
+    userId,
+    'ANNIVERSARY_UPDATED',
+    'SPACE',
+    anniversaryId,
+    `${actorName}님이 기념일 '${title}' (${calLabel} ${base_date})을 수정했습니다.`,
+    { actorName, title, baseDate: base_date, calendarType: calendar_type, isLeapMonth: is_leap_month, isRecurring: is_recurring }
+  );
+
+  const updated = db
+    .prepare(`SELECT a.*, u.name as creator_name FROM space_anniversaries a LEFT JOIN users u ON u.id = a.created_by WHERE a.id = ?`)
+    .get(anniversaryId);
+
+  res.json({ anniversary: hydrateAnniversaryRow(updated) });
+});
+
+router.delete('/:spaceId/anniversaries/:anniversaryId', (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const spaceId = Number(req.params.spaceId);
+  const anniversaryId = Number(req.params.anniversaryId);
+  if (
+    !Number.isInteger(spaceId) ||
+    spaceId <= 0 ||
+    !Number.isInteger(anniversaryId) ||
+    anniversaryId <= 0 ||
+    !getMembership(spaceId, userId)
+  ) {
+    res.status(403).json({ error: '이 스페이스에 접근 권한이 없습니다.' });
+    return;
+  }
+
+  const existing = db
+    .prepare('SELECT id, title FROM space_anniversaries WHERE id = ? AND space_id = ?')
+    .get(anniversaryId, spaceId) as { id: number; title: string } | undefined;
+  if (!existing) {
+    res.status(404).json({ error: '기념일을 찾을 수 없습니다.' });
+    return;
+  }
+
+  db.prepare('DELETE FROM space_anniversaries WHERE id = ? AND space_id = ?').run(anniversaryId, spaceId);
+
+  const actorName = req.user!.name;
+  recordActivity(
+    spaceId,
+    userId,
+    'ANNIVERSARY_DELETED',
+    'SPACE',
+    anniversaryId,
+    `${actorName}님이 기념일 '${existing.title}'을 삭제했습니다.`,
+    { actorName, title: existing.title }
+  );
+
+  res.json({ ok: true });
+});
+
+// Read-only NYGC synced shifts for members of an enabled shared space (returns ONLY work_date, shift_type, secondary_shift_type)
+router.get('/:spaceId/synced-shifts', (req: Request, res: Response) => {
+  const userId = req.user!.id;
+  const spaceId = Number(req.params.spaceId);
+  if (!Number.isInteger(spaceId) || spaceId <= 0 || !getMembership(spaceId, userId)) {
+    res.status(403).json({ error: '이 스페이스에 접근 권한이 없습니다.' });
+    return;
+  }
+
+  const data = getSyncedShiftsForSpace(spaceId, req.query.startDate, req.query.endDate);
+  res.json(data);
 });
 
 export default router;

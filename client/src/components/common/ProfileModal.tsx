@@ -3,6 +3,7 @@ import {
   AlertCircle,
   Bell,
   BellOff,
+  CalendarDays,
   Check,
   Cloud,
   Download,
@@ -44,6 +45,7 @@ interface ProfileModalProps {
   deferredInstallPrompt: BeforeInstallPromptEvent | null;
   onInstallPwa: () => Promise<boolean>;
   onOpenAdminUsers?: () => void;
+  onOpenAdminShiftSync?: () => void;
 }
 
 export const ProfileModal: React.FC<ProfileModalProps> = ({
@@ -52,6 +54,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   deferredInstallPrompt,
   onInstallPwa,
   onOpenAdminUsers,
+  onOpenAdminShiftSync,
 }) => {
   const { user, updatePreferences } = useAuth();
   const { L, language, setLanguage } = useLanguage();
@@ -343,12 +346,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const pushSupported = isPushSupported();
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-3 sm:p-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) handleClose();
-      }}
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-3 sm:p-4">
       <div className="bg-white rounded-2xl border border-ivory-300 shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-ivory-200 flex items-center justify-between bg-ivory-50/70">
@@ -767,6 +765,24 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
                     className="px-3 py-1.5 rounded-lg bg-forest-800 hover:bg-forest-900 text-white text-[11px] font-bold transition shrink-0"
                   >
                     {L('계정 목록 보기', '一覧を見る', 'View Accounts')}
+                  </button>
+                </div>
+              )}
+
+              {onOpenAdminShiftSync && (
+                <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <CalendarDays className="w-4 h-4 text-emerald-800 shrink-0" />
+                    <span className="text-xs font-bold text-emerald-950 truncate">
+                      {L('관리자 · NYGC 시프트 연동', '管理者 · NYGCシフト連携', 'Admin · NYGC Shift Sync')}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onOpenAdminShiftSync}
+                    className="px-3 py-1.5 rounded-lg bg-forest-800 hover:bg-forest-900 text-white text-[11px] font-bold transition shrink-0"
+                  >
+                    {L('연동 설정', '連携設定', 'Configure')}
                   </button>
                 </div>
               )}

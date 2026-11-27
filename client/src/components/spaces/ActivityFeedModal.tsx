@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   AlertCircle,
   Bell,
+  Cake,
   CalendarDays,
   CheckCheck,
   Lightbulb,
@@ -59,6 +60,7 @@ export const ActivityFeedModal: React.FC<ActivityFeedModalProps> = ({
   }, [isOpen, space?.id]);
 
   const renderIcon = (act: SpaceActivity) => {
+    if (act.activity_type.startsWith('ANNIVERSARY_')) return <Cake className="w-4 h-4 text-rose-600" />;
     if (act.activity_type === 'EVENT_COMMENT') return <MessageSquare className="w-4 h-4 text-sky-700" />;
     if (act.activity_type === 'EVENT_PROPOSED' || act.activity_type === 'EVENT_CONFIRMED')
       return <Sparkles className="w-4 h-4 text-amber-700" />;
@@ -71,6 +73,31 @@ export const ActivityFeedModal: React.FC<ActivityFeedModalProps> = ({
   };
 
   const formatActivitySummary = (act: SpaceActivity) => {
+    if (act.activity_type.startsWith('ANNIVERSARY_') && act.meta && typeof act.meta.title === 'string') {
+      const actor = String(act.meta.actorName || act.actor_name || '');
+      const title = act.meta.title;
+      if (act.activity_type === 'ANNIVERSARY_CREATED') {
+        return L(
+          `${actor}님이 기념일 '${title}'을 등록했습니다.`,
+          `${actor}さんが記念日「${title}」を登録しました。`,
+          `${actor} added anniversary '${title}'.`
+        );
+      }
+      if (act.activity_type === 'ANNIVERSARY_UPDATED') {
+        return L(
+          `${actor}님이 기념일 '${title}'을 수정했습니다.`,
+          `${actor}さんが記念日「${title}」を更新しました。`,
+          `${actor} updated anniversary '${title}'.`
+        );
+      }
+      if (act.activity_type === 'ANNIVERSARY_DELETED') {
+        return L(
+          `${actor}님이 기념일 '${title}'을 삭제했습니다.`,
+          `${actor}さんが記念日「${title}」を削除しました。`,
+          `${actor} deleted anniversary '${title}'.`
+        );
+      }
+    }
     if (act.activity_type === 'THOUGHT_CREATED' && act.meta && typeof act.meta.title === 'string') {
       const actor = String(act.meta.actorName || act.actor_name || '');
       const title = act.meta.title;

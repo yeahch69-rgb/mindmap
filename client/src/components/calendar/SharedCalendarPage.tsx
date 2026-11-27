@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import {
   Bell,
   BookMarked,
+  Cake,
   CalendarPlus,
   ChevronLeft,
   ChevronRight,
@@ -10,11 +11,13 @@ import {
   Edit2,
   Lightbulb,
   MessageSquare,
+  Moon,
   Move,
   Plus,
   Repeat,
   Settings,
   Sparkles,
+  Sun,
   ThumbsUp,
   Trash2,
   Users,
@@ -22,7 +25,14 @@ import {
 } from 'lucide-react';
 import { api } from '../../api/client';
 import { useLanguage } from '../../context/LanguageContext';
-import { CalendarEventItem, CollabSpace } from '../../types/spaces';
+import { CalendarEventItem, CollabSpace, SpaceAnniversary } from '../../types/spaces';
+import {
+  AnniversaryDDaySummary,
+  AnniversaryOccurrence,
+  computeAnniversaryDDay,
+  expandAnniversariesForRange,
+  formatBaseCalendarBadge,
+} from '../../utils/anniversaryUtils';
 import {
   buildMonthGrid,
   ExpandedEventInstance,
@@ -33,11 +43,15 @@ import {
   parseYmd,
 } from '../../utils/calendarUtils';
 import { getJstTodayStr } from '../../utils/dateTime';
+import { CompactShiftBadge, getCompactShiftBadge, SyncedShiftRow } from '../../utils/shiftDisplay';
 import { useModalBackHandler } from '../../utils/modalHistory';
 import { Button } from '../common/Button';
 import { Modal } from '../common/Modal';
 import { TranslateButton } from '../common/TranslateButton';
 import { useContentTranslation } from '../../hooks/useContentTranslation';
+import { AnniversaryDetailModal } from './AnniversaryDetailModal';
+import { AnniversaryManagerModal } from './AnniversaryManagerModal';
+import { CalendarAnniversaryBar } from './CalendarAnniversaryBar';
 import { EventEditorModal } from './EventEditorModal';
 import { EventDetailChatModal } from './EventDetailChatModal';
 import { MobileDayBottomSheet } from './MobileDayBottomSheet';
@@ -79,6 +93,8 @@ function shiftYearMonth(year: number, month0: number, delta: number): YearMonth 
 interface CalendarMonthPaneProps {
   weeks: MonthCell[][];
   expandedInstances: ExpandedEventInstance[];
+  anniversariesByDate: Record<string, AnniversaryOccurrence[]>;
+  shiftBadgesByDate?: Record<string, CompactShiftBadge>;
   weekdays: string[];
   todayStr: string;
   selectedDate: string;
@@ -102,12 +118,15 @@ interface CalendarMonthPaneProps {
   onEventClick?: (e: React.MouseEvent, ev: CalendarEventItem, startDate: string, colYmd: string | undefined) => void;
   onEventContextMenu?: (e: React.MouseEvent, ev: CalendarEventItem) => void;
   onEventPointerDown?: (e: React.PointerEvent, ev: CalendarEventItem) => void;
+  onAnniversaryClick?: (e: React.MouseEvent, occ: AnniversaryOccurrence) => void;
 }
 
 const CalendarMonthPane = React.memo<CalendarMonthPaneProps>(
   ({
     weeks,
     expandedInstances,
+    anniversariesByDate,
+    shiftBadgesByDate,
     weekdays,
     todayStr,
     selectedDate,
@@ -131,6 +150,7 @@ const CalendarMonthPane = React.memo<CalendarMonthPaneProps>(
     onEventClick,
     onEventContextMenu,
     onEventPointerDown,
+    onAnniversaryClick,
   }) => {
     return (
       <>
@@ -170,6 +190,9 @@ const CalendarMonthPane = React.memo<CalendarMonthPaneProps>(
                   {week.map((cell, cIdx) => {
                     const isToday = cell.ymd === todayStr;
                     const isSelected = cell.ymd === selectedDate;
+                    const dayAnnivs = anniversariesByDate[cell.ymd] || [];
+                    const hasAnniversary = dayAnnivs.length > 0;
+                    const shiftBadge = shiftBadgesByDate?.[cell.ymd];
                     const isDragOver =
                       isActive &&
                       (dragOverDate === cell.ymd ||
@@ -198,14 +221,18 @@ const CalendarMonthPane = React.memo<CalendarMonthPaneProps>(
                         onDragLeave={isActive && isDraggingEvent ? () => onDateDragLeave?.(cell.ymd) : undefined}
                         onDrop={isActive && isDraggingEvent ? (e) => onDateDrop?.(e, cell.ymd) : undefined}
                         className={`p-1 sm:p-1.5 transition cursor-pointer flex flex-col justify-between ${
-                          !cell.inCurrentMonth ? 'bg-ivory-50/70' : 'bg-white'
+                          !cell.inCurrentMonth
+                            ? 'bg-ivory-50/70'
+                            : hasAnniversary
+                              ? 'bg-rose-50/35'
+                              : 'bg-white'
                         } ${isSelected ? 'ring-2 ring-inset ring-forest-700 bg-forest-50/40' : 'hover:bg-ivory-50'} ${
                           isDragOver ? 'ring-2 ring-inset ring-sky-600 bg-sky-50' : ''
                         } ${hasPendingAction ? 'hover:bg-emerald-50 hover:ring-2 hover:ring-inset hover:ring-emerald-600' : ''}`}
                       >
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-0.5 min-w-0">
                           <span
-                            className={`inline-flex items-center justify-center w-6 h-6 rounded-full text-[11px] font-bold ${
+                            className={`inline-flex items-center justify-center w-5 h-5 sm:w-6 sm:h-6 rounded-full text-[10px] sm:text-[11px] font-bold shrink-0 ${
                               isToday
                                 ? 'bg-forest-800 text-white'
                                 : !cell.inCurrentMonth
@@ -219,6 +246,61 @@ const CalendarMonthPane = React.memo<CalendarMonthPaneProps>(
                           >
                             {cell.day}
                           </span>
+
+                          {(hasAnniversary || shiftBadge) && (
+                            <div className="flex items-center justify-end gap-0.5 min-w-0">
+                              {hasAnniversary && (
+                                <button
+                                  type="button"
+                                  onClick={
+                                    isActive
+                                      ? (e) => {
+                                          e.stopPropagation();
+                                          onAnniversaryClick?.(e, dayAnnivs[0]);
+                                        }
+                                      : undefined
+                                  }
+                                  title={dayAnnivs.map((a) => `🎂 ${a.anniversary.title}`).join('\n')}
+                                  className={`min-w-0 max-w-full inline-flex items-center gap-0.5 px-1 py-0.5 rounded-md bg-rose-100 hover:bg-rose-200 text-rose-800 border border-rose-200/90 text-[9px] sm:text-[10px] font-bold leading-none transition overflow-hidden ${
+                                    isActive ? 'cursor-pointer' : 'pointer-events-none'
+                                  }`}
+                                >
+                                  <Cake className="w-2.5 h-2.5 shrink-0 text-rose-600" />
+                                  <span className="hidden sm:inline truncate">
+                                    {dayAnnivs[0].anniversary.title}
+                                  </span>
+                                  {dayAnnivs.length > 1 && (
+                                    <span className="shrink-0 text-[9px] text-rose-700">
+                                      +{dayAnnivs.length - 1}
+                                    </span>
+                                  )}
+                                </button>
+                              )}
+
+                              {shiftBadge && (
+                                <span className="inline-flex items-center gap-0.5 shrink-0">
+                                  <span
+                                    title={shiftBadge.title}
+                                    className={`inline-flex items-center justify-center rounded border px-1 py-0 text-[9px] sm:text-[10px] sm:px-1.5 leading-[14px] sm:leading-[16px] font-bold whitespace-nowrap ${
+                                      shiftBadge.className
+                                    } ${!cell.inCurrentMonth ? 'opacity-50' : ''}`}
+                                  >
+                                    {shiftBadge.label}
+                                  </span>
+                                  {shiftBadge.secondaryLabel && (
+                                    <span
+                                      title={shiftBadge.title}
+                                      className={`hidden sm:inline-flex items-center justify-center rounded border px-1 py-0 text-[10px] leading-[16px] font-bold whitespace-nowrap ${
+                                        shiftBadge.secondaryClassName || ''
+                                      } ${!cell.inCurrentMonth ? 'opacity-50' : ''}`}
+                                    >
+                                      {shiftBadge.secondaryLabel}
+                                    </span>
+                                  )}
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </div>
 
                         {overflowByCol[cIdx] > 0 && (
@@ -353,6 +435,13 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
 
   const [events, setEvents] = useState<CalendarEventItem[]>([]);
   const [recentEvents, setRecentEvents] = useState<CalendarEventItem[]>([]);
+  const [anniversaries, setAnniversaries] = useState<SpaceAnniversary[]>([]);
+  const [syncedShiftsByDate, setSyncedShiftsByDate] = useState<Record<string, SyncedShiftRow>>({});
+  const [anniversaryManagerOpen, setAnniversaryManagerOpen] = useState(false);
+  const [detailAnniversary, setDetailAnniversary] = useState<{
+    anniversary: SpaceAnniversary;
+    occurrence: AnniversaryOccurrence | null;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [toastMsg, setToastMsg] = useState('');
 
@@ -446,11 +535,17 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
   const loadEvents = useCallback(async () => {
     if (!activeSpace) return;
     try {
-      const res = await api.get<{ events: CalendarEventItem[]; recentEvents: CalendarEventItem[] }>(
-        `/spaces/${activeSpace.id}/events`
-      );
-      setEvents(res.events || []);
-      setRecentEvents(res.recentEvents || []);
+      const [evRes, annRes] = await Promise.all([
+        api.get<{ events: CalendarEventItem[]; recentEvents: CalendarEventItem[] }>(
+          `/spaces/${activeSpace.id}/events`
+        ),
+        api
+          .get<{ anniversaries: SpaceAnniversary[] }>(`/spaces/${activeSpace.id}/anniversaries`)
+          .catch(() => ({ anniversaries: [] as SpaceAnniversary[] })),
+      ]);
+      setEvents(evRes.events || []);
+      setRecentEvents(evRes.recentEvents || []);
+      setAnniversaries(annRes.anniversaries || []);
     } catch {
       // ignore transient error
     }
@@ -542,6 +637,57 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
   const weeks = useMemo(() => buildMonthGrid(viewYear, viewMonth0), [viewYear, viewMonth0]);
   const nextWeeks = useMemo(() => buildMonthGrid(nextYM.year, nextYM.month0), [nextYM.year, nextYM.month0]);
 
+  useEffect(() => {
+    if (!activeSpace?.id) {
+      setSyncedShiftsByDate({});
+      return;
+    }
+    let cancelled = false;
+    const rangeStart = prevWeeks[0][0].ymd;
+    const rangeEnd = nextWeeks[nextWeeks.length - 1][6].ymd;
+
+    api
+      .get<{ enabled: boolean; shifts: SyncedShiftRow[] }>(
+        `/spaces/${activeSpace.id}/synced-shifts?startDate=${encodeURIComponent(rangeStart)}&endDate=${encodeURIComponent(rangeEnd)}`
+      )
+      .then((res) => {
+        if (cancelled) return;
+        if (!res?.enabled || !Array.isArray(res.shifts)) {
+          setSyncedShiftsByDate({});
+          return;
+        }
+        const map: Record<string, SyncedShiftRow> = {};
+        for (const row of res.shifts) {
+          if (row?.work_date) {
+            map[row.work_date] = {
+              work_date: row.work_date,
+              shift_type: row.shift_type,
+              secondary_shift_type: row.secondary_shift_type ?? null,
+            };
+          }
+        }
+        setSyncedShiftsByDate(map);
+      })
+      .catch(() => {
+        if (!cancelled) setSyncedShiftsByDate({});
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSpace?.id, prevWeeks, nextWeeks, realtimeTick]);
+
+  const shiftBadgesByDate = useMemo(() => {
+    const badges: Record<string, CompactShiftBadge> = {};
+    for (const [ymd, shift] of Object.entries(syncedShiftsByDate)) {
+      const badge = getCompactShiftBadge(shift.shift_type, shift.secondary_shift_type, L);
+      if (badge) badges[ymd] = badge;
+    }
+    return badges;
+  }, [syncedShiftsByDate, L]);
+
+  const selectedDayShiftBadge = shiftBadgesByDate[selectedDate] || null;
+
   const prevExpandedInstances = useMemo(
     () => expandEventsForRange(events, prevWeeks[0][0].ymd, prevWeeks[prevWeeks.length - 1][6].ymd),
     [events, prevWeeks]
@@ -553,6 +699,41 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
   const nextExpandedInstances = useMemo(
     () => expandEventsForRange(events, nextWeeks[0][0].ymd, nextWeeks[nextWeeks.length - 1][6].ymd),
     [events, nextWeeks]
+  );
+
+  const indexAnniversariesByDate = useCallback(
+    (grid: MonthCell[][]) => {
+      const list = expandAnniversariesForRange(
+        anniversaries,
+        grid[0][0].ymd,
+        grid[grid.length - 1][6].ymd
+      );
+      const map: Record<string, AnniversaryOccurrence[]> = {};
+      for (const occ of list) {
+        if (!map[occ.solarDate]) map[occ.solarDate] = [];
+        map[occ.solarDate].push(occ);
+      }
+      return map;
+    },
+    [anniversaries]
+  );
+
+  const prevAnniversariesByDate = useMemo(
+    () => indexAnniversariesByDate(prevWeeks),
+    [indexAnniversariesByDate, prevWeeks]
+  );
+  const anniversariesByDate = useMemo(
+    () => indexAnniversariesByDate(weeks),
+    [indexAnniversariesByDate, weeks]
+  );
+  const nextAnniversariesByDate = useMemo(
+    () => indexAnniversariesByDate(nextWeeks),
+    [indexAnniversariesByDate, nextWeeks]
+  );
+
+  const selectedDayAnniversaries = useMemo(
+    () => anniversariesByDate[selectedDate] || [],
+    [anniversariesByDate, selectedDate]
   );
 
   const selectedDayEvents = useMemo(() => {
@@ -1322,6 +1503,28 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
     setEditorOpen(true);
   };
 
+  const handleSelectAnniversarySummary = useCallback(
+    (summary: AnniversaryDDaySummary) => {
+      const targetDate = summary.primaryOccurrence.solarDate;
+      const p = parseYmd(targetDate);
+      jumpToYearMonth(p.year, p.month - 1);
+      setSelectedDate(targetDate);
+      setDetailAnniversary({
+        anniversary: summary.anniversary,
+        occurrence: summary.primaryOccurrence,
+      });
+    },
+    [jumpToYearMonth]
+  );
+
+  const handleAnniversaryCellClick = useCallback((_e: React.MouseEvent, occ: AnniversaryOccurrence) => {
+    setSelectedDate(occ.solarDate);
+    setDetailAnniversary({
+      anniversary: occ.anniversary,
+      occurrence: occ,
+    });
+  }, []);
+
   const weekdays = language === 'ja' ? WEEKDAYS_JA : language === 'en' ? WEEKDAYS_EN : WEEKDAYS_KO;
   const headerYM = animTargetYM ?? { year: viewYear, month0: viewMonth0 };
 
@@ -1446,6 +1649,14 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
         </div>
       </div>
 
+      {/* Collapsible D-Day Summary Bar (persists collapsed/expanded state in localStorage) */}
+      <CalendarAnniversaryBar
+        anniversaries={anniversaries}
+        todayStr={todayStr}
+        onSelectAnniversary={handleSelectAnniversarySummary}
+        onManageAnniversaries={() => setAnniversaryManagerOpen(true)}
+      />
+
       {/* Active Move / Copy Mode Banner */}
       {pendingAction && (
         <div className="p-3 rounded-xl bg-forest-800 text-white flex flex-wrap items-center justify-between gap-2 shadow-md animate-pulse">
@@ -1529,6 +1740,8 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
               <CalendarMonthPane
                 weeks={prevWeeks}
                 expandedInstances={prevExpandedInstances}
+                anniversariesByDate={prevAnniversariesByDate}
+                shiftBadgesByDate={shiftBadgesByDate}
                 weekdays={weekdays}
                 todayStr={todayStr}
                 selectedDate={selectedDate}
@@ -1547,6 +1760,8 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
               <CalendarMonthPane
                 weeks={weeks}
                 expandedInstances={expandedInstances}
+                anniversariesByDate={anniversariesByDate}
+                shiftBadgesByDate={shiftBadgesByDate}
                 weekdays={weekdays}
                 todayStr={todayStr}
                 selectedDate={selectedDate}
@@ -1570,6 +1785,7 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
                 onEventClick={handleEventClick}
                 onEventContextMenu={handleEventContextMenu}
                 onEventPointerDown={handleEventPointerDown}
+                onAnniversaryClick={handleAnniversaryCellClick}
               />
             </div>
 
@@ -1587,6 +1803,8 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
               <CalendarMonthPane
                 weeks={nextWeeks}
                 expandedInstances={nextExpandedInstances}
+                anniversariesByDate={nextAnniversariesByDate}
+                shiftBadgesByDate={shiftBadgesByDate}
                 weekdays={weekdays}
                 todayStr={todayStr}
                 selectedDate={selectedDate}
@@ -1619,8 +1837,31 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
         <div className="hidden xl:block xl:sticky xl:top-16 bg-white rounded-2xl border border-ivory-300 overflow-hidden shadow-2xs">
           <div className="px-4 py-3 bg-ivory-50 border-b border-ivory-200 flex items-center justify-between gap-2">
             <div>
-              <div className="text-xs font-bold text-forest-800">{selectedDate}</div>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <div className="text-xs font-bold text-forest-800">{selectedDate}</div>
+                {selectedDayShiftBadge && (
+                  <span className="inline-flex items-center gap-1">
+                    <span
+                      title={selectedDayShiftBadge.title}
+                      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-bold leading-none ${selectedDayShiftBadge.className}`}
+                    >
+                      <span>{selectedDayShiftBadge.label}</span>
+                      <span className="font-semibold opacity-90">{selectedDayShiftBadge.title}</span>
+                    </span>
+                  </span>
+                )}
+              </div>
               <div className="text-[11px] text-charcoal-500">
+                {selectedDayAnniversaries.length > 0 && (
+                  <span className="text-rose-700 font-bold mr-1">
+                    {L(
+                      `기념일 ${selectedDayAnniversaries.length}건`,
+                      `記念日 ${selectedDayAnniversaries.length}件`,
+                      `${selectedDayAnniversaries.length} anniv.`
+                    )}
+                    {' · '}
+                  </span>
+                )}
                 {L(
                   `선택한 날짜의 일정 ${selectedDayEvents.length}건`,
                   `選択日の予定 ${selectedDayEvents.length}件`,
@@ -1650,7 +1891,107 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
           </div>
 
           <div className="p-3.5 space-y-2.5 max-h-[calc(100vh-12rem)] overflow-y-auto">
-            {selectedDayEvents.length === 0 ? (
+            {/* Anniversaries on selected date */}
+            {selectedDayAnniversaries.map((occ) => {
+              const ann = occ.anniversary;
+              const dday = computeAnniversaryDDay(ann, todayStr);
+              const cardKey = `cal-anniv-${ann.id}`;
+              const cardTrans = translator.isTranslated(cardKey);
+              const showTrans = translator.shouldShowButton(ann.title, ann.memo);
+              const dispTitle = translator.getText(cardKey, 'title', ann.title);
+              const dispMemo = translator.getText(cardKey, 'memo', ann.memo);
+              return (
+                <div
+                  key={occ.occurrenceKey}
+                  onClick={() => setDetailAnniversary({ anniversary: ann, occurrence: occ })}
+                  className="p-3 rounded-xl border border-rose-200 bg-rose-50/55 hover:border-rose-400 hover:bg-rose-50 transition cursor-pointer"
+                >
+                  <div className="flex items-start gap-2.5">
+                    <span className="w-7 h-7 rounded-lg bg-rose-100 text-rose-700 flex items-center justify-center shrink-0 mt-0.5">
+                      <Cake className="w-4 h-4" />
+                    </span>
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {dday && (
+                          <span
+                            className={`px-1.5 py-0.5 rounded-full text-[10px] font-extrabold shrink-0 ${
+                              dday.primaryDiffDays === 0
+                                ? 'bg-rose-600 text-white'
+                                : dday.primaryDiffDays > 0
+                                  ? 'bg-forest-800 text-white'
+                                  : 'bg-amber-600 text-white'
+                            }`}
+                          >
+                            {dday.primaryLabel}
+                          </span>
+                        )}
+                        {dday?.elapsedLabel && (
+                          <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-950 text-[10px] font-bold shrink-0">
+                            {dday.elapsedLabel}
+                          </span>
+                        )}
+                        <span className="text-xs sm:text-[13px] font-bold text-rose-950 leading-snug break-words">
+                          {dispTitle}
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-charcoal-600">
+                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-white border border-rose-200 font-bold text-[10px]">
+                          {ann.calendar_type === 'LUNAR' ? (
+                            <Moon className="w-3 h-3 text-indigo-700" />
+                          ) : (
+                            <Sun className="w-3 h-3 text-amber-600" />
+                          )}
+                          <span>{formatBaseCalendarBadge(ann, L)}</span>
+                        </span>
+                        {ann.is_recurring && <Repeat className="w-3 h-3 text-rose-600" />}
+                        {(occ.adjustedFromLeapToNormal || occ.adjustedFrom30To29) && (
+                          <span className="text-[10px] font-bold text-amber-800">
+                            {[
+                              occ.adjustedFromLeapToNormal ? L('평달 보정', '平月補正', 'normal mo.') : '',
+                              occ.adjustedFrom30To29 ? L('29일 보정', '29日補正', 'day 29') : '',
+                            ]
+                              .filter(Boolean)
+                              .join(' · ')}
+                          </span>
+                        )}
+                      </div>
+
+                      {ann.memo && (
+                        <p
+                          className={`text-[11px] text-charcoal-700 whitespace-pre-wrap leading-relaxed ${
+                            cardTrans ? '' : 'line-clamp-2'
+                          }`}
+                        >
+                          {dispMemo}
+                        </p>
+                      )}
+
+                      {showTrans && (
+                        <div className="pt-0.5">
+                          <TranslateButton
+                            visible={showTrans}
+                            translated={cardTrans}
+                            loading={translator.isTranslating(cardKey)}
+                            error={translator.getError(cardKey)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void translator.toggleTranslate(
+                                cardKey,
+                                { title: ann.title, memo: ann.memo },
+                                'shared-calendar-anniversary'
+                              );
+                            }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+
+            {selectedDayEvents.length === 0 && selectedDayAnniversaries.length === 0 ? (
               <div className="py-10 text-center space-y-2">
                 <p className="text-xs text-charcoal-400">
                   {L('이 날에 등록된 일정이 없습니다.', 'この日の予定はありません。', 'No events on this day.')}
@@ -1935,8 +2276,14 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
         isCardDragging={Boolean(cardDragState)}
         onClose={() => setMobileDaySheetOpen(false)}
         selectedDate={selectedDate}
+        todayStr={todayStr}
         dayEvents={selectedDayEvents}
+        dayAnniversaries={selectedDayAnniversaries}
+        dayShiftBadge={selectedDayShiftBadge}
         onOpenEventDetail={(id) => setDetailEventId(id)}
+        onOpenAnniversaryDetail={(occ) =>
+          setDetailAnniversary({ anniversary: occ.anniversary, occurrence: occ })
+        }
         onOpenNewEvent={(ymd) => openNewEventForDate(ymd)}
         onOpenRecentCopy={(ymd) => setQuickAddDate(ymd)}
         onStartMove={(ev) => setPendingAction({ type: 'move', event: ev })}
@@ -1945,6 +2292,32 @@ export const SharedCalendarPage: React.FC<SharedCalendarPageProps> = ({
         onUpdateCardDragMove={handleUpdateCardDragMove}
         onEndCardDragMove={handleEndCardDragMove}
         onCancelCardDragMove={handleCancelCardDragMove}
+      />
+
+      {/* Anniversary Detail Modal */}
+      <AnniversaryDetailModal
+        isOpen={Boolean(detailAnniversary)}
+        onClose={() => setDetailAnniversary(null)}
+        anniversary={detailAnniversary?.anniversary ?? null}
+        focusedOccurrence={detailAnniversary?.occurrence ?? null}
+        todayStr={todayStr}
+        onJumpToDate={(ymd) => {
+          const p = parseYmd(ymd);
+          jumpToYearMonth(p.year, p.month - 1);
+          setSelectedDate(ymd);
+        }}
+        onOpenManage={() => setAnniversaryManagerOpen(true)}
+      />
+
+      {/* Dedicated Anniversaries & D-Day Manager Modal */}
+      <AnniversaryManagerModal
+        isOpen={anniversaryManagerOpen}
+        onClose={() => setAnniversaryManagerOpen(false)}
+        space={activeSpace}
+        onChanged={async () => {
+          await loadEvents();
+          onSpacesNeedRefresh();
+        }}
       />
 
       {/* Floating Ghost Pill during Mobile/Touch Card Drag-and-Drop */}

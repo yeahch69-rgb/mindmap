@@ -17,18 +17,13 @@ export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, 
   useModalBackHandler(isOpen, onClose);
 
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
     if (isOpen) {
       document.body.style.overflow = 'hidden';
-      window.addEventListener('keydown', handleKeyDown);
     }
     return () => {
       document.body.style.overflow = 'unset';
-      window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -45,7 +40,7 @@ export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, 
 
   return createPortal(
     <div className="fixed inset-0 z-50 m-0 overflow-hidden lg:overflow-y-auto bg-charcoal-900/60 backdrop-blur-sm flex items-stretch lg:items-center justify-center p-0 lg:p-4">
-      <div className="hidden lg:block fixed inset-0" onClick={onClose} aria-hidden="true" />
+      <div className="hidden lg:block fixed inset-0" aria-hidden="true" />
       <div
         className={`relative w-full h-full lg:h-auto lg:max-h-[90vh] ${lgMaxWidthClass} bg-white rounded-none lg:rounded-xl shadow-none lg:shadow-2xl border-0 lg:border lg:border-ivory-300 flex flex-col overflow-hidden transform transition-all m-0 lg:my-8 z-10`}
       >

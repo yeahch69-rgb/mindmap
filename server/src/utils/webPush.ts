@@ -1,12 +1,20 @@
 import https from 'node:https';
 import webpush from 'web-push';
 import { db } from '../db/database.js';
+import { scheduleCloudBackup } from '../db/cloudSync.js';
 import {
   getJstDateStr,
   getJstDateStrWithDayOffset,
   getJstDateTimeStr,
   getJstTimeStr,
 } from './jstTime.js';
+import {
+  addDaysYmd,
+  diffDaysYmd as diffSignedDaysYmd,
+  expandAnniversariesForRange,
+  normalizeReminderDays,
+  SpaceAnniversaryRecord,
+} from './anniversaryLunar.js';
 
 const pushHttpsAgent = new https.Agent({
   keepAlive: true,
@@ -455,6 +463,7 @@ async function runJournalReminderChecks() {
     }
 
     await sendCalendarEventReminders(todayJst, tomorrowJst, nowMin, nowJst);
+    await sendAnniversaryReminders(todayJst, nowHHMM, nowJst);
   } catch (err: any) {
     console.warn('Mindmap push reminder check error:', err?.message || err);
   }
@@ -595,6 +604,193 @@ async function sendCalendarEventReminders(
       }
     }
   }
+}
+
+export function buildAnniversaryPushPayload(params: {
+  spaceId: number;
+  spaceName: string;
+  anniversaryId: number;
+  title: string;
+  occurrenceDate: string;
+  daysBefore: number;
+  calendarType: 'SOLAR' | 'LUNAR';
+  lunarMonth: number | null;
+  lunarDay: number | null;
+  isLeapMonth: boolean;
+  adjustedFromLeapToNormal: boolean;
+  adjustedFrom30To29: boolean;
+}): PushNotificationPayload {
+  const shortTitle = truncateText(params.title, 36);
+  const spaceName = params.spaceName || 'Shared Space';
+
+  const timingKo =
+    params.daysBefore === 0
+      ? '오늘 D-Day'
+      : `D-${params.daysBefore} (${params.daysBefore}일 전)`;
+  const timingJa =
+    params.daysBefore === 0
+      ? '今日 D-Day'
+      : `D-${params.daysBefore} (${params.daysBefore}日前)`;
+  const timingEn =
+    params.daysBefore === 0
+      ? 'Today (D-Day)'
+      : `D-${params.daysBefore} (${params.daysBefore} day${params.daysBefore === 1 ? '' : 's'} left)`;
+
+  let lunarSuffixKo = '';
+  let lunarSuffixJa = '';
+  let lunarSuffixEn = '';
+
+  if (params.calendarType === 'LUNAR' && params.lunarMonth && params.lunarDay) {
+    const leapKo = params.isLeapMonth ? '윤' : '';
+    const leapJa = params.isLeapMonth ? '閏' : '';
+    const leapEn = params.isLeapMonth ? 'Leap ' : '';
+
+    const adjPartsKo: string[] = [];
+    const adjPartsJa: string[] = [];
+    const adjPartsEn: string[] = [];
+    if (params.adjustedFromLeapToNormal) {
+      adjPartsKo.push('평달 보정');
+      adjPartsJa.push('平月補正');
+      adjPartsEn.push('normal month');
+    }
+    if (params.adjustedFrom30To29) {
+      adjPartsKo.push('29일 보정');
+      adjPartsJa.push('29日補正');
+      adjPartsEn.push('day 29');
+    }
+
+    const adjKo = adjPartsKo.length > 0 ? `, ${adjPartsKo.join('·')}` : '';
+    const adjJa = adjPartsJa.length > 0 ? `・${adjPartsJa.join('・')}` : '';
+    const adjEn = adjPartsEn.length > 0 ? `, adjusted: ${adjPartsEn.join(', ')}` : '';
+
+    lunarSuffixKo = ` · 음력 ${leapKo}${params.lunarMonth}.${params.lunarDay}${adjKo}`;
+    lunarSuffixJa = ` · 韓国旧暦 ${leapJa}${params.lunarMonth}/${params.lunarDay}${adjJa}`;
+    lunarSuffixEn = ` · Korean Lunar ${leapEn}${params.lunarMonth}/${params.lunarDay}${adjEn}`;
+  }
+
+  return {
+    titleKo: `🎂 ${spaceName} · 기념일 알림`,
+    bodyKo: `[${timingKo}] ${shortTitle} (${params.occurrenceDate}${lunarSuffixKo})`,
+    titleJa: `🎂 ${spaceName} · 記念日リマインド`,
+    bodyJa: `[${timingJa}] ${shortTitle} (${params.occurrenceDate}${lunarSuffixJa})`,
+    titleEn: `🎂 ${spaceName} · Anniversary Reminder`,
+    bodyEn: `[${timingEn}] ${shortTitle} (${params.occurrenceDate}${lunarSuffixEn})`,
+    url: `/?tab=calendar&space=${params.spaceId}&date=${params.occurrenceDate}`,
+    tag: `space-anniv-${params.anniversaryId}-${params.occurrenceDate}-d${params.daysBefore}`,
+  };
+}
+
+export async function sendAnniversaryReminders(
+  todayJst: string,
+  nowHHMM: string,
+  nowJst: string,
+  sender: (userIds: number[], payload: PushNotificationPayload) => Promise<number> = sendPushToUsers
+): Promise<number> {
+  // Deliver anniversary reminders from 09:00 JST onward (idempotent across restarts via DB log)
+  if (nowHHMM < '09:00') return 0;
+
+  // Prune anniversary push logs older than 400 days (JST)
+  const pruneCutoff = `${getJstDateStrWithDayOffset(-400)} 00:00:00`;
+  db.prepare('DELETE FROM space_anniversary_push_logs WHERE sent_at < ?').run(pruneCutoff);
+
+  const rows = db
+    .prepare(`
+      SELECT a.*, s.name as space_name
+      FROM space_anniversaries a
+      INNER JOIN collab_spaces s ON s.id = a.space_id
+      WHERE a.reminder_days_json IS NOT NULL
+        AND TRIM(a.reminder_days_json) != ''
+        AND TRIM(a.reminder_days_json) != '[]'
+    `)
+    .all() as any[];
+
+  if (rows.length === 0) return 0;
+
+  let totalSentLogs = 0;
+
+  for (const row of rows) {
+    const reminderDays = normalizeReminderDays(row.reminder_days_json);
+    if (reminderDays.length === 0) continue;
+
+    const maxOffset = Math.max(...reminderDays);
+    const rangeEnd = addDaysYmd(todayJst, maxOffset);
+
+    const record: SpaceAnniversaryRecord = {
+      id: Number(row.id),
+      space_id: Number(row.space_id),
+      title: String(row.title || ''),
+      memo: String(row.memo || ''),
+      calendar_type: row.calendar_type === 'LUNAR' ? 'LUNAR' : 'SOLAR',
+      base_date: String(row.base_date || ''),
+      is_leap_month: Boolean(row.is_leap_month),
+      is_recurring: Boolean(row.is_recurring),
+      reminder_days: reminderDays,
+      created_by: Number(row.created_by),
+      creator_name: '',
+      updated_by: row.updated_by ? Number(row.updated_by) : null,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+
+    const occurrences = expandAnniversariesForRange([record], todayJst, rangeEnd);
+    if (occurrences.length === 0) continue;
+
+    let cachedMemberIds: number[] | null = null;
+
+    for (const occ of occurrences) {
+      const daysBefore = diffSignedDaysYmd(todayJst, occ.solarDate);
+      if (!reminderDays.includes(daysBefore)) continue;
+
+      const alreadySent = db
+        .prepare(`
+          SELECT 1
+          FROM space_anniversary_push_logs
+          WHERE anniversary_id = ? AND occurrence_date = ? AND reminder_day = ?
+        `)
+        .get(record.id, occ.solarDate, daysBefore);
+      if (alreadySent) continue;
+
+      if (cachedMemberIds === null) {
+        const memberRows = db
+          .prepare('SELECT user_id FROM collab_space_members WHERE space_id = ?')
+          .all(record.space_id) as Array<{ user_id: number }>;
+        cachedMemberIds = Array.from(
+          new Set(memberRows.map((m) => Number(m.user_id)).filter((id) => Number.isInteger(id) && id > 0))
+        );
+      }
+      if (cachedMemberIds.length === 0) continue;
+
+      const payload = buildAnniversaryPushPayload({
+        spaceId: record.space_id,
+        spaceName: String(row.space_name || 'Shared Space'),
+        anniversaryId: record.id,
+        title: record.title,
+        occurrenceDate: occ.solarDate,
+        daysBefore,
+        calendarType: record.calendar_type,
+        lunarMonth: occ.lunarMonth,
+        lunarDay: occ.lunarDay,
+        isLeapMonth: occ.isLeapMonth,
+        adjustedFromLeapToNormal: occ.adjustedFromLeapToNormal,
+        adjustedFrom30To29: occ.adjustedFrom30To29,
+      });
+
+      const sent = await sender(cachedMemberIds, payload);
+      if (sent > 0) {
+        db.prepare(`
+          INSERT OR IGNORE INTO space_anniversary_push_logs (anniversary_id, occurrence_date, reminder_day, sent_at)
+          VALUES (?, ?, ?, ?)
+        `).run(record.id, occ.solarDate, daysBefore, nowJst);
+        totalSentLogs += 1;
+      }
+    }
+  }
+
+  if (totalSentLogs > 0) {
+    scheduleCloudBackup('anniversary_push_log', 2000);
+  }
+
+  return totalSentLogs;
 }
 
 export function startPushScheduler() {

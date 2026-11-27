@@ -14,6 +14,7 @@ import {
 } from './db/cloudSync.js';
 import { authenticateToken, requireAdmin } from './middleware/auth.js';
 import { initWebPush, startPushScheduler } from './utils/webPush.js';
+import { startNygcShiftSyncScheduler } from './services/nygcShiftSync.js';
 import authRoutes, { ensureAdminAccount } from './routes/auth.js';
 import adminRoutes from './routes/admin.js';
 import journalRoutes from './routes/journal.js';
@@ -87,6 +88,7 @@ async function bootstrap() {
   ensureAdminAccount();
   initWebPush();
   startPushScheduler();
+  startNygcShiftSyncScheduler();
   startCloudSyncDaemon();
 
   app.listen(PORT, () => {

@@ -135,6 +135,25 @@ export interface CrossLinkBadge {
 export type RecurrenceType = 'NONE' | 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY';
 export type EventStatus = 'PROPOSED' | 'CONFIRMED' | 'CANCELLED';
 
+export type AnniversaryCalendarType = 'SOLAR' | 'LUNAR';
+
+export interface SpaceAnniversary {
+  id: number;
+  space_id: number;
+  title: string;
+  memo: string;
+  calendar_type: AnniversaryCalendarType;
+  base_date: string; // YYYY-MM-DD (Gregorian if SOLAR, Korean Lunar if LUNAR)
+  is_leap_month: boolean;
+  is_recurring: boolean;
+  reminder_days: number[]; // e.g. [] | [0] | [0, 1, 3, 7]
+  created_by: number;
+  creator_name: string;
+  updated_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface CalendarEventItem {
   id: number;
   space_id: number;
